@@ -191,6 +191,21 @@ cmd_kasm() {
     -e "VNC_PW=${KASM_PW}" \
     -v "${KASM_VOLUME}:/home/kasm-user" \
     "$KASM_IMAGE" >/dev/null
+  # Kasm's auto-launch can leave a black screen after an emulated first-launch crash
+  # (which also drops a stale profile lock). Wait for the desktop, then make sure
+  # Chrome is actually running.
+  echo "Waiting for the desktop, then ensuring Chrome is up ..."
+  sleep 12
+  # shellcheck disable=SC2016  # $(pgrep) and $DISPLAY must expand inside the container, not here
+  "$eng" exec "$KASM_NAME" bash -c '
+    export DISPLAY=:1
+    if [ "$(pgrep -c chrome)" -eq 0 ]; then
+      rm -f /home/kasm-user/.config/google-chrome/Singleton* 2>/dev/null
+      nohup /opt/google/chrome/google-chrome --no-sandbox --start-maximized \
+        --user-data-dir=/home/kasm-user/.config/google-chrome https://www.google.com \
+        >/tmp/chrome.log 2>&1 &
+    fi
+  ' >/dev/null 2>&1 || true
   echo "Up. Open https://localhost:${KASM_PORT}  (accept the self-signed cert),"
   echo "log in as kasm_user / ${KASM_PW}, then sign into Google in Chrome."
 }
