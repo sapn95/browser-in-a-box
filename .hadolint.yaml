@@ -1,4 +1,7 @@
 # DL3007: we intentionally track the upstream Neko flavour tag (e.g. :chromium);
 # the weekly rebuild workflow refreshes it. Renovate manages pinned deps elsewhere.
+# DL3002: Neko's s6-overlay/supervisord entrypoint must start as root (it drops
+# privileges itself), so a root USER is required here.
 ignored:
   - DL3007
+  - DL3002

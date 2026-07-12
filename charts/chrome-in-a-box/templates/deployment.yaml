@@ -39,6 +39,8 @@ spec:
             - name: NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD
               value: {{ .Values.auth.adminPassword | quote }}
             {{- end }}
+            - name: NEKO_SESSION_IMPLICIT_HOSTING
+              value: "true"
             - name: NEKO_WEBRTC_TCPMUX
               value: {{ .Values.webrtc.tcpmux | quote }}
             - name: NEKO_WEBRTC_NAT1TO1
