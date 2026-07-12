@@ -92,7 +92,7 @@ cmd_up() {
 cmd_forward() {
   need kubectl
   echo "Forwarding ${WEB_PORT} + ${TCPMUX_PORT} … Ctrl-C to stop."
-  echo "Open http://localhost:${WEB_PORT}  (no login)"
+  echo "Open http://localhost:${WEB_PORT}/?usr=chrome&pwd=neko  (auto-login)"
   kubectl --context "$PROFILE" -n "$NS" port-forward "svc/$RELEASE" \
     "${WEB_PORT}:8080" "${TCPMUX_PORT}:8081"
 }
@@ -112,7 +112,7 @@ cmd_chrome() {
     -e NEKO_MEMBER_PROVIDER=noauth \
     -v "${CHROME_VOLUME}:/home/neko" \
     "$CHROME_IMAGE" >/dev/null
-  echo "Up. Open http://localhost:${WEB_PORT}  (no login), then sign into Google."
+  echo "Up. Open http://localhost:${WEB_PORT}/?usr=chrome&pwd=neko  (auto-login), then sign into Google."
   echo "amd64/emulated → slower than native. Stop with: ./run.sh chrome-down"
 }
 
@@ -126,7 +126,7 @@ case "${1:-}" in
   forward)     cmd_forward ;;
   chrome)      cmd_chrome ;;
   chrome-down) cmd_chrome_down ;;
-  open)        open "http://localhost:${WEB_PORT}" 2>/dev/null || echo "Open http://localhost:${WEB_PORT}" ;;
+  open)        open "http://localhost:${WEB_PORT}/?usr=chrome&pwd=neko" 2>/dev/null || echo "Open http://localhost:${WEB_PORT}/?usr=chrome&pwd=neko" ;;
   status)      kubectl --context "$PROFILE" -n "$NS" get pods,svc ;;
   logs)        kubectl --context "$PROFILE" -n "$NS" logs -f "deploy/$RELEASE" ;;
   down)        helm --kube-context "$PROFILE" uninstall "$RELEASE" -n "$NS" && echo "uninstalled (cluster kept; ./run.sh nuke to remove it)" ;;
