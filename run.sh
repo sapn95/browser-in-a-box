@@ -189,7 +189,8 @@ cmd_kasm() {
     --shm-size=2g --security-opt seccomp=unconfined \
     -p "127.0.0.1:${KASM_PORT}:6901" \
     -e "VNC_PW=${KASM_PW}" \
-    -e "VNC_RESOLUTION=${KASM_RES:-1920x1080}" \
+    -e "VNC_RESOLUTION=${KASM_RES:-2560x1600}" \
+    -e "VNCOPTIONS=-DynamicQualityMin=8 -DynamicQualityMax=10 -DLP_ClipDelay=0" \
     -v "${KASM_VOLUME}:/home/kasm-user" \
     "$KASM_IMAGE" >/dev/null
   # Kasm's auto-launch can leave a black screen after an emulated first-launch crash
@@ -207,9 +208,10 @@ cmd_kasm() {
         >/tmp/chrome.log 2>&1 &
     fi
   ' >/dev/null 2>&1 || true
-  echo "Up. Open https://localhost:${KASM_PORT}/?resize=remote  (accept the self-signed cert),"
+  echo "Up. Open https://localhost:${KASM_PORT}/?resize=scale  (accept the self-signed cert),"
   echo "log in as kasm_user / ${KASM_PW}, then sign into Google in Chrome."
-  echo "(?resize=remote = native resolution auto-fitted to your browser window.)"
+  echo "(High fixed resolution + ?resize=scale = crisp on a HiDPI/Retina display."
+  echo " For maximum sharpness set your screen's physical res, e.g. KASM_RES=3456x2160.)"
 }
 
 cmd_kasm_down() {
