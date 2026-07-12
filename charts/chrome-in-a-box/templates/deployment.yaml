@@ -41,6 +41,8 @@ spec:
             {{- end }}
             - name: NEKO_SESSION_IMPLICIT_HOSTING
               value: "true"
+            - name: NEKO_LEGACY
+              value: "false"
             - name: NEKO_WEBRTC_TCPMUX
               value: {{ .Values.webrtc.tcpmux | quote }}
             - name: NEKO_WEBRTC_NAT1TO1

@@ -155,6 +155,7 @@ cmd_chrome() {
     -e NEKO_WEBRTC_ICELITE=1 \
     -e NEKO_MEMBER_PROVIDER=noauth \
     -e NEKO_SESSION_IMPLICIT_HOSTING=true \
+    -e NEKO_LEGACY=false \
     -v "${CHROME_VOLUME}:/home/neko" \
     "$CHROME_IMAGE_LOCAL" >/dev/null
   chrome_healthcheck "$eng"
