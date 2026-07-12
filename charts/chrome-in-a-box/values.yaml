@@ -6,8 +6,10 @@ image:
 
 replicaCount: 1
 
-# Web-UI login (Neko multiuser).
+# Web-UI auth. "noauth" = no login prompt (fine here: reachable only via a
+# localhost port-forward). Use "multiuser" with the passwords below to require login.
 auth:
+  provider: noauth
   userPassword: neko
   adminPassword: admin
 

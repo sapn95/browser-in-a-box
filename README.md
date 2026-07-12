@@ -36,7 +36,7 @@ created just for this and never touches any other kube-context you have set.
 ./run.sh up          # start local minikube + helm upgrade --install
 ./run.sh forward     # port-forward to localhost (foreground, Ctrl-C to stop)
 ./run.sh open        # open http://localhost:8080
-# log in with user "neko" / password "neko"
+# no login — the UI is only reachable via localhost
 ```
 
 Tear down:

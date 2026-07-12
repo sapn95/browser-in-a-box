@@ -6,6 +6,10 @@ chrome-in-a-box ({{ .Values.image.tag }}) is deployed to namespace "{{ .Release.
      {{ .Values.service.webPort }}:{{ .Values.service.webPort }} {{ .Values.webrtc.tcpmux }}:{{ .Values.webrtc.tcpmux }}
 
 2. Open http://localhost:{{ .Values.service.webPort }}
+   {{- if eq .Values.auth.provider "noauth" }}
+   No login required.
+   {{- else }}
    Login: user "neko" / password "{{ .Values.auth.userPassword }}"
+   {{- end }}
 
 Tip: `./run.sh forward` does step 1 for you.

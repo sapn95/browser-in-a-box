@@ -31,10 +31,14 @@ spec:
           env:
             - name: NEKO_DESKTOP_SCREEN
               value: {{ .Values.desktop.screen | quote }}
+            - name: NEKO_MEMBER_PROVIDER
+              value: {{ .Values.auth.provider | quote }}
+            {{- if eq .Values.auth.provider "multiuser" }}
             - name: NEKO_MEMBER_MULTIUSER_USER_PASSWORD
               value: {{ .Values.auth.userPassword | quote }}
             - name: NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD
               value: {{ .Values.auth.adminPassword | quote }}
+            {{- end }}
             - name: NEKO_WEBRTC_TCPMUX
               value: {{ .Values.webrtc.tcpmux | quote }}
             - name: NEKO_WEBRTC_NAT1TO1

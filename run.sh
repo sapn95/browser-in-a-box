@@ -92,7 +92,7 @@ cmd_up() {
 cmd_forward() {
   need kubectl
   echo "Forwarding ${WEB_PORT} + ${TCPMUX_PORT} … Ctrl-C to stop."
-  echo "Open http://localhost:${WEB_PORT}  (login: neko / neko)"
+  echo "Open http://localhost:${WEB_PORT}  (no login)"
   kubectl --context "$PROFILE" -n "$NS" port-forward "svc/$RELEASE" \
     "${WEB_PORT}:8080" "${TCPMUX_PORT}:8081"
 }
@@ -109,11 +109,10 @@ cmd_chrome() {
     -e "NEKO_WEBRTC_TCPMUX=${TCPMUX_PORT}" \
     -e NEKO_WEBRTC_NAT1TO1=127.0.0.1 \
     -e NEKO_WEBRTC_ICELITE=1 \
-    -e NEKO_MEMBER_MULTIUSER_USER_PASSWORD=neko \
-    -e NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD=admin \
+    -e NEKO_MEMBER_PROVIDER=noauth \
     -v "${CHROME_VOLUME}:/home/neko" \
     "$CHROME_IMAGE" >/dev/null
-  echo "Up. Open http://localhost:${WEB_PORT}  (login: neko / neko), then sign into Google."
+  echo "Up. Open http://localhost:${WEB_PORT}  (no login), then sign into Google."
   echo "amd64/emulated → slower than native. Stop with: ./run.sh chrome-down"
 }
 
