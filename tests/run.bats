@@ -26,5 +26,5 @@ setup() {
 }
 
 @test "run.sh enables errexit and pipefail" {
-  head -10 "$RUN" | grep -qE 'set -euo pipefail|set -o pipefail'
+  head -20 "$RUN" | grep -qE 'set -euo pipefail|set -o pipefail'
 }

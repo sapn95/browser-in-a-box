@@ -1,6 +1,6 @@
 image:
   repository: ghcr.io/sapn95/chrome-in-a-box
-  # Browser flavour tag: "chromium" (arm64-native, fast) or "google-chrome" (amd64, adds Google sync).
+  # Browser flavour tag: "chromium" (arm64-native, fast) or "google-chrome" (amd64 only, adds Google sync).
   tag: chromium
   pullPolicy: IfNotPresent
 

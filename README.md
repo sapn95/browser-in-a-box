@@ -51,14 +51,16 @@ then `kubectl port-forward svc/chrome-in-a-box 8080:8080 8081:8081`.
 
 ## Browser flavours
 
-| Flavour        | Value                    | Arch          | Google account sync | Speed on Apple Silicon |
-| -------------- | ------------------------ | ------------- | ------------------- | ---------------------- |
-| **chromium**   | `image.tag=chromium`     | arm64 + amd64 | no                  | native, fast (default) |
-| google-chrome  | `image.tag=google-chrome`| amd64 only    | yes                 | emulated, slower       |
+| Flavour        | How to run        | Arch          | Google account sync | Speed on Apple Silicon |
+| -------------- | ----------------- | ------------- | ------------------- | ---------------------- |
+| **chromium**   | `./run.sh up`     | arm64 + amd64 | no                  | native, fast (default) |
+| google-chrome  | `./run.sh chrome` | amd64 only    | yes                 | emulated, slower       |
 
-Chromium is native and fast and saves passwords locally. Google Chrome adds
-Google account sync but ships amd64-only, so on ARM it runs emulated. Switch with
-`BROWSER=google-chrome ./run.sh up` or `--set image.tag=google-chrome`.
+Chromium is native and fast and saves passwords locally, but has no Google
+account sync — third-party Chromium builds ship without Google's API keys, so the
+Google Password Manager can't be added to it. Google Chrome has it, but its Linux
+build is amd64-only, so on Apple Silicon it runs **emulated** via `./run.sh chrome`
+(podman/docker — not Kubernetes, which would resolve the image to the arm64 node).
 
 ## Build & automation
 

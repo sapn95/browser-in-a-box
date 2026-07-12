@@ -5,7 +5,7 @@
 #
 # BROWSER selects the Neko flavour:
 #   chromium       -> arm64-native, fast, open source (default)
-#   google-chrome  -> amd64 only (emulated on ARM); adds Google account sync
+#   google-chrome  -> amd64 only; adds Google account sync
 ARG BROWSER=chromium
 FROM ghcr.io/m1k1o/neko/${BROWSER}:latest
 
