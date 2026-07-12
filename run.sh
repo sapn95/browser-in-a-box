@@ -189,6 +189,7 @@ cmd_kasm() {
     --shm-size=2g --security-opt seccomp=unconfined \
     -p "127.0.0.1:${KASM_PORT}:6901" \
     -e "VNC_PW=${KASM_PW}" \
+    -e "VNC_RESOLUTION=${KASM_RES:-1920x1080}" \
     -v "${KASM_VOLUME}:/home/kasm-user" \
     "$KASM_IMAGE" >/dev/null
   # Kasm's auto-launch can leave a black screen after an emulated first-launch crash
@@ -206,8 +207,9 @@ cmd_kasm() {
         >/tmp/chrome.log 2>&1 &
     fi
   ' >/dev/null 2>&1 || true
-  echo "Up. Open https://localhost:${KASM_PORT}  (accept the self-signed cert),"
+  echo "Up. Open https://localhost:${KASM_PORT}/?resize=remote  (accept the self-signed cert),"
   echo "log in as kasm_user / ${KASM_PW}, then sign into Google in Chrome."
+  echo "(?resize=remote = native resolution auto-fitted to your browser window.)"
 }
 
 cmd_kasm_down() {
