@@ -29,6 +29,16 @@ CHROME_NAME="cib-chrome"
 CHROME_IMAGE_LOCAL="chrome-in-a-box:google-chrome-local"
 CHROME_VOLUME="cib-chrome-profile"
 
+# KasmVNC path — real Google Chrome served over a websocket VNC web client. Input rides
+# the websocket, NOT a WebRTC data channel, so ad-blockers / WebRTC-blocking extensions
+# can't silently break it. Chrome is amd64-only -> emulated on Apple Silicon (Rosetta).
+# The KasmVNC password must be >= 6 characters.
+KASM_NAME="cib-kasm-chrome"
+KASM_IMAGE="docker.io/kasmweb/chrome:1.16.0"
+KASM_VOLUME="cib-kasm-chrome-profile"
+KASM_PORT="${KASM_PORT:-6901}"
+KASM_PW="${KASM_PW:-nekobox}"
+
 need() { command -v "$1" >/dev/null 2>&1 || { echo "error: '$1' not found on PATH" >&2; exit 1; }; }
 
 engine() { command -v podman || command -v docker || { echo "error: need podman or docker on PATH" >&2; exit 1; }; }
@@ -71,7 +81,11 @@ Google Chrome via podman/docker (amd64, emulated; adds Google account sync + Pas
   chrome          build & run Google Chrome (fail-fast if it crash-loops under emulation)
   chrome-down     stop & remove the Google Chrome container
 
-  open            open http://localhost:${WEB_PORT} in your browser (works for either path)
+Real Google Chrome over KasmVNC (amd64/emulated; websocket input — ad-blocker-proof; recommended):
+  kasm            run real Google Chrome over KasmVNC (https://localhost:${KASM_PORT}, kasm_user)
+  kasm-down       stop & remove the KasmVNC Chrome container
+
+  open            open http://localhost:${WEB_PORT} in your browser (Neko paths)
 EOF
   exit 1
 }
@@ -166,11 +180,33 @@ cmd_chrome_down() {
   "$eng" rm -f "$CHROME_NAME" >/dev/null 2>&1 && echo "stopped." || echo "not running."
 }
 
+cmd_kasm() {
+  local eng; eng="$(engine)"
+  echo "Starting real Google Chrome over KasmVNC (amd64/emulated; websocket input) ..."
+  "$eng" rm -f "$KASM_NAME" >/dev/null 2>&1 || true
+  "$eng" run -d --name "$KASM_NAME" \
+    --platform linux/amd64 \
+    --shm-size=2g --security-opt seccomp=unconfined \
+    -p "127.0.0.1:${KASM_PORT}:6901" \
+    -e "VNC_PW=${KASM_PW}" \
+    -v "${KASM_VOLUME}:/home/kasm-user" \
+    "$KASM_IMAGE" >/dev/null
+  echo "Up. Open https://localhost:${KASM_PORT}  (accept the self-signed cert),"
+  echo "log in as kasm_user / ${KASM_PW}, then sign into Google in Chrome."
+}
+
+cmd_kasm_down() {
+  local eng; eng="$(engine)"
+  "$eng" rm -f "$KASM_NAME" >/dev/null 2>&1 && echo "stopped." || echo "not running."
+}
+
 case "${1:-}" in
   up)          cmd_up ;;
   forward)     cmd_forward ;;
   chrome)      cmd_chrome ;;
   chrome-down) cmd_chrome_down ;;
+  kasm)        cmd_kasm ;;
+  kasm-down)   cmd_kasm_down ;;
   open)        open "http://localhost:${WEB_PORT}/?usr=chrome&pwd=neko" 2>/dev/null || echo "Open http://localhost:${WEB_PORT}/?usr=chrome&pwd=neko" ;;
   status)      kubectl --context "$PROFILE" -n "$NS" get pods,svc ;;
   logs)        kubectl --context "$PROFILE" -n "$NS" logs -f "deploy/$RELEASE" ;;
