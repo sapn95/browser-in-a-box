@@ -23,12 +23,14 @@ USER root
 COPY policies/recommended.json /etc/chromium/policies/recommended/chrome-in-a-box.json
 COPY policies/recommended.json /etc/opt/chrome/policies/recommended/chrome-in-a-box.json
 
-# Google Chrome is amd64-only, so on Apple Silicon it runs emulated. Multi-process
-# Chrome under QEMU user-mode emulation hits syscalls QEMU doesn't implement
+# Google Chrome is amd64-only, so on Apple Silicon it runs emulated. Under plain QEMU
+# user-mode emulation, multi-process Chrome hits syscalls QEMU doesn't implement
 # (ptrace/prctl) and crash-loops into a black screen; --single-process avoids the
-# child processes. Not needed under Rosetta or on native amd64 (see README).
+# child processes. Under Rosetta (or native amd64) it's not needed, so run.sh passes
+# SINGLE_PROCESS=false there to get faster multi-process Chrome. See the README.
 ARG BROWSER
-RUN if [ "$BROWSER" = "google-chrome" ]; then \
+ARG SINGLE_PROCESS=true
+RUN if [ "$BROWSER" = "google-chrome" ] && [ "$SINGLE_PROCESS" = "true" ]; then \
       grep -q -- '--single-process' /etc/neko/supervisord/google-chrome.conf || \
       sed -i '/--no-sandbox/a\  --single-process' /etc/neko/supervisord/google-chrome.conf; \
     fi

@@ -125,8 +125,20 @@ EOF
 
 cmd_chrome() {
   local eng; eng="$(engine)"
-  echo "Building Google Chrome image (amd64; --single-process baked in) ..."
-  "$eng" build --platform linux/amd64 --build-arg BROWSER=google-chrome -t "$CHROME_IMAGE_LOCAL" "$HERE"
+  # Rosetta runs syscalls natively, so multi-process Chrome is stable and faster.
+  # Without it, fall back to --single-process to avoid the QEMU crash-loop.
+  local single_process="true"
+  if command -v podman >/dev/null 2>&1 && \
+     podman machine inspect podman-machine-default --format '{{.Rosetta}}' 2>/dev/null | grep -qi true; then
+    single_process="false"
+    echo "Rosetta detected — building multi-process Google Chrome (faster)."
+  else
+    echo "No Rosetta — building with --single-process (QEMU emulation workaround)."
+  fi
+  echo "Building Google Chrome image (amd64) ..."
+  "$eng" build --platform linux/amd64 \
+    --build-arg BROWSER=google-chrome --build-arg "SINGLE_PROCESS=${single_process}" \
+    -t "$CHROME_IMAGE_LOCAL" "$HERE"
   "$eng" rm -f "$CHROME_NAME" >/dev/null 2>&1 || true
   # Clear any stale Chrome profile lock from a previous hard stop, otherwise Chrome
   # refuses to start ("profile appears to be in use by another process") -> black screen.

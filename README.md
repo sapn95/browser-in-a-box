@@ -65,30 +65,35 @@ build is amd64-only, so on Apple Silicon it runs **emulated** via `./run.sh chro
 ## Google Chrome on Apple Silicon
 
 Google Chrome's Linux build is amd64-only, so on Apple Silicon `./run.sh chrome`
-runs it emulated. Two things make that work:
+runs it emulated. `./run.sh chrome` auto-detects **Rosetta** and picks the right mode:
 
-- **`--single-process`** is baked into the Google Chrome image. Multi-process
-  Chrome under QEMU user-mode emulation hits syscalls QEMU doesn't implement
-  (`ptrace`/`prctl`) and crash-loops into a black screen; single-process avoids the
-  child processes. `./run.sh chrome` also **fail-fasts**: if Chrome still
-  crash-loops it stops with a clear message instead of leaving a black screen.
+- **With Rosetta** (recommended): syscalls run natively, so Chrome runs full
+  **multi-process** — much faster and stable.
+- **Without Rosetta** (plain QEMU): multi-process Chrome hits syscalls QEMU doesn't
+  implement (`ptrace`/`prctl`) and crash-loops into a black screen, so the image is
+  built with **`--single-process`** instead.
 
-- **Rosetta** is the proper fix — faster than QEMU and without the syscall gaps
-  (so `--single-process` isn't even needed). podman can only enable Rosetta when
-  the machine is created, so it means recreating the podman machine, which wipes
-  its images:
+Either way `./run.sh chrome` **fail-fasts**: if Chrome still crash-loops it stops
+with a clear message instead of leaving a black screen.
 
-  ```bash
-  podman machine stop
-  podman machine rm podman-machine-default
-  podman machine init --rosetta --now
-  ```
+### Enabling Rosetta
 
-  ⚠️ Only do this if the podman machine isn't shared with other work — recreating
-  it removes all its images and containers.
+podman enables Rosetta from `containers.conf` (not a CLI flag), and only when the
+machine is created. Set it, then re-create the machine:
 
-Either way Google Chrome is emulated and slower than native. If you don't need
-Google account sync, the native Chromium path (`./run.sh up`) is much faster.
+```bash
+mkdir -p ~/.config/containers
+printf '[machine]\nprovider = "applehv"\nrosetta = true\n' >> ~/.config/containers/containers.conf
+podman machine stop && podman machine rm -f podman-machine-default
+podman machine init --cpus 4 --memory 5722 --now
+podman machine set --rootful   # only if you also use the minikube path
+```
+
+⚠️ Recreating the machine removes all its images, containers and volumes — only do
+this if it isn't shared with other work.
+
+Even with Rosetta, Google Chrome is emulated and a bit slower than native. If you
+don't need Google account sync, the native Chromium path (`./run.sh up`) is fastest.
 
 ## Build & automation
 
