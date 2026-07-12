@@ -190,7 +190,7 @@ cmd_kasm() {
     -p "127.0.0.1:${KASM_PORT}:6901" \
     -e "VNC_PW=${KASM_PW}" \
     -e "VNC_RESOLUTION=${KASM_RES:-1920x1200}" \
-    -e "VNCOPTIONS=-DynamicQualityMin=8 -DynamicQualityMax=9 -DLP_ClipDelay=0" \
+    -e "VNCOPTIONS=-DisableBasicAuth=1 -DynamicQualityMin=8 -DynamicQualityMax=9 -DLP_ClipDelay=0" \
     -v "${KASM_VOLUME}:/home/kasm-user" \
     "$KASM_IMAGE" >/dev/null
   # Kasm's auto-launch can leave a black screen after an emulated first-launch crash
@@ -202,9 +202,10 @@ cmd_kasm() {
     sleep 2
   done
   sleep 3
-  # shellcheck disable=SC2016  # $(pgrep) and $DISPLAY must expand inside the container, not here
-  "$eng" exec "$KASM_NAME" bash -c '
+  # shellcheck disable=SC2016  # $RES/$(pgrep)/$DISPLAY must expand inside the container, not here
+  "$eng" exec -e "RES=${KASM_RES:-1920x1200}" "$KASM_NAME" bash -c '
     export DISPLAY=:1
+    xrandr -s "$RES" 2>/dev/null || true   # VNC_RESOLUTION env is ignored by this image
     if [ "$(pgrep -c chrome)" -eq 0 ]; then
       rm -f /home/kasm-user/.config/google-chrome/Singleton* 2>/dev/null
       nohup /opt/google/chrome/google-chrome --no-sandbox --start-maximized \
@@ -212,8 +213,8 @@ cmd_kasm() {
         >/tmp/chrome.log 2>&1 &
     fi
   ' >/dev/null 2>&1 || true
-  echo "Up. Open https://localhost:${KASM_PORT}/?resize=scale  (accept the self-signed cert),"
-  echo "log in as kasm_user / ${KASM_PW}, then sign into Google in Chrome."
+  echo "Up. Open https://localhost:${KASM_PORT}/?resize=scale  — no login (accept the"
+  echo "self-signed cert once). Then sign into Google in Chrome."
   echo "(Fixed 1920x1200 + ?resize=scale scales crisply to your window. KasmVNC's"
   echo " built-in modes cap at 1920x1200, so that's the max KASM_RES here.)"
 }
