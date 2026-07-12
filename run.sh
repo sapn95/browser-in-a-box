@@ -101,6 +101,10 @@ cmd_chrome() {
   local eng; eng="$(engine)"
   echo "Starting Google Chrome (amd64, emulated) ..."
   "$eng" rm -f "$CHROME_NAME" >/dev/null 2>&1 || true
+  # Clear any stale Chrome profile lock from a previous hard stop, otherwise Chrome
+  # refuses to start ("profile appears to be in use by another process") -> black screen.
+  "$eng" run --rm -v "${CHROME_VOLUME}:/home/neko" docker.io/library/alpine \
+    sh -c 'rm -f /home/neko/.config/google-chrome/Singleton* /home/neko/.config/chromium/Singleton* 2>/dev/null || true' >/dev/null 2>&1 || true
   "$eng" run -d --name "$CHROME_NAME" \
     --platform linux/amd64 \
     --shm-size=2g --cap-add=SYS_ADMIN --security-opt seccomp=unconfined \
