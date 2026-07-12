@@ -5,6 +5,8 @@
 #   * up/forward  — Chromium (arm64-native, fast) via Helm on a *local* minikube profile.
 #   * chrome      — Google Chrome (amd64-only, emulated on ARM) directly via podman/docker,
 #                   because it needs Google's password sync and can't run as an arm64 pod.
+#                   Emulated Chrome needs --single-process (baked into the image) or it
+#                   crash-loops; see the README section "Google Chrome on Apple Silicon".
 #
 # The minikube profile is dedicated to this project and never touches any other
 # kube-context you may have configured.
@@ -20,11 +22,11 @@ BROWSER="${BROWSER:-chromium}"     # or: google-chrome
 WEB_PORT="${WEB_PORT:-8080}"
 TCPMUX_PORT="${TCPMUX_PORT:-8081}"
 
-# Google Chrome (amd64) path — runs directly under the container engine, emulated on
-# Apple Silicon. Not a Kubernetes workload: k8s resolves images to the arm64 node, which
-# the amd64-only Google Chrome image cannot satisfy.
+# Google Chrome (amd64) path — built locally and run directly under the container
+# engine, emulated on Apple Silicon. Not a Kubernetes workload: k8s resolves images
+# to the arm64 node, which the amd64-only Google Chrome image cannot satisfy.
 CHROME_NAME="cib-chrome"
-CHROME_IMAGE="ghcr.io/m1k1o/neko/google-chrome:latest"
+CHROME_IMAGE_LOCAL="chrome-in-a-box:google-chrome-local"
 CHROME_VOLUME="cib-chrome-profile"
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "error: '$1' not found on PATH" >&2; exit 1; }; }
@@ -66,7 +68,7 @@ Chromium via Helm on a local minikube cluster (arm64-native, fast; no Google syn
   nuke            delete the whole local minikube profile
 
 Google Chrome via podman/docker (amd64, emulated; adds Google account sync + Password Manager):
-  chrome          run Google Chrome (build-free; pulls the upstream image)
+  chrome          build & run Google Chrome (fail-fast if it crash-loops under emulation)
   chrome-down     stop & remove the Google Chrome container
 
   open            open http://localhost:${WEB_PORT} in your browser (works for either path)
@@ -97,14 +99,40 @@ cmd_forward() {
     "${WEB_PORT}:8080" "${TCPMUX_PORT}:8081"
 }
 
+# Fail-fast: confirm Chrome stays up instead of crash-looping into a black screen.
+# Same supervisor PID after a pause == stable; changed/empty == flapping.
+chrome_healthcheck() {
+  local eng="$1" pid1 pid2
+  echo "Health-check: confirming Google Chrome stays up (not crash-looping) ..."
+  sleep 8
+  pid1="$("$eng" exec "$CHROME_NAME" supervisorctl status google-chrome 2>/dev/null | grep -oE 'pid [0-9]+' || true)"
+  sleep 10
+  pid2="$("$eng" exec "$CHROME_NAME" supervisorctl status google-chrome 2>/dev/null | grep -oE 'pid [0-9]+' || true)"
+  if [ -z "$pid1" ] || [ "$pid1" != "$pid2" ]; then
+    cat >&2 <<EOF
+
+error: Google Chrome is crash-looping under emulation (pid '${pid1:-none}' -> '${pid2:-none}').
+On Apple Silicon, QEMU user-mode emulation lacks syscalls Chrome needs. Options:
+  * Enable Rosetta for a stable, faster amd64 runtime — see the README section
+    "Google Chrome on Apple Silicon" (requires recreating the podman machine), or
+  * Use the fast native Chromium instead:  ./run.sh up
+EOF
+    "$eng" logs --tail 5 "$CHROME_NAME" >&2 2>/dev/null || true
+    exit 1
+  fi
+  echo "Healthy (${pid2})."
+}
+
 cmd_chrome() {
   local eng; eng="$(engine)"
-  echo "Starting Google Chrome (amd64, emulated) ..."
+  echo "Building Google Chrome image (amd64; --single-process baked in) ..."
+  "$eng" build --platform linux/amd64 --build-arg BROWSER=google-chrome -t "$CHROME_IMAGE_LOCAL" "$HERE"
   "$eng" rm -f "$CHROME_NAME" >/dev/null 2>&1 || true
   # Clear any stale Chrome profile lock from a previous hard stop, otherwise Chrome
   # refuses to start ("profile appears to be in use by another process") -> black screen.
   "$eng" run --rm -v "${CHROME_VOLUME}:/home/neko" docker.io/library/alpine \
     sh -c 'rm -f /home/neko/.config/google-chrome/Singleton* /home/neko/.config/chromium/Singleton* 2>/dev/null || true' >/dev/null 2>&1 || true
+  echo "Starting Google Chrome (amd64, emulated) ..."
   "$eng" run -d --name "$CHROME_NAME" \
     --platform linux/amd64 \
     --shm-size=2g --cap-add=SYS_ADMIN --security-opt seccomp=unconfined \
@@ -115,9 +143,9 @@ cmd_chrome() {
     -e NEKO_WEBRTC_ICELITE=1 \
     -e NEKO_MEMBER_PROVIDER=noauth \
     -v "${CHROME_VOLUME}:/home/neko" \
-    "$CHROME_IMAGE" >/dev/null
+    "$CHROME_IMAGE_LOCAL" >/dev/null
+  chrome_healthcheck "$eng"
   echo "Up. Open http://localhost:${WEB_PORT}/?usr=chrome&pwd=neko  (auto-login), then sign into Google."
-  echo "amd64/emulated → slower than native. Stop with: ./run.sh chrome-down"
 }
 
 cmd_chrome_down() {

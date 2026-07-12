@@ -62,6 +62,34 @@ Google Password Manager can't be added to it. Google Chrome has it, but its Linu
 build is amd64-only, so on Apple Silicon it runs **emulated** via `./run.sh chrome`
 (podman/docker — not Kubernetes, which would resolve the image to the arm64 node).
 
+## Google Chrome on Apple Silicon
+
+Google Chrome's Linux build is amd64-only, so on Apple Silicon `./run.sh chrome`
+runs it emulated. Two things make that work:
+
+- **`--single-process`** is baked into the Google Chrome image. Multi-process
+  Chrome under QEMU user-mode emulation hits syscalls QEMU doesn't implement
+  (`ptrace`/`prctl`) and crash-loops into a black screen; single-process avoids the
+  child processes. `./run.sh chrome` also **fail-fasts**: if Chrome still
+  crash-loops it stops with a clear message instead of leaving a black screen.
+
+- **Rosetta** is the proper fix — faster than QEMU and without the syscall gaps
+  (so `--single-process` isn't even needed). podman can only enable Rosetta when
+  the machine is created, so it means recreating the podman machine, which wipes
+  its images:
+
+  ```bash
+  podman machine stop
+  podman machine rm podman-machine-default
+  podman machine init --rosetta --now
+  ```
+
+  ⚠️ Only do this if the podman machine isn't shared with other work — recreating
+  it removes all its images and containers.
+
+Either way Google Chrome is emulated and slower than native. If you don't need
+Google account sync, the native Chromium path (`./run.sh up`) is much faster.
+
 ## Build & automation
 
 Everything is published to GitHub Container Registry from CI:
