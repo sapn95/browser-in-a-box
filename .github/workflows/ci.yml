@@ -1,0 +1,63 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+      - name: shellcheck
+        uses: ludeeus/action-shellcheck@master
+      - name: yamllint
+        run: pipx run yamllint .
+
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - run: helm lint charts/chrome-in-a-box
+      - run: helm template chrome-in-a-box charts/chrome-in-a-box
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install bats
+        run: sudo apt-get update && sudo apt-get install -y bats
+      - name: bats
+        run: bats tests/
+
+  image-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: build chromium (amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          build-args: |
+            BROWSER=chromium
+          load: true
+          tags: chrome-in-a-box:test
+      - name: run & healthcheck
+        run: |
+          docker run -d --name cib --shm-size=2g --cap-add=SYS_ADMIN \
+            -p 8080:8080 \
+            -e NEKO_WEBRTC_TCPMUX=8081 -e NEKO_WEBRTC_ICELITE=1 \
+            -e NEKO_MEMBER_MULTIUSER_USER_PASSWORD=neko \
+            chrome-in-a-box:test
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080/ >/dev/null; then echo "web UI up"; exit 0; fi
+            sleep 2
+          done
+          echo "web UI did not come up"; docker logs cib; exit 1

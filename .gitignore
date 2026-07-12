@@ -1,0 +1,9 @@
+# Local Helm/build artefacts
+*.tgz
+charts/*/charts/
+charts/*/Chart.lock
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

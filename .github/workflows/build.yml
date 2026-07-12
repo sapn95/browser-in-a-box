@@ -1,0 +1,66 @@
+name: build
+
+# Publish to GHCR:
+#  - image (both browser flavours) on push to main, on version tags, and weekly
+#  - Helm chart (OCI) on push to main and version tags
+# The weekly schedule rebuilds the image so the floating upstream base is refreshed.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  schedule:
+    - cron: "0 5 * * 1"   # Monday 05:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - flavor: chromium
+            platforms: linux/amd64,linux/arm64
+            tags: |
+              ghcr.io/${{ github.repository }}:latest
+              ghcr.io/${{ github.repository }}:chromium
+          - flavor: google-chrome
+            platforms: linux/amd64
+            tags: |
+              ghcr.io/${{ github.repository }}:google-chrome
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          build-args: |
+            BROWSER=${{ matrix.flavor }}
+          platforms: ${{ matrix.platforms }}
+          push: true
+          tags: ${{ matrix.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  chart:
+    runs-on: ubuntu-latest
+    needs: image
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Package & push chart to GHCR (OCI)
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          helm package charts/chrome-in-a-box -d "$RUNNER_TEMP"
+          helm push "$RUNNER_TEMP"/chrome-in-a-box-*.tgz "oci://ghcr.io/${{ github.repository_owner }}/charts"

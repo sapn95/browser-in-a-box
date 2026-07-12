@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "chrome-in-a-box.fullname" . }}
+  labels:
+    {{- include "chrome-in-a-box.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "chrome-in-a-box.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "chrome-in-a-box.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: browser
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            capabilities:
+              add: ["SYS_ADMIN"]
+            seccompProfile:
+              type: Unconfined
+          ports:
+            - name: web
+              containerPort: 8080
+            - name: tcpmux
+              containerPort: {{ .Values.webrtc.tcpmux }}
+          env:
+            - name: NEKO_DESKTOP_SCREEN
+              value: {{ .Values.desktop.screen | quote }}
+            - name: NEKO_MEMBER_MULTIUSER_USER_PASSWORD
+              value: {{ .Values.auth.userPassword | quote }}
+            - name: NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD
+              value: {{ .Values.auth.adminPassword | quote }}
+            - name: NEKO_WEBRTC_TCPMUX
+              value: {{ .Values.webrtc.tcpmux | quote }}
+            - name: NEKO_WEBRTC_NAT1TO1
+              value: {{ .Values.webrtc.nat1to1 | quote }}
+            - name: NEKO_WEBRTC_ICELITE
+              value: {{ ternary "1" "0" .Values.webrtc.icelite | quote }}
+          readinessProbe:
+            httpGet:
+              path: /
+              port: web
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            {{- if .Values.persistence.enabled }}
+            - name: profile
+              mountPath: /home/neko
+            {{- end }}
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.shmSize }}
+        {{- if .Values.persistence.enabled }}
+        - name: profile
+          persistentVolumeClaim:
+            claimName: {{ include "chrome-in-a-box.fullname" . }}
+        {{- end }}

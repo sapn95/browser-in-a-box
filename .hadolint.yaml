@@ -1,0 +1,4 @@
+# DL3007: we intentionally track the upstream Neko flavour tag (e.g. :chromium);
+# the weekly rebuild workflow refreshes it. Renovate manages pinned deps elsewhere.
+ignored:
+  - DL3007

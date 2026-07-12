@@ -1,0 +1,45 @@
+image:
+  repository: ghcr.io/sapn95/chrome-in-a-box
+  # Browser flavour tag: "chromium" (arm64-native, fast) or "google-chrome" (amd64, adds Google sync).
+  tag: chromium
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+# Web-UI login (Neko multiuser).
+auth:
+  userPassword: neko
+  adminPassword: admin
+
+desktop:
+  screen: "1920x1080@30"
+
+webrtc:
+  # TCP multiplexing: media rides a single TCP port so it works through
+  # `kubectl port-forward` (which cannot forward the UDP media range).
+  tcpmux: 8081
+  nat1to1: "127.0.0.1"
+  icelite: true
+
+persistence:
+  enabled: true
+  size: 2Gi
+  storageClass: ""
+
+# /dev/shm size — Chromium-based browsers crash without enough shared memory.
+shmSize: 2Gi
+
+resources:
+  requests:
+    cpu: "500m"
+    memory: "1Gi"
+  limits:
+    cpu: "2"
+    memory: "3Gi"
+
+service:
+  type: ClusterIP
+  webPort: 8080
+
+nameOverride: ""
+fullnameOverride: ""

@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "chrome-in-a-box.fullname" . }}
+  labels:
+    {{- include "chrome-in-a-box.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "chrome-in-a-box.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: web
+      port: {{ .Values.service.webPort }}
+      targetPort: web
+    - name: tcpmux
+      port: {{ .Values.webrtc.tcpmux }}
+      targetPort: tcpmux

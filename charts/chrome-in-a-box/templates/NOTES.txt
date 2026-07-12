@@ -1,0 +1,11 @@
+chrome-in-a-box ({{ .Values.image.tag }}) is deployed to namespace "{{ .Release.Namespace }}".
+
+1. Forward the web UI and the WebRTC TCP-mux port to your machine:
+
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "chrome-in-a-box.fullname" . }} \
+     {{ .Values.service.webPort }}:{{ .Values.service.webPort }} {{ .Values.webrtc.tcpmux }}:{{ .Values.webrtc.tcpmux }}
+
+2. Open http://localhost:{{ .Values.service.webPort }}
+   Login: user "neko" / password "{{ .Values.auth.userPassword }}"
+
+Tip: `./run.sh forward` does step 1 for you.

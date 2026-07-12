@@ -1,0 +1,14 @@
+apiVersion: v2
+name: chrome-in-a-box
+description: Self-hosted, isolated browser you use from your own browser (Neko-based)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+home: https://github.com/sapn95/chrome-in-a-box
+sources:
+  - https://github.com/sapn95/chrome-in-a-box
+keywords:
+  - browser
+  - neko
+  - self-hosted
+  - webrtc

@@ -1,0 +1,6 @@
+{
+  "PasswordManagerEnabled": true,
+  "AutofillAddressEnabled": true,
+  "AutofillCreditCardEnabled": true,
+  "RestoreOnStartup": 1
+}
