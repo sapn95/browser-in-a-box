@@ -1,0 +1,8 @@
+{
+  "config": {
+    // Prose and tables wrap at whatever reads best, not at a fixed column.
+    "MD013": false
+  },
+  "globs": ["**/*.md"],
+  "ignores": ["node_modules"]
+}
