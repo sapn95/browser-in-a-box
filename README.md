@@ -83,16 +83,40 @@ biometric sensor and no Bluetooth, so cross-device (QR code) sign-in is out too.
 Anything claiming otherwise would be defeating the security property passkeys exist
 for.
 
-What **does** work, and is usually what people actually want:
+What **does** work: **the container holds its own passkey, in Google Password
+Manager.** Chrome on Linux is a first-class GPM passkey platform — it needs no TPM
+(on Linux Chrome deliberately stores the identity key on disk instead), no USB and
+no Bluetooth. It syncs over the network, which is the only transport this container
+has.
 
-- **Google Password Manager passkeys sync.** Passkeys saved to Google Password
-  Manager (not iCloud Keychain) are available in any Chrome signed into that Google
-  account — including this one. Unlock with your Google Password Manager PIN.
-- **Passwords sync** the same way once you sign in.
+So when a site says *"no passkeys available on this device"*, that passkey lives in
+iCloud Keychain and cannot come here. Register a **second** passkey from inside this
+Chrome instead:
 
-So if a site says *"no passkeys available on this device"*, that passkey lives in
-iCloud Keychain. Re-register it on that site from within this Chrome and choose
-Google Password Manager, and it will then work in both places.
+1. Sign into your Google account in this Chrome, and make sure
+   `chrome://password-manager/settings` → *Offer to save passwords and passkeys* is
+   on. Chrome refuses to create GPM passkeys otherwise.
+2. Get into the site once by another route — a recovery code, a second factor that
+   is not a passkey, or a session started on the host.
+3. Add a new passkey / security key in the site's account settings. Chrome on Linux
+   offers **Google Password Manager** by default; do not pick "this device", which
+   dies with the container. Set the 6-digit GPM PIN and keep it somewhere safe: it
+   is the only way to decrypt GPM passkeys on a new device.
+4. Regenerate the site's recovery codes if you burned one.
+
+The passkey then works both here and on the host, because it lives in your Google
+account rather than on either machine.
+
+> **Use a dedicated Google account for this.** The container runs Chrome with
+> `--no-sandbox` and no keyring, so the profile volume is only lightly obfuscated.
+> Anyone who can reach that volume gets every credential in whatever Google account
+> is signed in — not just the one you came for.
+
+Not possible, so do not spend an evening on it: forwarding a host passkey, the
+QR-code / phone flow (the Bluetooth advertisement is an input to the handshake — no
+radio, no ceremony), passing a USB security key into the VM (Apple's virtualisation
+framework exposes only mass storage today), and exporting an iCloud Keychain passkey
+into Google Password Manager (Chrome ships no importer).
 
 ## Design notes
 
