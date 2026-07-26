@@ -22,26 +22,26 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: shellcheck
         uses: ludeeus/action-shellcheck@2.0.0
       - name: yamllint
         run: pipx run yamllint .
       - name: actionlint
-        uses: raven-actions/actionlint@v2
+        uses: raven-actions/actionlint@v2.2.0
       - name: markdownlint
-        uses: DavidAnson/markdownlint-cli2-action@v20
+        uses: DavidAnson/markdownlint-cli2-action@v24
 
   secrets:
     name: secret scan
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: gitleaks
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
@@ -50,7 +50,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: install bats
         run: sudo apt-get update && sudo apt-get install -y bats
       - name: bats
@@ -64,7 +64,7 @@ jobs:
       # Pulling ~3GB and booting an emulation-free amd64 desktop still takes a while.
       CIB_WAIT_SECS: "300"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: start the container
         run: ./run.sh up
       - name: web UI answers, and without a login prompt

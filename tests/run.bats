@@ -1,6 +1,8 @@
 #!/usr/bin/env bats
 # Tests for run.sh. Behavioural tests use a PATH shim for the container engine, so
 # they exercise the real code paths without needing podman or docker.
+#
+# shellcheck disable=SC2016  # the static tests grep for literal ${...} in run.sh's source
 
 setup() {
   RUN="${BATS_TEST_DIRNAME}/../run.sh"

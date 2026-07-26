@@ -7,7 +7,7 @@
 set -euo pipefail
 
 # renovate: datasource=docker depName=kasmweb/chrome
-IMAGE="${CIB_IMAGE:-docker.io/kasmweb/chrome:1.16.0}"
+IMAGE="${CIB_IMAGE:-docker.io/kasmweb/chrome:1.19.0}"
 NAME="${CIB_NAME:-chrome-in-a-box}"
 VOLUME="${CIB_VOLUME:-chrome-in-a-box-profile}"
 PORT="${CIB_PORT:-6901}"
