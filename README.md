@@ -9,6 +9,9 @@ browser. One command up, one command down, and the profile survives restarts.
 ./run.sh down    # stop it (profile is kept)
 ```
 
+It is a single Python file (`cib.py`) using only the standard library — no venv, no
+`pip install`. `run.sh` is a shim, so `python3 cib.py up` works identically.
+
 No login prompt. Accept the self-signed certificate once and you are in.
 
 ## Why
@@ -37,6 +40,7 @@ mouse travel over a **websocket** — which matters, see [Design notes](#design-
 ## Requirements
 
 - podman or docker
+- Python 3.10 or newer (macOS and every Linux ship one)
 - On Apple Silicon: **Rosetta**, because Google ships Chrome for Linux on amd64 only.
   Without it, emulated Chrome is slow and crash-prone. To enable it for podman:
 
@@ -122,10 +126,11 @@ Google Password Manager, and it will then work in both places.
 - The browser profile lives in a named volume, not in the repo.
 - Settings that are known to kill the container — a password under 6 characters, a
   resolution above 1920x1200 — are rejected up front instead of failing obscurely.
-- CI runs shellcheck, yamllint, actionlint, markdownlint, a gitleaks secret scan and
-  21 unit tests, plus a smoke job that boots the real container and asserts the UI
-  answers 200 (not 401, which would mean the login prompt is back), Chrome is
-  running, and the desktop really is at 1920x1200. Every job has a timeout.
+- CI runs ruff (lint + format), shellcheck, yamllint, actionlint, markdownlint, a
+  gitleaks secret scan and 41 unit tests on Python 3.10 and 3.13, plus a smoke job
+  that boots the real container and asserts the UI answers 200 (not 401, which would
+  mean the login prompt is back), Chrome is running, and the desktop really is at
+  1920x1200. Every job has a timeout.
 
 ## Licence
 

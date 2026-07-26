@@ -1,0 +1,30 @@
+[project]
+name = "chrome-in-a-box"
+version = "1.0.0"
+description = "Real Google Chrome in an isolated container, used from your own browser tab."
+requires-python = ">=3.10"
+dependencies = []          # standard library only, on purpose: no venv to run it
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # import sorting
+    "UP",       # pyupgrade
+    "B",        # bugbear
+    "S",        # bandit (security)
+    "SIM",      # simplify
+    "RUF",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests poke at internals and use assert, which is the point of them.
+"tests/*" = ["S101", "SLF001"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

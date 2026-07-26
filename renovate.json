@@ -14,11 +14,11 @@
   ],
   "customManagers": [
     {
-      "description": "Keep the pinned kasmweb/chrome tag in run.sh up to date",
+      "description": "Keep the pinned kasmweb/chrome tag in cib.py up to date",
       "customType": "regex",
-      "managerFilePatterns": ["/^run\\.sh$/"],
+      "managerFilePatterns": ["/^cib\\.py$/"],
       "matchStrings": [
-        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\nIMAGE=\"\\$\\{CIB_IMAGE:-docker\\.io/kasmweb/chrome:(?<currentValue>[^}\"]+)\\}\""
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\nDEFAULT_IMAGE = \"docker\\.io/kasmweb/chrome:(?<currentValue>[^\"]+)\""
       ]
     }
   ],
