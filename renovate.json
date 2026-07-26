@@ -12,6 +12,15 @@
       "automerge": true
     }
   ],
-  "helm-values": { "enabled": true },
+  "customManagers": [
+    {
+      "description": "Keep the pinned kasmweb/chrome tag in run.sh up to date",
+      "customType": "regex",
+      "managerFilePatterns": ["/^run\\.sh$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\nIMAGE=\"\\$\\{CIB_IMAGE:-docker\\.io/kasmweb/chrome:(?<currentValue>[^}\"]+)\\}\""
+      ]
+    }
+  ],
   "github-actions": { "enabled": true }
 }

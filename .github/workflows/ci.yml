@@ -4,30 +4,49 @@ on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    # Weekly, so an upstream image regression is caught even without commits.
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   lint:
+    name: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: hadolint
-        uses: hadolint/hadolint-action@v3.1.0
-        with:
-          dockerfile: Dockerfile
       - name: shellcheck
-        uses: ludeeus/action-shellcheck@master
+        uses: ludeeus/action-shellcheck@2.0.0
       - name: yamllint
         run: pipx run yamllint .
+      - name: actionlint
+        uses: raven-actions/actionlint@v2
+      - name: markdownlint
+        uses: DavidAnson/markdownlint-cli2-action@v20
+        with:
+          globs: "**/*.md"
 
-  chart:
+  secrets:
+    name: secret scan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
-      - run: helm lint charts/chrome-in-a-box
-      - run: helm template chrome-in-a-box charts/chrome-in-a-box
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
 
   test:
+    name: unit tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,28 +55,26 @@ jobs:
       - name: bats
         run: bats tests/
 
-  image-smoke:
+  smoke:
+    name: smoke (real container)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - name: build chromium (amd64)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          build-args: |
-            BROWSER=chromium
-          load: true
-          tags: chrome-in-a-box:test
-      - name: run & healthcheck
+      - name: start the container
+        run: ./run.sh up
+      - name: web UI answers, and without a login prompt
         run: |
-          docker run -d --name cib --shm-size=2g --cap-add=SYS_ADMIN \
-            -p 8080:8080 \
-            -e NEKO_WEBRTC_TCPMUX=8081 -e NEKO_WEBRTC_ICELITE=1 \
-            -e NEKO_MEMBER_MULTIUSER_USER_PASSWORD=neko \
-            chrome-in-a-box:test
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:8080/ >/dev/null; then echo "web UI up"; exit 0; fi
-            sleep 2
-          done
-          echo "web UI did not come up"; docker logs cib; exit 1
+          code=$(curl -sk -o /dev/null -w '%{http_code}' https://localhost:6901/)
+          echo "HTTP $code"
+          test "$code" = "200" || { echo "expected 200 (401 = login prompt is back)"; exit 1; }
+      - name: Chrome is running
+        run: |
+          n=$(docker exec chrome-in-a-box bash -c 'pgrep -c chrome')
+          echo "chrome processes: $n"
+          test "$n" -gt 0
+      - name: dump logs on failure
+        if: failure()
+        run: ./run.sh logs | tail -50
+      - name: clean up
+        if: always()
+        run: ./run.sh down
