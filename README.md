@@ -58,12 +58,17 @@ mouse travel over a **websocket** — which matters, see [Design notes](#design-
 | `./run.sh down`    | stop and remove the container (profile is kept)          |
 | `./run.sh open`    | open the web UI in your browser                          |
 | `./run.sh status`  | show container state                                     |
-| `./run.sh logs`    | follow container logs                                    |
+| `./run.sh logs`    | show the last 200 log lines (`-f` follows instead)       |
 | `./run.sh shell`   | shell into the container                                 |
+| `./run.sh engine`  | print the container engine that will be used             |
 | `./run.sh reset`   | delete the browser profile (asks first)                  |
 
-Overridable: `CIB_PORT`, `CIB_RESOLUTION`, `CIB_IMAGE`, `CIB_NAME`, `CIB_VOLUME`,
-`CIB_PASSWORD`.
+`up` is idempotent: if the container is already serving it just re-applies the
+resolution and revives Chrome, so your tabs survive. `CIB_FORCE=1` recreates it
+instead, which is what you need after changing the image or an environment setting.
+
+Overridable: `CIB_PORT`, `CIB_RESOLUTION`, `CIB_WAIT_SECS`, `CIB_ENGINE`,
+`CIB_IMAGE`, `CIB_NAME`, `CIB_VOLUME`, `CIB_PASSWORD`, `CIB_LOG_TAIL`, `CIB_FORCE`.
 
 ## Passkeys — what does and does not work
 
@@ -106,14 +111,21 @@ Google Password Manager, and it will then work in both places.
 - **Why HTTPS with a self-signed certificate.** The image generates its own
   certificate at boot and forcing plain HTTP breaks that setup, so the server exits.
   One certificate accept is the smaller cost.
+- **Why `--network bridge` is passed explicitly.** The image's startup script waits
+  for a `veth` interface before it starts the desktop. Rootless podman's default
+  network namespace (pasta/slirp4netns) has none, so the container boots forever and
+  the web UI never answers. It is a no-op on docker and on rootful podman.
 
 ## Security
 
 - The web UI is bound to `127.0.0.1` — never exposed to the network.
 - The browser profile lives in a named volume, not in the repo.
-- CI runs shellcheck, yamllint, actionlint, markdownlint, a gitleaks secret scan,
-  unit tests, and a smoke test that boots the real container and verifies Chrome
-  starts and no login prompt reappeared.
+- Settings that are known to kill the container — a password under 6 characters, a
+  resolution above 1920x1200 — are rejected up front instead of failing obscurely.
+- CI runs shellcheck, yamllint, actionlint, markdownlint, a gitleaks secret scan and
+  21 unit tests, plus a smoke job that boots the real container and asserts the UI
+  answers 200 (not 401, which would mean the login prompt is back), Chrome is
+  running, and the desktop really is at 1920x1200. Every job has a timeout.
 
 ## Licence
 

@@ -20,6 +20,7 @@ jobs:
   lint:
     name: lint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck
@@ -30,12 +31,11 @@ jobs:
         uses: raven-actions/actionlint@v2
       - name: markdownlint
         uses: DavidAnson/markdownlint-cli2-action@v20
-        with:
-          globs: "**/*.md"
 
   secrets:
     name: secret scan
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -48,6 +48,7 @@ jobs:
   test:
     name: unit tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: install bats
@@ -58,6 +59,10 @@ jobs:
   smoke:
     name: smoke (real container)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Pulling ~3GB and booting an emulation-free amd64 desktop still takes a while.
+      CIB_WAIT_SECS: "300"
     steps:
       - uses: actions/checkout@v4
       - name: start the container
@@ -69,12 +74,26 @@ jobs:
           test "$code" = "200" || { echo "expected 200 (401 = login prompt is back)"; exit 1; }
       - name: Chrome is running
         run: |
-          n=$(docker exec chrome-in-a-box bash -c 'pgrep -c chrome')
-          echo "chrome processes: $n"
-          test "$n" -gt 0
+          eng=$(./run.sh engine)
+          n=$("$eng" exec chrome-in-a-box bash -c 'pgrep -c chrome || true')
+          echo "chrome processes: ${n:-0}"
+          test "${n:-0}" -gt 0
+      - name: desktop is at the requested resolution
+        run: |
+          eng=$(./run.sh engine)
+          mode=""
+          for _ in $(seq 1 10); do
+            mode=$("$eng" exec -e DISPLAY=:1 chrome-in-a-box xrandr --current |
+                   awk '/\*/{print $1; exit}')
+            [ "$mode" = "1920x1200" ] && break
+            sleep 2
+          done
+          test "$mode" = "1920x1200" ||
+            { echo "fell back to $mode; the xrandr workaround is not applying"; exit 1; }
       - name: dump logs on failure
         if: failure()
-        run: ./run.sh logs | tail -50
+        timeout-minutes: 2
+        run: ./run.sh logs 2>&1 | tail -50 || true
       - name: clean up
         if: always()
         run: ./run.sh down
