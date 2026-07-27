@@ -34,7 +34,7 @@ There is no single box that does everything, because the isolation that keeps ho
 policy out also keeps the host keychain out. So there are two, and they fail in
 opposite directions.
 
-|                                       | `cib box up` — **container**       | `cib vm …` — **macOS VM**               |
+|                                       | `cib box up` — **container**   | `cib vm …` — **macOS VM**               |
 | ------------------------------------- | ------------------------------ | --------------------------------------- |
 | Runs on                               | anything with podman or docker | Apple silicon only                      |
 | Free of host browser policy           | yes                            | yes                                     |
@@ -149,8 +149,8 @@ binaries are built inside UBI10 so they link against a supported base.
 
 ## Commands
 
-| Command      | What it does                                             |
-| ------------ | -------------------------------------------------------- |
+| Command          | What it does                                             |
+| ---------------- | -------------------------------------------------------- |
 | `cib box up`     | start the container, wait for the desktop, launch Chrome |
 | `cib box down`   | stop and remove the container (profile is kept)          |
 | `cib box open`   | open the web UI in your browser                          |
