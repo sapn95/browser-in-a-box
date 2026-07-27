@@ -3,24 +3,24 @@
 class Cib < Formula
   desc "Real Google Chrome in a box — a Linux container or a macOS VM"
   homepage "https://github.com/sapn95/chrome-in-a-box"
-  version "0.0.0"
+  version "1.1.0"
   license "MIT"
 
   on_macos do
     on_arm do
-      url "https://github.com/sapn95/chrome-in-a-box/releases/download/v0.0.0/cib-macos-arm64.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+      url "https://github.com/sapn95/chrome-in-a-box/releases/download/v1.1.0/cib-macos-arm64.tar.gz"
+      sha256 "a577ca6a17e1b8b6469c5b9da5b9929e9784c8b52482e4f6f7d7ba99911a3139"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/sapn95/chrome-in-a-box/releases/download/v0.0.0/cib-linux-arm64.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+      url "https://github.com/sapn95/chrome-in-a-box/releases/download/v1.1.0/cib-linux-arm64.tar.gz"
+      sha256 "d32fad3ef4ec19da9814b27c387afcdde5481beea8ea17906a4e04490c1f7e2e"
     end
     on_intel do
-      url "https://github.com/sapn95/chrome-in-a-box/releases/download/v0.0.0/cib-linux-x86_64.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+      url "https://github.com/sapn95/chrome-in-a-box/releases/download/v1.1.0/cib-linux-x86_64.tar.gz"
+      sha256 "9a1dd3fa680243f88510a5136bf9fa30ffbf97adea2cca0c0be0df7180e9fad7"
     end
   end
 
