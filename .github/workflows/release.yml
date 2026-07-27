@@ -37,17 +37,21 @@ jobs:
           git tar gzip gcc gcc-c++
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v9.0.0
-      - name: satisfy the vestigial -l:libatomic.a
-        # uv's standalone CPython carries -l:libatomic.a in its link flags, and Red
-        # Hat ships no static libatomic for x86_64 — not in the UBI10 base repos,
-        # not in CodeReady Builder, not in UBI9 (all three checked). The identical
-        # build links on arm64 with no libatomic present at all, so nothing here
-        # actually references those symbols. An empty archive satisfies the flag;
-        # if a symbol really were needed, the link would fail loudly with an
-        # undefined reference rather than producing a broken binary.
+      - name: static libatomic
+        # uv's standalone CPython carries -l:libatomic.a in its link flags. Install
+        # the real package if this arch has it; x86_64 needs it and arm64 links
+        # without any libatomic at all, which shows nothing here actually
+        # references those symbols. If the package is unavailable, an empty archive
+        # satisfies the flag — and a symbol that really were needed would then fail
+        # loudly as an undefined reference, not produce a broken binary.
         run: |
-          if ! find / -name libatomic.a -print -quit 2>/dev/null | grep -q .; then
-            ar rcs /usr/lib64/libatomic.a
+          if dnf install -y --setopt=install_weak_deps=0 libatomic-static; then
+            echo "using the packaged static libatomic"
+          else
+            echo "no libatomic-static for this arch; providing an empty archive"
+            : > /tmp/empty.c
+            gcc -c /tmp/empty.c -o /tmp/empty.o
+            ar rcs /usr/lib64/libatomic.a /tmp/empty.o
           fi
       - name: compile with Nuitka
         run: |
