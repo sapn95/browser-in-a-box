@@ -34,16 +34,16 @@ There is no single box that does everything, because the isolation that keeps ho
 policy out also keeps the host keychain out. So there are two, and they fail in
 opposite directions.
 
-| | `cib up` — **container** | `cib vm …` — **macOS VM** |
-| --- | --- | --- |
-| Runs on | anything with podman or docker | Apple silicon only |
-| Free of host browser policy | yes | yes |
-| Google account sync, Password Manager | yes | yes |
-| **iCloud Keychain + its passkeys** | **no** | **yes** |
-| Touch ID | no | no — falls back to the account password |
-| Hardware security key (USB) | no | no |
-| Weight | ~3 GB image, seconds to start | ~40 GB, minutes to start |
-| Used from | a tab in your own browser | its own window |
+|                                       | `cib up` — **container**       | `cib vm …` — **macOS VM**               |
+| ------------------------------------- | ------------------------------ | --------------------------------------- |
+| Runs on                               | anything with podman or docker | Apple silicon only                      |
+| Free of host browser policy           | yes                            | yes                                     |
+| Google account sync, Password Manager | yes                            | yes                                     |
+| **iCloud Keychain + its passkeys**    | **no**                         | **yes**                                 |
+| Touch ID                              | no                             | no — falls back to the account password |
+| Hardware security key (USB)           | no                             | no                                      |
+| Weight                                | ~3 GB image, seconds to start  | ~40 GB, minutes to start                |
+| Used from                             | a tab in your own browser      | its own window                          |
 
 ```mermaid
 flowchart TD
@@ -144,26 +144,26 @@ binaries are built inside UBI10 so they link against a supported base.
 
 ## Commands
 
-| Command            | What it does                                             |
-| ------------------ | -------------------------------------------------------- |
-| `cib up`      | start the container, wait for the desktop, launch Chrome |
-| `cib down`    | stop and remove the container (profile is kept)          |
-| `cib open`    | open the web UI in your browser                          |
-| `cib status`  | show container state                                     |
-| `cib logs`    | show the last 200 log lines (`-f` follows instead)       |
-| `cib shell`   | shell into the container                                 |
-| `cib engine`  | print the container engine that will be used             |
-| `cib reset`   | delete the browser profile (asks first)                  |
+| Command      | What it does                                             |
+| ------------ | -------------------------------------------------------- |
+| `cib up`     | start the container, wait for the desktop, launch Chrome |
+| `cib down`   | stop and remove the container (profile is kept)          |
+| `cib open`   | open the web UI in your browser                          |
+| `cib status` | show container state                                     |
+| `cib logs`   | show the last 200 log lines (`-f` follows instead)       |
+| `cib shell`  | shell into the container                                 |
+| `cib engine` | print the container engine that will be used             |
+| `cib reset`  | delete the browser profile (asks first)                  |
 
 The macOS VM variant (Apple silicon):
 
-| Command                 | What it does                                        |
-| ----------------------- | --------------------------------------------------- |
-| `cib vm create`    | build the VM from a fresh macOS image (large)       |
-| `cib vm up`        | start it — a window opens                           |
-| `cib vm down`      | stop it                                             |
-| `cib vm status`    | list VMs and their state                            |
-| `cib vm delete`    | delete the VM and everything in it (asks first)     |
+| Command         | What it does                                    |
+| --------------- | ----------------------------------------------- |
+| `cib vm create` | build the VM from a fresh macOS image (large)   |
+| `cib vm up`     | start it — a window opens                       |
+| `cib vm down`   | stop it                                         |
+| `cib vm status` | list VMs and their state                        |
+| `cib vm delete` | delete the VM and everything in it (asks first) |
 
 After `vm create`, finish it once by hand: Setup Assistant → sign in to your Apple
 Account → System Settings → Apple Account → iCloud → turn on **Passwords &

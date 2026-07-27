@@ -32,7 +32,7 @@ jobs:
       - name: base tools
         run: dnf install -y --setopt=install_weak_deps=0 git tar gzip
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v9
+      - uses: astral-sh/setup-uv@v9.0.0
       - name: ruff check
         run: uvx ruff check --output-format=github .
       - name: ruff format
@@ -78,7 +78,7 @@ jobs:
       - name: base tools
         run: dnf install -y --setopt=install_weak_deps=0 git tar gzip
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v9
+      - uses: astral-sh/setup-uv@v9.0.0
       - name: pytest with coverage
         run: >
           uv run --python ${{ matrix.python }}
@@ -94,7 +94,7 @@ jobs:
       - name: base tools
         run: dnf install -y --setopt=install_weak_deps=0 git tar gzip
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v9
+      - uses: astral-sh/setup-uv@v9.0.0
       - name: build a wheel and check the console script works
         run: |
           uv build --wheel
