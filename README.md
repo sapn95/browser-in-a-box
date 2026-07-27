@@ -110,11 +110,16 @@ Three ways, pick one:
 git clone https://github.com/sapn95/chrome-in-a-box && cd chrome-in-a-box
 ./cib.py up
 
-# 2. as a command, in its own environment
+# 2. with Homebrew (the tap lives in this repo, no second repo to add)
+brew tap sapn95/cib https://github.com/sapn95/chrome-in-a-box
+brew install cib
+cib up
+
+# 3. as a command, in its own environment
 uv tool install git+https://github.com/sapn95/chrome-in-a-box    # or: pipx install ...
 cib up
 
-# 3. a self-contained binary — no Python needed at all
+# 4. a self-contained binary — no Python needed at all
 #    (download the asset for your platform from the Releases page)
 tar -xzf cib-macos-arm64.tar.gz && ./cib up
 ```

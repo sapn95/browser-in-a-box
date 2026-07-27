@@ -366,3 +366,52 @@ def test_failures_are_reported_without_a_traceback(monkeypatch, capsys):
     monkeypatch.setattr(cib, "find_engine", lambda: (_ for _ in ()).throw(cib.Failure("boom")))
     assert cib.main(["status"]) == 1
     assert "error: boom" in capsys.readouterr().err
+
+
+# --- the Homebrew formula updater ---------------------------------------------
+
+
+def _formula() -> str:
+    return (Path(__file__).resolve().parents[1] / "Formula" / "cib.rb").read_text()
+
+
+def _updater():
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import update_formula
+
+    return update_formula
+
+
+ZERO = "0" * 64
+ONE = "1" * 64
+
+
+def test_the_formula_updater_sets_version_urls_and_every_checksum():
+    out = _updater().update(
+        _formula(),
+        "2.3.4",
+        {"macos-arm64": ONE, "linux-arm64": ONE, "linux-x86_64": ONE},
+    )
+    assert 'version "2.3.4"' in out
+    assert "/download/v0.0.0/" not in out
+    assert out.count("/download/v2.3.4/") == 3
+    assert ZERO not in out
+    assert out.count(ONE) == 3
+
+
+def test_the_formula_updater_refuses_an_asset_it_cannot_find():
+    with pytest.raises(SystemExit, match="expected 1"):
+        _updater().update(_formula(), "2.3.4", {"windows-x86_64": ONE})
+
+
+def test_the_formula_updater_is_idempotent():
+    once = _updater().update(_formula(), "2.3.4", {"macos-arm64": ONE})
+    twice = _updater().update(once, "2.3.4", {"macos-arm64": ONE})
+    assert once == twice
+
+
+def test_the_formula_updater_rejects_a_bad_checksum(tmp_path):
+    formula = tmp_path / "cib.rb"
+    formula.write_text(_formula())
+    with pytest.raises(SystemExit, match="no valid sha256"):
+        _updater().main(["2.3.4", str(formula), "macos-arm64=nope"])
