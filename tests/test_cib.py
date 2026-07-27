@@ -242,6 +242,77 @@ def test_ensure_desktop_warns_instead_of_failing(monkeypatch, capsys):
     assert "warning" in capsys.readouterr().err
 
 
+# --- the macOS VM variant -----------------------------------------------------
+
+
+def test_the_vm_variant_refuses_on_a_non_mac(monkeypatch):
+    monkeypatch.setattr(cib.platform, "system", lambda: "Linux")
+    with pytest.raises(cib.Failure, match="needs macOS"):
+        cib.find_tart()
+
+
+def test_the_vm_variant_refuses_on_intel(monkeypatch):
+    monkeypatch.setattr(cib.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(cib.platform, "machine", lambda: "x86_64")
+    with pytest.raises(cib.Failure, match="Apple silicon"):
+        cib.find_tart()
+
+
+def test_a_missing_tart_points_at_the_install_command(monkeypatch):
+    monkeypatch.setattr(cib.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(cib.platform, "machine", lambda: "arm64")
+    monkeypatch.setattr(cib.shutil, "which", lambda name: None)
+    with pytest.raises(cib.Failure, match="brew install"):
+        cib.find_tart()
+
+
+def test_vm_create_builds_from_a_fresh_image(calls, monkeypatch):
+    # Apple only grants an Apple Account identity to a VM created from a 15+
+    # installer; upgrading or cloning an older VM does not qualify.
+    monkeypatch.setattr(cib, "vm_exists", lambda *a: False)
+    cib.cmd_vm_create("tart", cib.VmConfig())
+    assert "create --from-ipsw=latest chrome-vm" in flat(calls)
+
+
+def test_vm_create_sizes_the_vm_for_interactive_use(calls, monkeypatch):
+    monkeypatch.setattr(cib, "vm_exists", lambda *a: False)
+    cib.cmd_vm_create("tart", cib.VmConfig())
+    assert "set chrome-vm --cpu 4 --memory 8192 --disk-size 100" in flat(calls)
+
+
+def test_vm_create_is_idempotent(calls, monkeypatch, capsys):
+    monkeypatch.setattr(cib, "vm_exists", lambda *a: True)
+    cib.cmd_vm_create("tart", cib.VmConfig())
+    assert "create" not in flat(calls)
+    assert "already exists" in capsys.readouterr().out
+
+
+def test_vm_up_refuses_before_create(calls, monkeypatch):
+    monkeypatch.setattr(cib, "vm_exists", lambda *a: False)
+    with pytest.raises(cib.Failure, match="vm create"):
+        cib.cmd_vm_up("tart", cib.VmConfig())
+
+
+def test_vm_delete_needs_confirmation(calls, monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda prompt: "n")
+    cib.cmd_vm_delete("tart", cib.VmConfig())
+    assert "delete" not in flat(calls)
+
+
+def test_vm_delete_removes_the_vm_when_confirmed(calls, monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda prompt: "y")
+    cib.cmd_vm_delete("tart", cib.VmConfig())
+    assert "delete chrome-vm" in flat(calls)
+
+
+def test_every_vm_action_is_reachable_from_the_cli(monkeypatch):
+    parser = cib.build_parser()
+    action = next(a for a in parser._actions if isinstance(a, cib.argparse._SubParsersAction))
+    vm_parser = action.choices["vm"]
+    choices = next(a.choices for a in vm_parser._actions if a.dest == "action")
+    assert set(choices) == set(cib.VM_ACTIONS)
+
+
 # --- cli ----------------------------------------------------------------------
 
 
@@ -280,10 +351,14 @@ def subcommands() -> list[str]:
 @pytest.mark.parametrize("name", subcommands())
 def test_every_subcommand_dispatches_to_a_handler(name, monkeypatch):
     monkeypatch.setattr(cib, "find_engine", lambda: "podman")
+    monkeypatch.setattr(cib, "find_tart", lambda: "tart")
     called: list[str] = []
     for handler in HANDLERS:
         monkeypatch.setattr(cib, handler, lambda *a, _h=handler, **k: called.append(_h))
-    assert cib.main([name]) == 0, f"{name} has no working handler"
+    for action in cib.VM_ACTIONS:
+        monkeypatch.setitem(cib.VM_ACTIONS, action, lambda *a, **k: called.append("vm"))
+    argv = [name, "up"] if name == "vm" else [name]
+    assert cib.main(argv) == 0, f"{name} has no working handler"
     assert called, f"{name} did not dispatch"
 
 

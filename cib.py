@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
-"""chrome-in-a-box — real Google Chrome in an isolated container, used from your
-own browser tab.
+"""chrome-in-a-box — real Google Chrome in a box, used from your own machine.
 
-Single file, standard library only: no venv, no pip install. Everything runs on a
-container engine (podman or docker); the web UI is bound to 127.0.0.1, so the
-browser is never reachable from the network.
+Two variants, because they trade off differently:
+
+* `box` (default) — a Linux container serving KasmVNC, used from a browser tab.
+  Runs anywhere podman or docker runs. The web UI is bound to 127.0.0.1, so the
+  browser is never reachable from the network. No host keychain.
+* `vm` — a macOS guest VM on Apple silicon, via tart. Heavier, but it is a real
+  macOS instance, so iCloud Keychain and its passkeys work.
+
+Single file, standard library only: no venv, no pip install.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import platform
 import shutil
 import ssl
 import subprocess
@@ -309,6 +315,92 @@ def cmd_engine(engine: str, cfg: Config) -> None:
     print(engine)
 
 
+# --- the macOS VM variant -----------------------------------------------------
+#
+# A macOS guest is not enrolled in the host's MDM, so its Chrome is policy-free,
+# and since macOS 15 Apple supports signing a VM into an Apple Account — which
+# brings iCloud Keychain, and therefore passkeys, with it. It has no Secure
+# Enclave and no Touch ID, so passkey use falls back to the account password.
+
+
+@dataclass(frozen=True)
+class VmConfig:
+    name: str = field(default_factory=lambda: _env("CIB_VM_NAME", "chrome-vm"))
+    cpus: str = field(default_factory=lambda: _env("CIB_VM_CPUS", "4"))
+    memory: str = field(default_factory=lambda: _env("CIB_VM_MEMORY", "8192"))
+    disk: str = field(default_factory=lambda: _env("CIB_VM_DISK", "100"))
+
+
+def find_tart() -> str:
+    """Return the tart binary, after checking the VM variant can run at all."""
+    if platform.system() != "Darwin":
+        raise Failure("the vm variant needs macOS; use the container variant instead")
+    if platform.machine() != "arm64":
+        raise Failure("the vm variant needs Apple silicon; use the container variant instead")
+    path = shutil.which("tart")
+    if not path:
+        raise Failure("tart is not on PATH — install it with: brew install cirruslabs/cli/tart")
+    return path
+
+
+def vm_exists(tart: str, vm: VmConfig) -> bool:
+    result = run(tart, "list", "--quiet", check=False, capture=True)
+    return vm.name in result.stdout.split()
+
+
+def cmd_vm_create(tart: str, vm: VmConfig) -> None:
+    if vm_exists(tart, vm):
+        print(f"{vm.name!r} already exists. './run.sh vm up' to start it.")
+        return
+    print(f"Creating {vm.name!r} from the latest macOS image (a large download) ...")
+    # Built from a fresh image on purpose: Apple only grants a VM an Apple Account
+    # identity when it was created from a macOS 15+ installer. Upgrading an older
+    # VM, or cloning one, does not qualify.
+    run(tart, "create", "--from-ipsw=latest", vm.name)
+    run(tart, "set", vm.name, "--cpu", vm.cpus, "--memory", vm.memory, "--disk-size", vm.disk)
+    print("Created. Start it with './run.sh vm up', then in the guest:")
+    print("  1. finish Setup Assistant and sign in to your Apple Account")
+    print("  2. System Settings > Apple Account > iCloud > turn on Passwords & Keychain")
+    print("  3. install Chrome and sign in to Google")
+
+
+def cmd_vm_up(tart: str, vm: VmConfig) -> None:
+    if not vm_exists(tart, vm):
+        raise Failure(f"{vm.name!r} does not exist yet — run './run.sh vm create' first")
+    print(f"Starting {vm.name!r} (a window will open) ...")
+    run(tart, "run", vm.name, check=False)
+
+
+def cmd_vm_down(tart: str, vm: VmConfig) -> None:
+    result = run(tart, "stop", vm.name, check=False, capture=True)
+    print("Stopped." if result.returncode == 0 else "Not running.")
+
+
+def cmd_vm_status(tart: str, vm: VmConfig) -> None:
+    run(tart, "list", check=False)
+
+
+def cmd_vm_delete(tart: str, vm: VmConfig) -> None:
+    try:
+        answer = input(f"Delete the VM {vm.name} and everything in it? [y/N] ")
+    except EOFError:
+        answer = ""
+    if not answer.lower().startswith("y"):
+        print("Cancelled.")
+        return
+    result = run(tart, "delete", vm.name, check=False, capture=True)
+    print("Deleted." if result.returncode == 0 else f"Nothing to delete ({vm.name!r} not found).")
+
+
+VM_ACTIONS = {
+    "create": cmd_vm_create,
+    "up": cmd_vm_up,
+    "down": cmd_vm_down,
+    "status": cmd_vm_status,
+    "delete": cmd_vm_delete,
+}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cib",
@@ -330,6 +422,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("shell", help="open a shell inside the container")
     sub.add_parser("engine", help="print the container engine that will be used")
     sub.add_parser("reset", help="delete the browser profile volume (asks first)")
+    vm = sub.add_parser("vm", help="the macOS VM variant (Apple silicon; has iCloud Keychain)")
+    vm.add_argument("action", choices=sorted(VM_ACTIONS), help="what to do with the VM")
     return parser
 
 
@@ -339,6 +433,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     command = args.command or "up"
 
     try:
+        if command == "vm":
+            VM_ACTIONS[args.action](find_tart(), VmConfig())
+            return 0
         cfg = Config()
         engine = find_engine()
         if command == "logs":

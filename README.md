@@ -1,7 +1,8 @@
 # chrome-in-a-box
 
-Real Google Chrome, running in an isolated container, used from a tab in your own
-browser. One command up, one command down, and the profile survives restarts.
+Real Google Chrome in a box, so the browser you use for your own things is not the
+one your machine's policy manages. One command up, one command down, and the
+profile survives restarts.
 
 ```bash
 ./run.sh up      # start it
@@ -20,27 +21,91 @@ A browser can end up locked down by policy — password manager off, autofill of
 settings greyed out behind an "administrator" badge. That is fine for work, but it
 also applies to everything else you do in that browser.
 
-This runs a **separate** Chrome in a Linux container. Desktop browser policy does
-not reach into a Linux guest, so this Chrome is unmanaged: the built-in Google
-Password Manager, autofill and account sync all work normally. Nothing on the host
-is modified, disabled or worked around — it is simply a second browser that happens
-to live in a sandbox.
+This runs a **separate** Chrome in a guest — a Linux container, or a macOS VM.
+Host browser policy does not reach into a guest, so that Chrome is unmanaged: the
+built-in password manager, autofill and account sync all work normally. Nothing on
+the host is modified, disabled or worked around — it is simply a second browser
+that happens to live in a box.
 
-## How it works
+## Two variants
 
-```text
-your browser  ──HTTPS/WebSocket──▶  KasmVNC  ──▶  Google Chrome
- (localhost:6901)                        └── container ──┘
+There is no single box that does everything, because the isolation that keeps host
+policy out also keeps the host keychain out. So there are two, and they fail in
+opposite directions.
+
+| | `./run.sh up` — **container** | `./run.sh vm …` — **macOS VM** |
+| --- | --- | --- |
+| Runs on | anything with podman or docker | Apple silicon only |
+| Free of host browser policy | yes | yes |
+| Google account sync, Password Manager | yes | yes |
+| **iCloud Keychain + its passkeys** | **no** | **yes** |
+| Touch ID | no | no — falls back to the account password |
+| Hardware security key (USB) | no | no |
+| Weight | ~3 GB image, seconds to start | ~40 GB, minutes to start |
+| Used from | a tab in your own browser | its own window |
+
+```mermaid
+flowchart TD
+    A{What do you need?} --> B[Google account sync,<br/>Password Manager]
+    A --> C[iCloud Keychain<br/>passkeys]
+    A --> D[USB security key<br/>or Touch ID]
+    B --> E([container<br/>./run.sh up])
+    C --> F{Apple silicon?}
+    F -- yes --> G([macOS VM<br/>./run.sh vm create])
+    F -- no --> H([not possible])
+    D --> I([use the host browser —<br/>no box can do this])
 ```
 
-The container is [kasmweb/chrome](https://hub.docker.com/r/kasmweb/chrome), which
-serves a [KasmVNC](https://github.com/kasmtech/KasmVNC) web client. Keyboard and
-mouse travel over a **websocket** — which matters, see [Design notes](#design-notes).
+### The container
+
+```mermaid
+flowchart LR
+    subgraph host [your machine]
+        B[your browser<br/>localhost:6901]
+    end
+    subgraph ctr [Linux container]
+        K[KasmVNC] --> C[Google Chrome]
+    end
+    B -- "HTTPS + websocket" --> K
+    C -.-> G[(Google account:<br/>sync, passwords, passkeys)]
+```
+
+[kasmweb/chrome](https://hub.docker.com/r/kasmweb/chrome) serves a
+[KasmVNC](https://github.com/kasmtech/KasmVNC) web client. Keyboard and mouse travel
+over a **websocket** — which matters, see [Design notes](#design-notes). The macOS
+keychain is not reachable: a Linux guest has no Secure Enclave.
+
+### The macOS VM
+
+```mermaid
+flowchart LR
+    subgraph host [your Mac]
+        V[Virtualization.framework]
+        S[[Secure Enclave]]
+    end
+    subgraph vm [macOS guest, not MDM-enrolled]
+        C[Google Chrome] --> KC[iCloud Keychain]
+    end
+    V --> vm
+    S -- "identity only,<br/>no Touch ID" --> vm
+    KC -.-> A[(Apple account:<br/>passkeys sync)]
+```
+
+Since macOS 15, Apple supports signing a guest VM into an Apple Account, so iCloud
+Keychain — and therefore passkeys — sync into it. The guest was never enrolled in
+any MDM, so its Chrome reads no managed policy. It has no Secure Enclave of its own
+and no Touch ID, so passkey use asks for the account password instead of a finger.
+
+> The VM must be **created from** a macOS 15+ installer. Upgrading or cloning an
+> older VM does not get an Apple Account identity — `./run.sh vm create` does it
+> the right way.
 
 ## Requirements
 
-- podman or docker
 - Python 3.10 or newer (macOS and every Linux ship one)
+- For the container: **podman or docker**
+- For the macOS VM: **Apple silicon** and [tart](https://tart.run)
+  (`brew install cirruslabs/cli/tart`), plus ~40 GB free and 8 GB RAM to spare
 - On Apple Silicon: **Rosetta**, because Google ships Chrome for Linux on amd64 only.
   Without it, emulated Chrome is slow and crash-prone. To enable it for podman:
 
@@ -67,27 +132,49 @@ mouse travel over a **websocket** — which matters, see [Design notes](#design-
 | `./run.sh engine`  | print the container engine that will be used             |
 | `./run.sh reset`   | delete the browser profile (asks first)                  |
 
+The macOS VM variant (Apple silicon):
+
+| Command                 | What it does                                        |
+| ----------------------- | --------------------------------------------------- |
+| `./run.sh vm create`    | build the VM from a fresh macOS image (large)       |
+| `./run.sh vm up`        | start it — a window opens                           |
+| `./run.sh vm down`      | stop it                                             |
+| `./run.sh vm status`    | list VMs and their state                            |
+| `./run.sh vm delete`    | delete the VM and everything in it (asks first)     |
+
+After `vm create`, finish it once by hand: Setup Assistant → sign in to your Apple
+Account → System Settings → Apple Account → iCloud → turn on **Passwords &
+Keychain** → install Chrome → sign in to Google.
+
 `up` is idempotent: if the container is already serving it just re-applies the
 resolution and revives Chrome, so your tabs survive. `CIB_FORCE=1` recreates it
 instead, which is what you need after changing the image or an environment setting.
 
 Overridable: `CIB_PORT`, `CIB_RESOLUTION`, `CIB_WAIT_SECS`, `CIB_ENGINE`,
-`CIB_IMAGE`, `CIB_NAME`, `CIB_VOLUME`, `CIB_PASSWORD`, `CIB_LOG_TAIL`, `CIB_FORCE`.
+`CIB_IMAGE`, `CIB_NAME`, `CIB_VOLUME`, `CIB_PASSWORD`, `CIB_LOG_TAIL`, `CIB_FORCE`,
+and for the VM `CIB_VM_NAME`, `CIB_VM_CPUS`, `CIB_VM_MEMORY`, `CIB_VM_DISK`.
 
 ## Passkeys — what does and does not work
 
-**Passkeys cannot be forwarded from the host into the container.** A Touch ID
-passkey is bound to the Mac's Secure Enclave, and WebAuthn deliberately offers no
-way to relay that to another machine — the container is a different device with no
-biometric sensor and no Bluetooth, so cross-device (QR code) sign-in is out too.
-Anything claiming otherwise would be defeating the security property passkeys exist
-for.
+**A passkey cannot be forwarded from the host into a guest.** A Touch ID passkey is
+bound to the Mac's Secure Enclave, and WebAuthn deliberately offers no way to relay
+that — which is the property it exists for. Nor is the QR / "use your phone" flow a
+way around it: the phone's Bluetooth advertisement is an *input to the key
+derivation*, not a UI step, so a guest with no radio cannot complete the handshake.
+Chrome checks for a Bluetooth adapter first and does not even offer the QR code.
 
-What **does** work: **the container holds its own passkey, in Google Password
-Manager.** Chrome on Linux is a first-class GPM passkey platform — it needs no TPM
-(on Linux Chrome deliberately stores the identity key on disk instead), no USB and
-no Bluetooth. It syncs over the network, which is the only transport this container
-has.
+So a passkey has to *live* in the box. There are two ways to arrange that:
+
+- **Container → Google Password Manager.** Register a new passkey inside the
+  container; it syncs with your Google account.
+- **macOS VM → iCloud Keychain.** The passkeys you already have sync in, because the
+  VM is signed into your Apple Account.
+
+### In the container: Google Password Manager
+
+Chrome on Linux is a first-class GPM passkey platform — it needs no TPM (on Linux
+Chrome deliberately stores the identity key on disk instead), no USB and no
+Bluetooth. It syncs over the network, which is the only transport a container has.
 
 So when a site says *"no passkeys available on this device"*, that passkey lives in
 iCloud Keychain and cannot come here. Register a **second** passkey from inside this
