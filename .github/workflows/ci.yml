@@ -114,7 +114,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: start the container
-        run: ./cib.py up
+        run: ./cib.py box up
       - name: web UI answers, and without a login prompt
         run: |
           code=$(curl -sk -o /dev/null -w '%{http_code}' https://localhost:6901/)
@@ -122,13 +122,13 @@ jobs:
           test "$code" = "200" || { echo "expected 200 (401 = login prompt is back)"; exit 1; }
       - name: Chrome is running
         run: |
-          eng=$(./cib.py engine)
+          eng=$(./cib.py box engine)
           n=$("$eng" exec chrome-in-a-box bash -c 'pgrep -c chrome || true')
           echo "chrome processes: ${n:-0}"
           test "${n:-0}" -gt 0
       - name: desktop is at the requested resolution
         run: |
-          eng=$(./cib.py engine)
+          eng=$(./cib.py box engine)
           mode=""
           for _ in $(seq 1 10); do
             mode=$("$eng" exec -e DISPLAY=:1 chrome-in-a-box xrandr --current |
@@ -141,7 +141,7 @@ jobs:
       - name: dump logs on failure
         if: failure()
         timeout-minutes: 2
-        run: ./cib.py logs 2>&1 | tail -50 || true
+        run: ./cib.py box logs 2>&1 | tail -50 || true
       - name: clean up
         if: always()
-        run: ./cib.py down
+        run: ./cib.py box down

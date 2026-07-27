@@ -10,7 +10,7 @@ cib open    # open https://localhost:6901/?resize=scale
 cib down    # stop it (profile is kept)
 ```
 
-One file, standard library only. Run it straight from a checkout with `./cib.py up`,
+One file, standard library only. Run it straight from a checkout with `./cib.py box up`,
 install it as a `cib` command, or download a self-contained binary — see
 [Install](#install).
 
@@ -34,7 +34,7 @@ There is no single box that does everything, because the isolation that keeps ho
 policy out also keeps the host keychain out. So there are two, and they fail in
 opposite directions.
 
-|                                       | `cib up` — **container**       | `cib vm …` — **macOS VM**               |
+|                                       | `cib box up` — **container**       | `cib vm …` — **macOS VM**               |
 | ------------------------------------- | ------------------------------ | --------------------------------------- |
 | Runs on                               | anything with podman or docker | Apple silicon only                      |
 | Free of host browser policy           | yes                            | yes                                     |
@@ -108,7 +108,7 @@ Three ways, pick one:
 ```bash
 # 1. from a checkout — nothing to install
 git clone https://github.com/sapn95/chrome-in-a-box && cd chrome-in-a-box
-./cib.py up
+./cib.py box up
 
 # 2. with Homebrew (the tap lives in this repo, no second repo to add)
 brew tap sapn95/tap https://github.com/sapn95/chrome-in-a-box
@@ -117,11 +117,11 @@ cib up                          # `brew install cib` asks you to `brew trust` fi
 
 # 3. as a command, in its own environment
 uv tool install git+https://github.com/sapn95/chrome-in-a-box    # or: pipx install ...
-cib up
+cib box up
 
 # 4. a self-contained binary — no Python needed at all
 #    (download the asset for your platform from the Releases page)
-tar -xzf cib-macos-arm64.tar.gz && ./cib up
+tar -xzf cib-macos-arm64.tar.gz && ./cib box up
 ```
 
 The binary is compiled with [Nuitka](https://nuitka.net) — Python translated to C —
@@ -151,14 +151,14 @@ binaries are built inside UBI10 so they link against a supported base.
 
 | Command      | What it does                                             |
 | ------------ | -------------------------------------------------------- |
-| `cib up`     | start the container, wait for the desktop, launch Chrome |
-| `cib down`   | stop and remove the container (profile is kept)          |
-| `cib open`   | open the web UI in your browser                          |
-| `cib status` | show container state                                     |
-| `cib logs`   | show the last 200 log lines (`-f` follows instead)       |
-| `cib shell`  | shell into the container                                 |
-| `cib engine` | print the container engine that will be used             |
-| `cib reset`  | delete the browser profile (asks first)                  |
+| `cib box up`     | start the container, wait for the desktop, launch Chrome |
+| `cib box down`   | stop and remove the container (profile is kept)          |
+| `cib box open`   | open the web UI in your browser                          |
+| `cib box status` | show container state                                     |
+| `cib box logs`   | show the last 200 log lines (`-f` follows instead)       |
+| `cib box shell`  | shell into the container                                 |
+| `cib box engine` | print the container engine that will be used             |
+| `cib box reset`  | delete the browser profile (asks first)                  |
 
 The macOS VM variant (Apple silicon):
 
