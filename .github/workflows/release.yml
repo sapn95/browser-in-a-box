@@ -57,13 +57,14 @@ jobs:
         run: |
           uv run --python "${PYTHON_VERSION}" --with nuitka --with patchelf \
             python -m nuitka \
-            --onefile --remove-output --assume-yes-for-downloads \
+            --standalone --remove-output --assume-yes-for-downloads \
             --output-filename=cib --output-dir=dist cib.py
-          ./dist/cib --version
+          ./dist/cib.dist/cib --version
       - name: package
         run: |
-          cd dist
-          tar -czf "cib-linux-${{ matrix.arch }}.tar.gz" cib
+          cd dist/cib.dist
+          tar -czf "../cib-linux-${{ matrix.arch }}.tar.gz" .
+          cd ..
           sha256sum "cib-linux-${{ matrix.arch }}.tar.gz" \
             > "cib-linux-${{ matrix.arch }}.tar.gz.sha256"
       - uses: actions/upload-artifact@v7
@@ -81,13 +82,14 @@ jobs:
       - name: compile with Nuitka
         run: |
           uv run --python "${PYTHON_VERSION}" --with nuitka python -m nuitka \
-            --onefile --remove-output --assume-yes-for-downloads \
+            --standalone --remove-output --assume-yes-for-downloads \
             --output-filename=cib --output-dir=dist cib.py
-          ./dist/cib --version
+          ./dist/cib.dist/cib --version
       - name: package
         run: |
-          cd dist
-          tar -czf cib-macos-arm64.tar.gz cib
+          cd dist/cib.dist
+          tar -czf ../cib-macos-arm64.tar.gz .
+          cd ..
           shasum -a 256 cib-macos-arm64.tar.gz > cib-macos-arm64.tar.gz.sha256
       - uses: actions/upload-artifact@v7
         with:

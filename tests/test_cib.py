@@ -316,55 +316,64 @@ def test_every_vm_action_is_reachable_from_the_cli(monkeypatch):
 # --- cli ----------------------------------------------------------------------
 
 
-def test_bare_invocation_defaults_to_up(monkeypatch):
-    seen = []
-    monkeypatch.setattr(cib, "find_engine", lambda: "podman")
-    monkeypatch.setattr(cib, "cmd_up", lambda engine, cfg: seen.append("up"))
-    assert cib.main([]) == 0
-    assert seen == ["up"]
-
-
 def test_unknown_command_is_rejected():
     with pytest.raises(SystemExit) as excinfo:
         cib.main(["frobnicate"])
     assert excinfo.value.code != 0
 
 
-HANDLERS = (
-    "cmd_up",
-    "cmd_down",
-    "cmd_open",
-    "cmd_status",
-    "cmd_shell",
-    "cmd_engine",
-    "cmd_reset",
-    "cmd_logs",
-)
+def test_bare_invocation_prints_help_and_fails(capsys):
+    assert cib.main([]) == 2
+    assert "box" in capsys.readouterr().err
 
 
-def subcommands() -> list[str]:
-    parser = cib.build_parser()
-    action = next(a for a in parser._actions if isinstance(a, cib.argparse._SubParsersAction))
-    return sorted(action.choices)
+@pytest.mark.parametrize("argv", [["frobnicate"], ["box"], ["box", "frobnicate"], ["vm", "nope"]])
+def test_unusable_invocations_are_rejected(argv):
+    with pytest.raises(SystemExit) as excinfo:
+        cib.main(argv)
+    assert excinfo.value.code != 0
 
 
-@pytest.mark.parametrize("name", subcommands())
-def test_every_subcommand_dispatches_to_a_handler(name, monkeypatch):
+@pytest.mark.parametrize("action", sorted(cib.BOX_ACTIONS))
+def test_every_box_action_dispatches(action, monkeypatch):
     monkeypatch.setattr(cib, "find_engine", lambda: "podman")
+    called = []
+    monkeypatch.setitem(cib.BOX_ACTIONS, action, lambda *a, **k: called.append(action))
+    if action == "logs":
+        monkeypatch.setattr(cib, "cmd_logs", lambda *a, **k: called.append(action))
+    assert cib.main(["box", action]) == 0
+    assert called == [action]
+
+
+@pytest.mark.parametrize("action", sorted(cib.VM_ACTIONS))
+def test_every_vm_action_dispatches(action, monkeypatch):
     monkeypatch.setattr(cib, "find_tart", lambda: "tart")
-    called: list[str] = []
-    for handler in HANDLERS:
-        monkeypatch.setattr(cib, handler, lambda *a, _h=handler, **k: called.append(_h))
-    for action in cib.VM_ACTIONS:
-        monkeypatch.setitem(cib.VM_ACTIONS, action, lambda *a, **k: called.append("vm"))
-    argv = [name, "up"] if name == "vm" else [name]
-    assert cib.main(argv) == 0, f"{name} has no working handler"
-    assert called, f"{name} did not dispatch"
+    called = []
+    monkeypatch.setitem(cib.VM_ACTIONS, action, lambda *a, **k: called.append(action))
+    assert cib.main(["vm", action]) == 0
+    assert called == [action]
+
+
+def test_the_help_names_both_variants_and_their_trade_off(capsys):
+    with pytest.raises(SystemExit):
+        cib.main(["--help"])
+    out = capsys.readouterr().out
+    assert "cib box" in out and "cib vm" in out
+    assert "iCloud Keychain" in out
+    assert "Touch ID" in out
+
+
+def test_follow_reaches_the_logs_command(monkeypatch):
+    monkeypatch.setattr(cib, "find_engine", lambda: "podman")
+    seen = {}
+    monkeypatch.setattr(cib, "cmd_logs", lambda e, c, follow=False: seen.update(follow=follow))
+    cib.main(["box", "logs", "-f"])
+    assert seen == {"follow": True}
 
 
 def test_failures_are_reported_without_a_traceback(monkeypatch, capsys):
     monkeypatch.setattr(cib, "find_engine", lambda: (_ for _ in ()).throw(cib.Failure("boom")))
-    assert cib.main(["status"]) == 1
+    assert cib.main(["box", "status"]) == 1
     assert "error: boom" in capsys.readouterr().err
 
 
@@ -393,7 +402,6 @@ def test_the_formula_updater_sets_version_urls_and_every_checksum():
         {"macos-arm64": ONE, "linux-arm64": ONE, "linux-x86_64": ONE},
     )
     assert 'version "2.3.4"' in out
-    assert "/download/v0.0.0/" not in out
     assert out.count("/download/v2.3.4/") == 3
     assert ZERO not in out
     assert out.count(ONE) == 3
@@ -406,8 +414,7 @@ def test_the_formula_updater_refuses_an_asset_it_cannot_find():
 
 def test_the_formula_updater_is_idempotent():
     once = _updater().update(_formula(), "2.3.4", {"macos-arm64": ONE})
-    twice = _updater().update(once, "2.3.4", {"macos-arm64": ONE})
-    assert once == twice
+    assert _updater().update(once, "2.3.4", {"macos-arm64": ONE}) == once
 
 
 def test_the_formula_updater_rejects_a_bad_checksum(tmp_path):

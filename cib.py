@@ -1,13 +1,22 @@
 #!/usr/bin/env python3
-"""chrome-in-a-box — real Google Chrome in a box, used from your own machine.
+"""chrome-in-a-box — a second Google Chrome that your machine's policy does not manage.
 
-Two variants, because they trade off differently:
+Every command says which of the two variants it acts on, because they are not
+interchangeable:
 
-* `box` (default) — a Linux container serving KasmVNC, used from a browser tab.
-  Runs anywhere podman or docker runs. The web UI is bound to 127.0.0.1, so the
-  browser is never reachable from the network. No host keychain.
-* `vm` — a macOS guest VM on Apple silicon, via tart. Heavier, but it is a real
-  macOS instance, so iCloud Keychain and its passkeys work.
+  cib box ...   A Linux container running Chrome behind KasmVNC, which you use from
+                a tab in your own browser at https://localhost:6901. Needs podman or
+                docker, starts in seconds, and runs anywhere. Google account sync and
+                the Google Password Manager work. The host keychain does not reach
+                into it, so Touch ID and iCloud Keychain passkeys are unavailable.
+
+  cib vm ...    A macOS guest VM on Apple silicon, driven by tart, which you use in
+                its own window. Needs ~40 GB and minutes to build. It is a real macOS
+                install signed into your Apple Account, so iCloud Keychain and its
+                passkeys work — but it has no Secure Enclave, so passkeys ask for the
+                account password instead of Touch ID.
+
+Neither variant can use a hardware security key: no USB is passed through.
 
 Single file, standard library only: no venv, no pip install.
 """
@@ -417,57 +426,91 @@ VM_ACTIONS = {
 }
 
 
+BOX_ACTIONS = {
+    "up": cmd_up,
+    "down": cmd_down,
+    "open": cmd_open,
+    "status": cmd_status,
+    "logs": cmd_logs,
+    "shell": cmd_shell,
+    "engine": cmd_engine,
+    "reset": cmd_reset,
+}
+
+BOX_HELP = """\
+  up       start it and wait until Chrome is running (reuses a healthy container)
+  down     stop and remove it; the browser profile is kept
+  open     open the web UI in your browser
+  status   show whether it is running
+  logs     show the last log lines (-f follows instead)
+  shell    open a shell inside it
+  engine   print the container engine that will be used
+  reset    delete the browser profile, losing every login (asks first)"""
+
+VM_HELP = """\
+  create   build the VM from a fresh macOS image (large download, one time)
+  up       start it; a window opens
+  down     stop it
+  status   list VMs and their state
+  delete   delete the VM and everything in it (asks first)"""
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cib",
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Environment overrides: CIB_PORT, CIB_RESOLUTION, CIB_WAIT_SECS, CIB_ENGINE,\n"
-            "CIB_IMAGE, CIB_NAME, CIB_VOLUME, CIB_PASSWORD, CIB_LOG_TAIL,\n"
-            "CIB_FORCE=1 (recreate a running container instead of reusing it)."
+            "Environment overrides\n"
+            "  box: CIB_PORT, CIB_RESOLUTION, CIB_WAIT_SECS, CIB_ENGINE, CIB_IMAGE,\n"
+            "       CIB_NAME, CIB_VOLUME, CIB_PASSWORD, CIB_LOG_TAIL,\n"
+            "       CIB_FORCE=1 to recreate a running container instead of reusing it\n"
+            "  vm:  CIB_VM_NAME, CIB_VM_CPUS, CIB_VM_MEMORY, CIB_VM_DISK, CIB_VM_DISPLAY"
         ),
     )
     parser.add_argument("--version", action="version", version=f"cib {__version__}")
-    sub = parser.add_subparsers(dest="command")
-    sub.add_parser("up", help="start the container and wait until Chrome is running")
-    sub.add_parser("down", help="stop and remove the container (the profile is kept)")
-    sub.add_parser("open", help="open the web UI in your browser")
-    sub.add_parser("status", help="show the container state")
-    logs = sub.add_parser("logs", help="show the last log lines")
-    logs.add_argument("-f", "--follow", action="store_true", help="follow the log")
-    sub.add_parser("shell", help="open a shell inside the container")
-    sub.add_parser("engine", help="print the container engine that will be used")
-    sub.add_parser("reset", help="delete the browser profile volume (asks first)")
-    vm = sub.add_parser("vm", help="the macOS VM variant (Apple silicon; has iCloud Keychain)")
-    vm.add_argument("action", choices=sorted(VM_ACTIONS), help="what to do with the VM")
+    sub = parser.add_subparsers(dest="variant", metavar="{box,vm}")
+
+    box = sub.add_parser(
+        "box",
+        help="the Linux container, used from a browser tab (podman or docker)",
+        description="The Linux container variant, used from a tab in your own browser.",
+        epilog=BOX_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    box.add_argument("action", choices=sorted(BOX_ACTIONS), metavar="action")
+    box.add_argument(
+        "-f", "--follow", action="store_true", help="with logs: follow instead of printing"
+    )
+
+    vm = sub.add_parser(
+        "vm",
+        help="the macOS VM, used in its own window (Apple silicon; has iCloud Keychain)",
+        description="The macOS guest VM variant, which has iCloud Keychain and its passkeys.",
+        epilog=VM_HELP,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    vm.add_argument("action", choices=sorted(VM_ACTIONS), metavar="action")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
-    command = args.command or "up"
+    if not args.variant:
+        parser.print_help(sys.stderr)
+        return 2
 
     try:
-        if command == "vm":
+        if args.variant == "vm":
             VM_ACTIONS[args.action](find_tart(), VmConfig())
             return 0
         cfg = Config()
         engine = find_engine()
-        if command == "logs":
+        if args.action == "logs":
             cmd_logs(engine, cfg, follow=args.follow)
         else:
-            handlers = {
-                "up": cmd_up,
-                "down": cmd_down,
-                "open": cmd_open,
-                "status": cmd_status,
-                "shell": cmd_shell,
-                "engine": cmd_engine,
-                "reset": cmd_reset,
-            }
-            handlers[command](engine, cfg)
+            BOX_ACTIONS[args.action](engine, cfg)
     except Failure as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
