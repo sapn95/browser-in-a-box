@@ -112,8 +112,8 @@ git clone https://github.com/sapn95/chrome-in-a-box && cd chrome-in-a-box
 
 # 2. with Homebrew (the tap lives in this repo, no second repo to add)
 brew tap sapn95/cib https://github.com/sapn95/chrome-in-a-box
-brew install cib
-cib up
+brew install sapn95/cib/cib     # the full name is what grants trust; plain
+cib up                          # `brew install cib` asks you to `brew trust` first
 
 # 3. as a command, in its own environment
 uv tool install git+https://github.com/sapn95/chrome-in-a-box    # or: pipx install ...
