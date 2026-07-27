@@ -5,13 +5,14 @@ one your machine's policy manages. One command up, one command down, and the
 profile survives restarts.
 
 ```bash
-./run.sh up      # start it
-./run.sh open    # open https://localhost:6901/?resize=scale
-./run.sh down    # stop it (profile is kept)
+cib up      # start it
+cib open    # open https://localhost:6901/?resize=scale
+cib down    # stop it (profile is kept)
 ```
 
-It is a single Python file (`cib.py`) using only the standard library — no venv, no
-`pip install`. `run.sh` is a shim, so `python3 cib.py up` works identically.
+One file, standard library only. Run it straight from a checkout with `./cib.py up`,
+install it as a `cib` command, or download a self-contained binary — see
+[Install](#install).
 
 No login prompt. Accept the self-signed certificate once and you are in.
 
@@ -33,7 +34,7 @@ There is no single box that does everything, because the isolation that keeps ho
 policy out also keeps the host keychain out. So there are two, and they fail in
 opposite directions.
 
-| | `./run.sh up` — **container** | `./run.sh vm …` — **macOS VM** |
+| | `cib up` — **container** | `cib vm …` — **macOS VM** |
 | --- | --- | --- |
 | Runs on | anything with podman or docker | Apple silicon only |
 | Free of host browser policy | yes | yes |
@@ -49,9 +50,9 @@ flowchart TD
     A{What do you need?} --> B[Google account sync,<br/>Password Manager]
     A --> C[iCloud Keychain<br/>passkeys]
     A --> D[USB security key<br/>or Touch ID]
-    B --> E([container<br/>./run.sh up])
+    B --> E([container<br/>cib up])
     C --> F{Apple silicon?}
-    F -- yes --> G([macOS VM<br/>./run.sh vm create])
+    F -- yes --> G([macOS VM<br/>cib vm create])
     F -- no --> H([not possible])
     D --> I([use the host browser —<br/>no box can do this])
 ```
@@ -97,8 +98,30 @@ any MDM, so its Chrome reads no managed policy. It has no Secure Enclave of its 
 and no Touch ID, so passkey use asks for the account password instead of a finger.
 
 > The VM must be **created from** a macOS 15+ installer. Upgrading or cloning an
-> older VM does not get an Apple Account identity — `./run.sh vm create` does it
+> older VM does not get an Apple Account identity — `cib vm create` does it
 > the right way.
+
+## Install
+
+Three ways, pick one:
+
+```bash
+# 1. from a checkout — nothing to install
+git clone https://github.com/sapn95/chrome-in-a-box && cd chrome-in-a-box
+./cib.py up
+
+# 2. as a command, in its own environment
+uv tool install git+https://github.com/sapn95/chrome-in-a-box    # or: pipx install ...
+cib up
+
+# 3. a self-contained binary — no Python needed at all
+#    (download the asset for your platform from the Releases page)
+tar -xzf cib-macos-arm64.tar.gz && ./cib up
+```
+
+The binary is compiled with [Nuitka](https://nuitka.net) — Python translated to C —
+so it needs no interpreter and no dependencies at all. It is about 8 MB. Linux
+binaries are built inside UBI10 so they link against a supported base.
 
 ## Requirements
 
@@ -123,24 +146,24 @@ and no Touch ID, so passkey use asks for the account password instead of a finge
 
 | Command            | What it does                                             |
 | ------------------ | -------------------------------------------------------- |
-| `./run.sh up`      | start the container, wait for the desktop, launch Chrome |
-| `./run.sh down`    | stop and remove the container (profile is kept)          |
-| `./run.sh open`    | open the web UI in your browser                          |
-| `./run.sh status`  | show container state                                     |
-| `./run.sh logs`    | show the last 200 log lines (`-f` follows instead)       |
-| `./run.sh shell`   | shell into the container                                 |
-| `./run.sh engine`  | print the container engine that will be used             |
-| `./run.sh reset`   | delete the browser profile (asks first)                  |
+| `cib up`      | start the container, wait for the desktop, launch Chrome |
+| `cib down`    | stop and remove the container (profile is kept)          |
+| `cib open`    | open the web UI in your browser                          |
+| `cib status`  | show container state                                     |
+| `cib logs`    | show the last 200 log lines (`-f` follows instead)       |
+| `cib shell`   | shell into the container                                 |
+| `cib engine`  | print the container engine that will be used             |
+| `cib reset`   | delete the browser profile (asks first)                  |
 
 The macOS VM variant (Apple silicon):
 
 | Command                 | What it does                                        |
 | ----------------------- | --------------------------------------------------- |
-| `./run.sh vm create`    | build the VM from a fresh macOS image (large)       |
-| `./run.sh vm up`        | start it — a window opens                           |
-| `./run.sh vm down`      | stop it                                             |
-| `./run.sh vm status`    | list VMs and their state                            |
-| `./run.sh vm delete`    | delete the VM and everything in it (asks first)     |
+| `cib vm create`    | build the VM from a fresh macOS image (large)       |
+| `cib vm up`        | start it — a window opens                           |
+| `cib vm down`      | stop it                                             |
+| `cib vm status`    | list VMs and their state                            |
+| `cib vm delete`    | delete the VM and everything in it (asks first)     |
 
 After `vm create`, finish it once by hand: Setup Assistant → sign in to your Apple
 Account → System Settings → Apple Account → iCloud → turn on **Passwords &
@@ -245,8 +268,9 @@ into Google Password Manager (Chrome ships no importer).
 - The browser profile lives in a named volume, not in the repo.
 - Settings that are known to kill the container — a password under 6 characters, a
   resolution above 1920x1200 — are rejected up front instead of failing obscurely.
-- CI runs ruff (lint + format), shellcheck, yamllint, actionlint, markdownlint, a
-  gitleaks secret scan and 41 unit tests on Python 3.10 and 3.13, plus a smoke job
+- CI runs ruff (lint + format), yamllint, actionlint, markdownlint, a gitleaks
+  secret scan, and the unit tests on Python 3.10 and 3.14 with a coverage floor,
+  everything Python inside a UBI10 container, plus a smoke job
   that boots the real container and asserts the UI answers 200 (not 401, which would
   mean the login prompt is back), Chrome is running, and the desktop really is at
   1920x1200. Every job has a timeout.

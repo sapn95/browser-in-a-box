@@ -1,0 +1,93 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.14"
+
+jobs:
+  linux:
+    name: binary (linux-${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    # Compiled inside UBI10, so the resulting ELF links against a base that is
+    # actually supported, rather than whatever the runner image happens to ship.
+    container: registry.access.redhat.com/ubi10/ubi:latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+    steps:
+      - name: build tools
+        run: >
+          dnf install -y --setopt=install_weak_deps=0
+          git tar gzip gcc gcc-c++ patchelf
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9
+      - name: compile with Nuitka
+        run: |
+          uv run --python "${PYTHON_VERSION}" --with nuitka python -m nuitka \
+            --onefile --remove-output --assume-yes-for-downloads \
+            --output-filename=cib --output-dir=dist cib.py
+          ./dist/cib --version
+      - name: package
+        run: |
+          cd dist
+          tar -czf "cib-linux-${{ matrix.arch }}.tar.gz" cib
+          sha256sum "cib-linux-${{ matrix.arch }}.tar.gz" \
+            > "cib-linux-${{ matrix.arch }}.tar.gz.sha256"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cib-linux-${{ matrix.arch }}
+          path: dist/cib-linux-${{ matrix.arch }}.tar.gz*
+
+  macos:
+    name: binary (macos-arm64)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9
+      - name: compile with Nuitka
+        run: |
+          uv run --python "${PYTHON_VERSION}" --with nuitka python -m nuitka \
+            --onefile --remove-output --assume-yes-for-downloads \
+            --output-filename=cib --output-dir=dist cib.py
+          ./dist/cib --version
+      - name: package
+        run: |
+          cd dist
+          tar -czf cib-macos-arm64.tar.gz cib
+          shasum -a 256 cib-macos-arm64.tar.gz > cib-macos-arm64.tar.gz.sha256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cib-macos-arm64
+          path: dist/cib-macos-arm64.tar.gz*
+
+  publish:
+    name: publish release
+    needs: [linux, macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --generate-notes --repo "${GITHUB_REPOSITORY}"

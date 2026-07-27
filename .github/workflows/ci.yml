@@ -16,23 +16,38 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # UBI10 is the base everything Python runs in; the runner OS is only a host.
+  # uv supplies the interpreter, because UBI10's own Python packages stop at 3.12.
+  UBI: registry.access.redhat.com/ubi10/ubi:latest
+  PYTHON_VERSION: "3.14"
+
 jobs:
   lint:
     name: lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    container: registry.access.redhat.com/ubi10/ubi:latest
+    steps:
+      - name: base tools
+        run: dnf install -y --setopt=install_weak_deps=0 git tar gzip
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9
+      - name: ruff check
+        run: uvx ruff check --output-format=github .
+      - name: ruff format
+        run: uvx ruff format --check --diff .
+
+  workflows:
+    name: lint workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - name: ruff
-        run: pipx run ruff check --output-format=github .
-      - name: ruff format
-        run: pipx run ruff format --check --diff .
-      - name: shellcheck
-        uses: ludeeus/action-shellcheck@2.0.0
-      - name: yamllint
-        run: pipx run yamllint .
       - name: actionlint
         uses: raven-actions/actionlint@v2.2.0
+      - name: yamllint
+        run: pipx run yamllint .
       - name: markdownlint
         uses: DavidAnson/markdownlint-cli2-action@v24
 
@@ -50,33 +65,56 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
 
   test:
-    name: unit tests
+    name: unit tests (py${{ matrix.python }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    container: registry.access.redhat.com/ubi10/ubi:latest
     strategy:
       fail-fast: false
       matrix:
-        # The tool is stdlib-only, so it has to work on whatever Python is present.
-        python-version: ["3.10", "3.13"]
+        # The oldest version the project claims to support, and the newest there is.
+        python: ["3.10", "3.14"]
     steps:
+      - name: base tools
+        run: dnf install -y --setopt=install_weak_deps=0 git tar gzip
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
-        with:
-          python-version: ${{ matrix.python-version }}
-      - name: pytest
-        run: pipx run pytest
+      - uses: astral-sh/setup-uv@v9
+      - name: pytest with coverage
+        run: >
+          uv run --python ${{ matrix.python }}
+          --with pytest --with pytest-cov
+          pytest
+
+  package:
+    name: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container: registry.access.redhat.com/ubi10/ubi:latest
+    steps:
+      - name: base tools
+        run: dnf install -y --setopt=install_weak_deps=0 git tar gzip
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9
+      - name: build a wheel and check the console script works
+        run: |
+          uv build --wheel
+          uv tool install --python "${PYTHON_VERSION}" dist/*.whl
+          "${HOME}/.local/bin/cib" --version
+          "${HOME}/.local/bin/cib" --help > /dev/null
 
   smoke:
     name: smoke (real container)
+    # Runs directly on the host: it needs a container engine, so it cannot itself
+    # live inside a container.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      # Pulling ~3GB and booting an emulation-free amd64 desktop still takes a while.
+      # Pulling ~3GB and booting an amd64 desktop takes a while on a cold runner.
       CIB_WAIT_SECS: "300"
     steps:
       - uses: actions/checkout@v7
       - name: start the container
-        run: ./run.sh up
+        run: ./cib.py up
       - name: web UI answers, and without a login prompt
         run: |
           code=$(curl -sk -o /dev/null -w '%{http_code}' https://localhost:6901/)
@@ -84,13 +122,13 @@ jobs:
           test "$code" = "200" || { echo "expected 200 (401 = login prompt is back)"; exit 1; }
       - name: Chrome is running
         run: |
-          eng=$(./run.sh engine)
+          eng=$(./cib.py engine)
           n=$("$eng" exec chrome-in-a-box bash -c 'pgrep -c chrome || true')
           echo "chrome processes: ${n:-0}"
           test "${n:-0}" -gt 0
       - name: desktop is at the requested resolution
         run: |
-          eng=$(./run.sh engine)
+          eng=$(./cib.py engine)
           mode=""
           for _ in $(seq 1 10); do
             mode=$("$eng" exec -e DISPLAY=:1 chrome-in-a-box xrandr --current |
@@ -103,7 +141,7 @@ jobs:
       - name: dump logs on failure
         if: failure()
         timeout-minutes: 2
-        run: ./run.sh logs 2>&1 | tail -50 || true
+        run: ./cib.py logs 2>&1 | tail -50 || true
       - name: clean up
         if: always()
-        run: ./run.sh down
+        run: ./cib.py down

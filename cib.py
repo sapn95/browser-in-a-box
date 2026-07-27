@@ -28,6 +28,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import NoReturn
 
+__version__ = "1.1.0"
+
 # renovate: datasource=docker depName=kasmweb/chrome
 DEFAULT_IMAGE = "docker.io/kasmweb/chrome:1.19.0"
 
@@ -180,7 +182,7 @@ def wait_for_ui(engine: str, cfg: Config) -> None:
             sys.stderr.write(logs.stdout + logs.stderr)
             raise Failure("the container exited during boot (log above)")
         time.sleep(2)
-    raise Failure(f"the web UI did not come up within {cfg.wait_secs}s; check './run.sh logs'")
+    raise Failure(f"the web UI did not come up within {cfg.wait_secs}s; check 'cib logs'")
 
 
 def ensure_desktop(engine: str, cfg: Config) -> bool:
@@ -351,7 +353,7 @@ def vm_exists(tart: str, vm: VmConfig) -> bool:
 
 def cmd_vm_create(tart: str, vm: VmConfig) -> None:
     if vm_exists(tart, vm):
-        print(f"{vm.name!r} already exists. './run.sh vm up' to start it.")
+        print(f"{vm.name!r} already exists. 'cib vm up' to start it.")
         return
     print(f"Creating {vm.name!r} from the latest macOS image (a large download) ...")
     # Built from a fresh image on purpose: Apple only grants a VM an Apple Account
@@ -372,7 +374,7 @@ def cmd_vm_create(tart: str, vm: VmConfig) -> None:
         "--display",
         vm.display,
     )
-    print("Created. Start it with './run.sh vm up', then in the guest:")
+    print("Created. Start it with 'cib vm up', then in the guest:")
     print("  1. finish Setup Assistant and sign in to your Apple Account")
     print("  2. System Settings > Apple Account > iCloud > turn on Passwords & Keychain")
     print("  3. install Chrome and sign in to Google")
@@ -380,7 +382,7 @@ def cmd_vm_create(tart: str, vm: VmConfig) -> None:
 
 def cmd_vm_up(tart: str, vm: VmConfig) -> None:
     if not vm_exists(tart, vm):
-        raise Failure(f"{vm.name!r} does not exist yet — run './run.sh vm create' first")
+        raise Failure(f"{vm.name!r} does not exist yet — run 'cib vm create' first")
     print(f"Starting {vm.name!r} (a window will open) ...")
     run(tart, "run", vm.name, check=False)
 
@@ -426,6 +428,7 @@ def build_parser() -> argparse.ArgumentParser:
             "CIB_FORCE=1 (recreate a running container instead of reusing it)."
         ),
     )
+    parser.add_argument("--version", action="version", version=f"cib {__version__}")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("up", help="start the container and wait until Chrome is running")
     sub.add_parser("down", help="stop and remove the container (the profile is kept)")
