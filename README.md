@@ -107,10 +107,17 @@ Chrome instead:
 The passkey then works both here and on the host, because it lives in your Google
 account rather than on either machine.
 
-> **Use a dedicated Google account for this.** The container runs Chrome with
-> `--no-sandbox` and no keyring, so the profile volume is only lightly obfuscated.
-> Anyone who can reach that volume gets every credential in whatever Google account
-> is signed in — not just the one you came for.
+**How much account to put in the box.** The profile volume is only lightly
+obfuscated (Chrome runs `--no-sandbox`, and the image ships no keyring), so whoever
+can read that volume or `exec` into the container gets every credential in the
+Google account signed in there.
+
+On a single-user machine you keep to yourself, that is the same trust boundary as
+your own browser profile, and signing in with your normal account is a reasonable
+call. Prefer a dedicated Google account when any of these is true: the host is
+shared or managed by someone else, the port is exposed beyond `127.0.0.1`, other
+people can run containers on that engine, or the account is one you would not want
+to lose in one go.
 
 Not possible, so do not spend an evening on it: forwarding a host passkey, the
 QR-code / phone flow (the Bluetooth advertisement is an input to the handshake — no
