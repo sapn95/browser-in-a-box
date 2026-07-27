@@ -38,10 +38,15 @@ jobs:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v9.0.0
       - name: compile with Nuitka
+        # --static-libpython=no: uv's standalone CPython records -l:libatomic.a in
+        # its link flags, and UBI10 ships no static libatomic on x86_64 (not even
+        # from CodeReady Builder). Linking libpython dynamically avoids them; the
+        # shared object is bundled into the onefile anyway.
         run: |
           uv run --python "${PYTHON_VERSION}" --with nuitka --with patchelf \
             python -m nuitka \
             --onefile --remove-output --assume-yes-for-downloads \
+            --static-libpython=no \
             --output-filename=cib --output-dir=dist cib.py
           ./dist/cib --version
       - name: package
@@ -66,6 +71,7 @@ jobs:
         run: |
           uv run --python "${PYTHON_VERSION}" --with nuitka python -m nuitka \
             --onefile --remove-output --assume-yes-for-downloads \
+            --static-libpython=no \
             --output-filename=cib --output-dir=dist cib.py
           ./dist/cib --version
       - name: package
