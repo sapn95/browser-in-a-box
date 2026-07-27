@@ -111,8 +111,8 @@ git clone https://github.com/sapn95/chrome-in-a-box && cd chrome-in-a-box
 ./cib.py up
 
 # 2. with Homebrew (the tap lives in this repo, no second repo to add)
-brew tap sapn95/cib https://github.com/sapn95/chrome-in-a-box
-brew install sapn95/cib/cib     # the full name is what grants trust; plain
+brew tap sapn95/tap https://github.com/sapn95/chrome-in-a-box
+brew install sapn95/tap/cib     # the full name is what grants trust; plain
 cib up                          # `brew install cib` asks you to `brew trust` first
 
 # 3. as a command, in its own environment
