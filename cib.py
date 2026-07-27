@@ -329,6 +329,7 @@ class VmConfig:
     cpus: str = field(default_factory=lambda: _env("CIB_VM_CPUS", "4"))
     memory: str = field(default_factory=lambda: _env("CIB_VM_MEMORY", "8192"))
     disk: str = field(default_factory=lambda: _env("CIB_VM_DISK", "100"))
+    display: str = field(default_factory=lambda: _env("CIB_VM_DISPLAY", "1920x1200"))
 
 
 def find_tart() -> str:
@@ -357,7 +358,20 @@ def cmd_vm_create(tart: str, vm: VmConfig) -> None:
     # identity when it was created from a macOS 15+ installer. Upgrading an older
     # VM, or cloning one, does not qualify.
     run(tart, "create", "--from-ipsw=latest", vm.name)
-    run(tart, "set", vm.name, "--cpu", vm.cpus, "--memory", vm.memory, "--disk-size", vm.disk)
+    # tart defaults to 1024x768, which is unusable for browsing.
+    run(
+        tart,
+        "set",
+        vm.name,
+        "--cpu",
+        vm.cpus,
+        "--memory",
+        vm.memory,
+        "--disk-size",
+        vm.disk,
+        "--display",
+        vm.display,
+    )
     print("Created. Start it with './run.sh vm up', then in the guest:")
     print("  1. finish Setup Assistant and sign in to your Apple Account")
     print("  2. System Settings > Apple Account > iCloud > turn on Passwords & Keychain")

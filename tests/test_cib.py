@@ -277,7 +277,7 @@ def test_vm_create_builds_from_a_fresh_image(calls, monkeypatch):
 def test_vm_create_sizes_the_vm_for_interactive_use(calls, monkeypatch):
     monkeypatch.setattr(cib, "vm_exists", lambda *a: False)
     cib.cmd_vm_create("tart", cib.VmConfig())
-    assert "set chrome-vm --cpu 4 --memory 8192 --disk-size 100" in flat(calls)
+    assert "--cpu 4 --memory 8192 --disk-size 100 --display 1920x1200" in flat(calls)
 
 
 def test_vm_create_is_idempotent(calls, monkeypatch, capsys):
