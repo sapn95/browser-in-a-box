@@ -29,14 +29,18 @@ jobs:
             arch: arm64
     steps:
       - name: build tools
+        # patchelf is not in UBI10's repos (it lives in EPEL, which has no place on
+        # this base). The PyPI wheel ships a statically linked binary that Nuitka
+        # picks up from PATH, so it is installed with the build below instead.
         run: >
           dnf install -y --setopt=install_weak_deps=0
-          git tar gzip gcc gcc-c++ patchelf
+          git tar gzip gcc gcc-c++
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v9.0.0
       - name: compile with Nuitka
         run: |
-          uv run --python "${PYTHON_VERSION}" --with nuitka python -m nuitka \
+          uv run --python "${PYTHON_VERSION}" --with nuitka --with patchelf \
+            python -m nuitka \
             --onefile --remove-output --assume-yes-for-downloads \
             --output-filename=cib --output-dir=dist cib.py
           ./dist/cib --version
