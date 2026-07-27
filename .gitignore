@@ -18,3 +18,9 @@ __pycache__/
 dist/
 build/
 *.whl
+
+# Coverage
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
