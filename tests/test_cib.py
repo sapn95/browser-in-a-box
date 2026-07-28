@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -30,14 +31,21 @@ def clean_env(monkeypatch):
 @pytest.fixture
 def calls(monkeypatch):
     """Record every engine invocation and return success by default."""
-    recorded: list[list[str]] = []
 
-    def fake_run(engine, *args, check=True, capture=False):
+    class Calls(list):
+        env: ClassVar[list] = []
+
+    recorded = Calls()
+    recorded_env: list = []
+
+    def fake_run(engine, *args, check=True, capture=False, env=None):
         recorded.append([engine, *args])
+        recorded_env.append(env)
         return subprocess.CompletedProcess([engine, *args], 0, stdout="", stderr="")
 
     monkeypatch.setattr(cib, "run", fake_run)
     monkeypatch.setattr(cib, "find_engine", lambda: "podman")
+    recorded.env = recorded_env
     return recorded
 
 
@@ -452,7 +460,7 @@ def resolving(monkeypatch):
     """Record engine calls and answer the ip lookup with an address."""
     recorded: list[list[str]] = []
 
-    def fake_run(engine, *args, check=True, capture=False):
+    def fake_run(engine, *args, check=True, capture=False, env=None):
         recorded.append([engine, *args])
         return subprocess.CompletedProcess([engine, *args], 0, stdout="192.168.1.50\n", stderr="")
 
@@ -544,7 +552,11 @@ def test_create_drives_packer_with_the_generated_password(calls, credentials, mo
     out = flat(calls)
     assert "packer build" in out
     assert str(cib.PACKER_TEMPLATE) in out
-    assert f"password={credentials.read_text().strip()}" in out
+    # The password travels in the environment, never in argv.
+    assert "password=" not in out
+    assert any(
+        e and e.get("PKR_VAR_password") == credentials.read_text().strip() for e in calls.env
+    )
     assert "memory_gb=8" in out  # 8192 MB, passed to packer in GB
 
 
@@ -611,15 +623,16 @@ def test_memory_is_rounded_up_not_truncated(calls, credentials, monkeypatch):
     assert "memory_gb=8" in flat(calls)
 
 
-def test_the_generated_password_avoids_layout_dependent_characters():
-    # It is typed into the guest as keystrokes; -, _, y and z move between the US
-    # and Swiss German layouts, so a password containing them would not match.
-    for _ in range(50):
-        CREDENTIALS = cib.CREDENTIALS
-        assert CREDENTIALS  # referenced so the intent is obvious
-        break
-    alphabet = set("abcdefghijklmnopqrstuvwxABCDEFGHIJKLMNOPQRSTUVWX0123456789")
-    assert not (alphabet & set("yzYZ-_/"))
+def test_the_generated_password_avoids_layout_dependent_characters(credentials):
+    # It is typed into the guest as keystrokes, and -, _, y, z move between the US
+    # and Swiss German layouts, so such a password would never match what was saved.
+    # Generate real ones rather than restating the alphabet.
+    forbidden = set("yzYZ-_/")
+    for _ in range(200):
+        credentials.unlink(missing_ok=True)
+        password = cib.guest_password(create=True)
+        assert len(password) >= 20
+        assert not (set(password) & forbidden), password
 
 
 def test_an_empty_credentials_file_is_not_treated_as_a_password(credentials):
@@ -688,3 +701,76 @@ def test_setup_points_the_guest_downloads_at_the_share():
     assert "ln -sfn" in cib.GUEST_INSTALL_CHROME
     # An existing real folder must not be destroyed.
     assert "Downloads.local" in cib.GUEST_INSTALL_CHROME
+
+
+def _run_guest_script(script: str, home, share_exists: bool):
+    """Execute the guest script the way packer/ssh would: /bin/sh -e, with fakes."""
+    bin_dir = home / "fakebin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    for name in ("curl", "hdiutil", "cp", "rm"):
+        (bin_dir / name).write_text("#!/bin/sh\nexit 0\n")
+        (bin_dir / name).chmod(0o755)
+    share = Path(cib.GUEST_SHARE)
+    body = script.replace(str(share), str(home / "share"))
+    body = body.replace("'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'", "true")
+    body = body.replace("'/Applications/Google Chrome.app'", f"'{home / 'chrome.app'}'")
+    if share_exists:
+        (home / "share").mkdir(exist_ok=True)
+    return subprocess.run(  # noqa: S603
+        ["/bin/sh", "-e", "-c", body],
+        env={"HOME": str(home), "PATH": f"{bin_dir}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_the_guest_script_fails_when_the_share_is_missing(tmp_path):
+    # It used to warn, install Chrome, exit 0 — and cib then printed "Done".
+    (tmp_path / "Downloads").mkdir()
+    result = _run_guest_script(cib.GUEST_INSTALL_CHROME, tmp_path, share_exists=False)
+    assert result.returncode != 0
+    assert "not mounted" in result.stderr
+
+
+def test_the_guest_script_links_downloads_to_the_share(tmp_path):
+    (tmp_path / "Downloads").mkdir()
+    result = _run_guest_script(cib.GUEST_INSTALL_CHROME, tmp_path, share_exists=True)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "Downloads").is_symlink()
+    assert (tmp_path / "Downloads").resolve() == (tmp_path / "share").resolve()
+
+
+def test_the_guest_script_keeps_a_non_empty_downloads_folder(tmp_path):
+    (tmp_path / "Downloads").mkdir()
+    (tmp_path / "Downloads" / "keep.txt").write_text("mine")
+    result = _run_guest_script(cib.GUEST_INSTALL_CHROME, tmp_path, share_exists=True)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "Downloads.local" / "keep.txt").read_text() == "mine"
+
+
+def test_a_share_path_with_a_colon_is_rejected(monkeypatch, tmp_path):
+    # tart parses --dir as name:path:options, so a colon would silently mis-parse.
+    monkeypatch.setenv("CIB_VM_SHARE", str(tmp_path / "a:b"))
+    with pytest.raises(cib.Failure, match="colon"):
+        cib.vm_run_args(cib.VmConfig())
+
+
+def test_an_unusable_share_path_is_reported_not_raised(monkeypatch, tmp_path):
+    blocker = tmp_path / "file"
+    blocker.write_text("not a directory")
+    monkeypatch.setenv("CIB_VM_SHARE", str(blocker / "share"))
+    with pytest.raises(cib.Failure, match="cannot use"):
+        cib.vm_run_args(cib.VmConfig())
+
+
+def test_a_zero_resolution_is_rejected():
+    with pytest.raises(cib.Failure, match="must be positive"):
+        cib.Config(resolution="0x0").check()
+
+
+def test_the_password_never_reaches_the_argument_list(calls, credentials, monkeypatch):
+    # argv is world-readable while the build runs, and is printed on failure.
+    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(cib, "find_packer", lambda: "packer")
+    cib.cmd_vm_create("tart", cib.VmConfig())
+    assert credentials.read_text().strip() not in flat(calls)
