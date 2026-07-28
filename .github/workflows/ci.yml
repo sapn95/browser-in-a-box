@@ -54,7 +54,9 @@ jobs:
 
   packer:
     name: packer template
-    runs-on: ubuntu-latest
+    # macOS, because packer-plugin-tart publishes darwin builds only — it drives
+    # Apple's Virtualization.framework, so there is no Linux binary to fetch.
+    runs-on: macos-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
