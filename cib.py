@@ -341,6 +341,13 @@ class VmConfig:
     memory: str = field(default_factory=lambda: _env("CIB_VM_MEMORY", "8192"))
     disk: str = field(default_factory=lambda: _env("CIB_VM_DISK", "100"))
     display: str = field(default_factory=lambda: _env("CIB_VM_DISPLAY", "1920x1200"))
+    # "bridged" gives the guest an address from the real network, so it inherits a
+    # working DNS resolver. tart's default "shared" mode hands out the vmnet gateway
+    # as resolver, and on some hosts that gateway does not answer DNS at all — the
+    # guest then has an address but cannot resolve anything, which reads as "not
+    # connected to the Internet" in Setup Assistant.
+    net: str = field(default_factory=lambda: _env("CIB_VM_NET", "bridged"))
+    interface: str = field(default_factory=lambda: _env("CIB_VM_INTERFACE", "en0"))
 
 
 def find_tart() -> str:
@@ -389,11 +396,25 @@ def cmd_vm_create(tart: str, vm: VmConfig) -> None:
     print("  3. install Chrome and sign in to Google")
 
 
+def vm_run_args(vm: VmConfig) -> list[str]:
+    if vm.net == "bridged":
+        return ["run", f"--net-bridged={vm.interface}", vm.name]
+    if vm.net == "host":
+        return ["run", "--net-host", vm.name]
+    return ["run", vm.name]
+
+
 def cmd_vm_up(tart: str, vm: VmConfig) -> None:
     if not vm_exists(tart, vm):
         raise Failure(f"{vm.name!r} does not exist yet — run 'cib vm create' first")
     print(f"Starting {vm.name!r} (a window will open) ...")
-    run(tart, "run", vm.name, check=False)
+    result = run(tart, *vm_run_args(vm), check=False)
+    if result.returncode != 0 and vm.net == "bridged":
+        raise Failure(
+            f"bridged networking on {vm.interface!r} failed; list the usable interfaces with "
+            f"'tart run --net-bridged=list {vm.name}', set CIB_VM_INTERFACE, or fall back to "
+            "CIB_VM_NET=shared (whose DNS may not work on every host)"
+        )
 
 
 def cmd_vm_down(tart: str, vm: VmConfig) -> None:

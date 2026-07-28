@@ -422,3 +422,30 @@ def test_the_formula_updater_rejects_a_bad_checksum(tmp_path):
     formula.write_text(_formula())
     with pytest.raises(SystemExit, match="no valid sha256"):
         _updater().main(["2.3.4", str(formula), "macos-arm64=nope"])
+
+
+# --- VM networking ------------------------------------------------------------
+
+
+def test_the_vm_uses_bridged_networking_by_default():
+    # Shared networking hands out a vmnet gateway that does not always answer DNS,
+    # which leaves the guest with an address but no name resolution.
+    assert cib.vm_run_args(cib.VmConfig()) == ["run", "--net-bridged=en0", "chrome-vm"]
+
+
+def test_the_vm_network_mode_and_interface_are_overridable(monkeypatch):
+    monkeypatch.setenv("CIB_VM_INTERFACE", "en1")
+    assert "--net-bridged=en1" in cib.vm_run_args(cib.VmConfig())
+    monkeypatch.setenv("CIB_VM_NET", "shared")
+    assert cib.vm_run_args(cib.VmConfig()) == ["run", "chrome-vm"]
+    monkeypatch.setenv("CIB_VM_NET", "host")
+    assert "--net-host" in cib.vm_run_args(cib.VmConfig())
+
+
+def test_a_failed_bridged_start_explains_the_alternatives(monkeypatch):
+    monkeypatch.setattr(cib, "vm_exists", lambda *a: True)
+    monkeypatch.setattr(
+        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="")
+    )
+    with pytest.raises(cib.Failure, match="CIB_VM_NET=shared"):
+        cib.cmd_vm_up("tart", cib.VmConfig())
