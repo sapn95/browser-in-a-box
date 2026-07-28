@@ -232,6 +232,10 @@ def mark_setup_done(root: Path) -> None:
 
 def patch(root: Path, account: Account) -> None:
     """Apply everything to a mounted guest Data volume."""
+    # This runs as root and builds paths from the account name, so it validates it
+    # rather than trusting whoever invoked it.
+    if "/" in account.name or ".." in account.name or account.name.startswith("."):
+        raise PatchError(f"refusing to use {account.name!r} as an account name")
     if os.geteuid() != 0:
         raise PatchError(
             "preparing the guest writes into its dslocal database and has to set root "
@@ -308,7 +312,11 @@ def data_volume(device: str) -> str:
     ours = Path(device).name  # e.g. "disk10"
     for container in plistlib.loads(result.stdout).get("Containers", []):
         stores = container.get("PhysicalStores", [])
-        if not any(st.get("DeviceIdentifier", "").startswith(ours) for st in stores):
+        if not any(
+            st.get("DeviceIdentifier", "") in (ours,)
+            or st.get("DeviceIdentifier", "").startswith(ours + "s")
+            for st in stores
+        ):
             continue
         for volume in container.get("Volumes", []):
             roles = volume.get("Roles") or []
@@ -329,7 +337,7 @@ def mount(volume: str) -> Path:
         check=False,
     )
     if result.returncode != 0:
-        raise PatchError(f"could not mount {volume}: {result.stdout.strip()}")
+        raise PatchError(f"could not mount {volume}: {(result.stderr or result.stdout).strip()}")
     info = subprocess.run(  # noqa: S603
         ["/usr/sbin/diskutil", "info", "-plist", volume],
         capture_output=True,

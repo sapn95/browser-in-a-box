@@ -485,6 +485,7 @@ def cmd_vm_prepare(tart: str, vm: VmConfig) -> None:
 def _create_offline(tart: str, vm: VmConfig) -> None:
     """Build the guest and prepare it by patching its disk, so Setup Assistant is
     never shown. Deterministic, unlike typing into it."""
+    validate_vm_user(vm.user)
     password = guest_password(create=True)
     print(f"Creating {vm.name!r} from a fresh macOS image ...")
     run(tart, "create", "--from-ipsw=latest", vm.name)
@@ -508,11 +509,26 @@ def _create_offline(tart: str, vm: VmConfig) -> None:
     boot = subprocess.Popen(  # noqa: S603
         [tart, "run", "--no-graphics", vm.name],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
     )
-    time.sleep(int(_env("CIB_VM_FIRSTBOOT_SECS", "180")))
+    time.sleep(_env_int("CIB_VM_FIRSTBOOT_SECS", "180", 0))
+    # A boot that never happened would otherwise be patched and called "Built".
+    if boot.poll() is not None:
+        raise Failure(
+            f"the guest's first boot exited immediately (tart exit {boot.returncode})"
+            + (f": {(boot.stderr.read() or '').strip()}" if boot.stderr else "")
+        )
     run(tart, "stop", vm.name, check=False, capture=True)
-    boot.wait(timeout=120)
+    try:
+        boot.wait(timeout=120)
+    except subprocess.TimeoutExpired:
+        # Otherwise the orphan keeps disk.img open, which is what we need next.
+        boot.kill()
+        boot.wait()
+        raise Failure(
+            f"{vm.name!r} did not shut down; stop it with 'tart stop {vm.name}' and retry"
+        ) from None
 
     _prepare_guest(vm, password)
     print()
@@ -529,7 +545,8 @@ def _prepare_guest(vm: VmConfig, password: str) -> None:
     Split out so a failure here can be retried with 'cib vm prepare' instead of
     rebuilding a VM that took half an hour.
     """
-    disk = Path.home() / ".tart" / "vms" / vm.name / "disk.img"
+    tart_home = Path(os.environ.get("TART_HOME") or Path.home() / ".tart")
+    disk = tart_home / "vms" / vm.name / "disk.img"
     if not disk.exists():
         raise Failure(f"the guest's disk is not where it was expected: {disk}")
     patcher = Path(__file__).resolve().parent / "cibpatch.py"
@@ -708,10 +725,17 @@ def vm_ip(tart: str, vm: VmConfig, wait: str = "60") -> str:
     return ip
 
 
+def validate_vm_user(name: str) -> str:
+    """The account name reaches both ssh and a root-privileged patcher, so it is
+    checked once, here. A name starting with "-" would be read by ssh as an option,
+    and one containing ".." would escape the guest volume the patcher writes into."""
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", name) or ".." in name:
+        raise Failure(f"CIB_VM_USER is not a usable account name: {name!r}")
+    return name
+
+
 def ssh_command(vm: VmConfig, ip: str, script: str | None = None) -> list[str]:
-    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", vm.user):
-        # A user starting with "-" would be read by ssh as an option.
-        raise Failure(f"CIB_VM_USER is not a usable account name: {vm.user!r}")
+    validate_vm_user(vm.user)
     ssh = shutil.which("ssh")
     if not ssh:
         raise Failure("ssh is not on PATH")
@@ -843,7 +867,8 @@ def build_parser() -> argparse.ArgumentParser:
             "       CIB_NAME, CIB_VOLUME, CIB_PASSWORD, CIB_LOG_TAIL,\n"
             "       CIB_FORCE=1 to recreate a running container instead of reusing it\n"
             "  vm:  CIB_VM_NAME, CIB_VM_CPUS, CIB_VM_MEMORY, CIB_VM_DISK, CIB_VM_DISPLAY,\n"
-            "       CIB_VM_NET, CIB_VM_INTERFACE, CIB_VM_USER"
+            "       CIB_VM_NET, CIB_VM_INTERFACE, CIB_VM_USER, CIB_VM_SHARE,\n"
+            "       CIB_VM_FIRSTBOOT_SECS, CIB_VM_PACKER=1 to drive Setup Assistant"
         ),
     )
     parser.add_argument("--version", action="version", version=f"cib {__version__}")
