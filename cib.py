@@ -133,6 +133,8 @@ class Config:
             raise Failure(
                 f"CIB_RESOLUTION must look like 1920x1200, got {self.resolution!r}"
             ) from None
+        if width < 1 or height < 1:
+            raise Failure(f"CIB_RESOLUTION must be positive, got {self.resolution}")
         if width > MAX_WIDTH or height > MAX_HEIGHT:
             raise Failure(
                 f"CIB_RESOLUTION {self.resolution} exceeds the modes KasmVNC ships "
@@ -156,7 +158,11 @@ def find_engine() -> str:
 
 
 def run(
-    engine: str, *args: str, check: bool = True, capture: bool = False
+    engine: str,
+    *args: str,
+    check: bool = True,
+    capture: bool = False,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     # Argument list is built here and never passed through a shell.
     return subprocess.run(  # noqa: S603
@@ -164,6 +170,7 @@ def run(
         check=check,
         capture_output=capture,
         text=True,
+        env=env,
     )
 
 
@@ -450,6 +457,8 @@ def cmd_vm_create(tart: str, vm: VmConfig) -> None:
     print("This takes a while: it installs macOS, drives Setup Assistant and adds Chrome.")
     # Built from a fresh installer on purpose: Apple only grants a VM an Apple
     # Account identity when it was created from a macOS 15+ one.
+    # The password goes in the environment, not argv: a CalledProcessError prints the
+    # command, and argv is readable by every local user for the whole build.
     run(
         packer,
         "build",
@@ -458,8 +467,6 @@ def cmd_vm_create(tart: str, vm: VmConfig) -> None:
         "-var",
         f"username={vm.user}",
         "-var",
-        f"password={password}",
-        "-var",
         f"cpu_count={vm.cpus}",
         "-var",
         # Round up: 8000 MB is 8 GB of intent, and truncating would give the guest 7.
@@ -467,13 +474,16 @@ def cmd_vm_create(tart: str, vm: VmConfig) -> None:
         "-var",
         f"disk_size_gb={vm.disk}",
         str(PACKER_TEMPLATE),
+        env={**os.environ, "PKR_VAR_password": password},
     )
     run(tart, "set", vm.name, "--display", vm.display, check=False)
     print()
     print(f"Built. The account is {vm.user!r}; 'cib vm password' prints its password.")
-    print("Start it with 'cib vm up', then the two steps Apple keeps interactive:")
-    print("  1. sign in to your Apple Account")
-    print("  2. System Settings > Apple Account > iCloud > turn on Passwords & Keychain")
+    print("Next:")
+    print("  1. cib vm up")
+    print("  2. sign in to your Apple Account            (interactive: 2FA)")
+    print("  3. System Settings > Apple Account > iCloud > turn on Passwords & Keychain")
+    print("  4. cib vm setup    — points the guest's Downloads at the shared host folder")
 
 
 # Where a tart directory share appears inside a macOS guest.
@@ -482,7 +492,12 @@ GUEST_SHARE = "/Volumes/My Shared Files/downloads"
 
 def vm_run_args(vm: VmConfig) -> list[str]:
     share = Path(vm.share).expanduser()
-    share.mkdir(parents=True, exist_ok=True)
+    if ":" in str(share):
+        raise Failure(f"CIB_VM_SHARE cannot contain a colon, tart uses it as a separator: {share}")
+    try:
+        share.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise Failure(f"cannot use {share} as the shared downloads folder: {exc}") from None
     args = ["run", f"--dir=downloads:{share}"]
     if vm.net == "bridged":
         return [*args, f"--net-bridged={vm.interface}", vm.name]
@@ -498,6 +513,8 @@ def cmd_vm_up(tart: str, vm: VmConfig) -> None:
         raise Failure(f"{vm.name!r} does not exist yet — run 'cib vm create' first")
     print(f"Starting {vm.name!r} (a window will open) ...")
     result = run(tart, *vm_run_args(vm), check=False)
+    if result.returncode != 0 and vm.net != "bridged":
+        raise Failure(f"the VM failed to start (exit code {result.returncode})")
     if result.returncode != 0 and vm.net == "bridged":
         raise Failure(
             f"bridged networking on {vm.interface!r} failed; list the usable interfaces with "
@@ -516,7 +533,8 @@ if [ -d "{GUEST_SHARE}" ]; then
   fi
   ln -sfn "{GUEST_SHARE}" "$HOME/Downloads"
 else
-  echo "the shared downloads folder is not mounted; is the VM started by cib?" >&2
+  echo "the shared downloads folder is not mounted; start the VM with 'cib vm up'" >&2
+  exit 1
 fi
 if [ -d '/Applications/Google Chrome.app' ]; then
   echo 'Chrome is already installed'

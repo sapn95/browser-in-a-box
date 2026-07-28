@@ -160,8 +160,12 @@ source "tart-cli" "chrome-vm" {
     "<wait10s>open '/System/Applications/System Settings.app'<enter>",
     "<wait120s>",
     "<wait10s><leftCtrlOn><f2><leftCtrlOff><right><right><right><down>Sharing<enter>",
-    "<wait10s><tab><tab><tab><tab><tab><tab><tab><tab><tab><tab><tab><tab><spacebar>",
+    # Screen Sharing first, exactly as upstream does it: the Remote Login step below
+    # counts tabs from the focus this leaves behind.
+    "<wait10s><tab><tab><tab><tab><tab><spacebar>",
     "<wait10s>${var.password}<enter>",
+    # Remote Login, which is what lets cib take the guest over afterwards.
+    "<wait10s><tab><tab><tab><tab><tab><tab><tab><tab><tab><tab><tab><tab><spacebar>",
     "<wait10s><leftAltOn>q<leftAltOff>",
   ]
 }
@@ -176,8 +180,7 @@ build {
       # keep it an integer. Both the enabled and the selected list have to be written;
       # only writing the enabled one leaves the layout inactive.
       "PLIST=$HOME/Library/Preferences/com.apple.HIToolbox.plist",
-      "/usr/libexec/PlistBuddy -c 'Delete :AppleEnabledInputSources' \"$PLIST\" 2>/dev/null || true",
-      "for KEY in AppleEnabledInputSources AppleSelectedInputSources; do /usr/libexec/PlistBuddy -c \"Delete :$KEY\" \"$PLIST\" 2>/dev/null; /usr/libexec/PlistBuddy -c \"Add :$KEY array\" -c \"Add :$KEY:0 dict\" -c \"Add :$KEY:0:InputSourceKind string 'Keyboard Layout'\" -c \"Add :$KEY:0:'KeyboardLayout ID' integer ${var.keyboard_layout_id}\" -c \"Add :$KEY:0:'KeyboardLayout Name' string '${var.keyboard_layout_name}'\" \"$PLIST\"; done",
+      "for KEY in AppleEnabledInputSources AppleSelectedInputSources; do /usr/libexec/PlistBuddy -c \"Delete :$KEY\" \"$PLIST\" 2>/dev/null || true; /usr/libexec/PlistBuddy -c \"Add :$KEY array\" -c \"Add :$KEY:0 dict\" -c \"Add :$KEY:0:InputSourceKind string 'Keyboard Layout'\" -c \"Add :$KEY:0:'KeyboardLayout ID' integer ${var.keyboard_layout_id}\" -c \"Add :$KEY:0:'KeyboardLayout Name' string '${var.keyboard_layout_name}'\" \"$PLIST\"; done",
       "killall cfprefsd 2>/dev/null || true",
       # sudo has no tty under a provisioner, so the password goes in on stdin.
       "echo '${var.password}' | sudo -S systemsetup -settimezone ${var.timezone}",
