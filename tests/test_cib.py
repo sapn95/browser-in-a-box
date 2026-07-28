@@ -266,27 +266,6 @@ def test_a_missing_tart_points_at_the_install_command(monkeypatch):
         cib.find_tart()
 
 
-def test_vm_create_builds_from_a_fresh_image(calls, monkeypatch):
-    # Apple only grants an Apple Account identity to a VM created from a 15+
-    # installer; upgrading an older VM does not qualify.
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
-    cib.cmd_vm_create("tart", cib.VmConfig())
-    assert "create --from-ipsw=latest chrome-vm" in flat(calls)
-
-
-def test_vm_create_sizes_the_vm_for_interactive_use(calls, monkeypatch):
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
-    cib.cmd_vm_create("tart", cib.VmConfig())
-    assert "--cpu 4 --memory 8192 --disk-size 100 --display 1920x1200" in flat(calls)
-
-
-def test_vm_create_is_idempotent(calls, monkeypatch, capsys):
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: True)
-    cib.cmd_vm_create("tart", cib.VmConfig())
-    assert "create" not in flat(calls)
-    assert "already exists" in capsys.readouterr().out
-
-
 def test_vm_up_refuses_before_create(calls, monkeypatch):
     monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
     with pytest.raises(cib.Failure, match="vm create"):
@@ -523,33 +502,51 @@ def test_setup_passes_the_install_script_to_the_guest(monkeypatch):
     assert seen["script"] == cib.GUEST_INSTALL_CHROME
 
 
-# --- the golden image ---------------------------------------------------------
+# --- the unattended build -----------------------------------------------------
 
 
-def test_create_clones_the_golden_image_when_there_is_one(calls, monkeypatch):
-    # Cloning skips Setup Assistant; only the Apple Account sign-in remains.
-    monkeypatch.setattr(cib, "vm_exists", lambda t, vm, name=None: name == vm.golden)
-    cib.cmd_vm_create("tart", cib.VmConfig())
-    assert "clone chrome-vm-golden chrome-vm" in flat(calls)
-    assert "--from-ipsw" not in flat(calls)
+@pytest.fixture
+def credentials(tmp_path, monkeypatch):
+    monkeypatch.setattr(cib, "CREDENTIALS", tmp_path / "vm-credentials")
+    return cib.CREDENTIALS
 
 
-def test_create_falls_back_to_building_from_an_image(calls, monkeypatch):
-    monkeypatch.setattr(cib, "vm_exists", lambda t, vm, name=None: False)
-    cib.cmd_vm_create("tart", cib.VmConfig())
-    assert "--from-ipsw=latest" in flat(calls)
-    assert "clone" not in flat(calls)
+def test_the_guest_password_is_generated_once_and_remembered(credentials):
+    first = cib.guest_password(create=True)
+    assert len(first) >= 20
+    assert cib.guest_password() == first
+    assert credentials.stat().st_mode & 0o777 == 0o600
 
 
-def test_snapshot_replaces_any_previous_golden_image(calls, monkeypatch):
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: True)
-    cib.cmd_vm_snapshot("tart", cib.VmConfig())
-    out = flat(calls)
-    assert "delete chrome-vm-golden" in out
-    assert "clone chrome-vm chrome-vm-golden" in out
+def test_asking_for_a_password_before_the_build_says_so(credentials):
+    with pytest.raises(cib.Failure, match="build the VM first"):
+        cib.guest_password()
 
 
-def test_snapshot_refuses_when_there_is_nothing_to_snapshot(calls, monkeypatch):
+def test_create_drives_packer_with_the_generated_password(calls, credentials, monkeypatch):
     monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
-    with pytest.raises(cib.Failure, match="nothing to snapshot"):
-        cib.cmd_vm_snapshot("tart", cib.VmConfig())
+    monkeypatch.setattr(cib, "find_packer", lambda: "packer")
+    cib.cmd_vm_create("tart", cib.VmConfig())
+    out = flat(calls)
+    assert "packer build" in out
+    assert cib.PACKER_TEMPLATE in out
+    assert f"password={credentials.read_text().strip()}" in out
+    assert "memory_gb=8" in out  # 8192 MB, passed to packer in GB
+
+
+def test_a_missing_packer_points_at_the_install_command(monkeypatch):
+    monkeypatch.setattr(cib.shutil, "which", lambda name: None)
+    with pytest.raises(cib.Failure, match="brew install packer"):
+        cib.find_packer()
+
+
+def test_the_template_drives_setup_assistant_and_keeps_gatekeeper():
+    template = (Path(__file__).resolve().parents[1] / cib.PACKER_TEMPLATE).read_text()
+    assert "boot_command" in template
+    assert "switzerland" in template
+    assert "SwissGerman" in template
+    # The upstream template it is based on disables Gatekeeper for CI images.
+    assert "spctl --global-disable" not in template
+    assert "assessments enabled" in template
+    # The Apple ID pane is skipped: 2FA cannot be automated.
+    assert "skip signing in with an Apple ID" in template
