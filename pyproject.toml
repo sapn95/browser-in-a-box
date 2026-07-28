@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "chrome-in-a-box"
-version = "1.2.0"
+version = "1.3.0"
 description = "Real Google Chrome in a box — a Linux container or a macOS VM."
 readme = "README.md"
 license = "MIT"

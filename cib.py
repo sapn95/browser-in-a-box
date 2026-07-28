@@ -37,7 +37,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import NoReturn
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 # renovate: datasource=docker depName=kasmweb/chrome
 DEFAULT_IMAGE = "docker.io/kasmweb/chrome:1.19.0"
