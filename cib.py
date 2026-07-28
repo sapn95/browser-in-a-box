@@ -511,7 +511,7 @@ def _create_offline(tart: str, vm: VmConfig) -> None:
     print("Preparing the guest without Setup Assistant ...")
     try:
         cibpatch.prepare(disk, cibpatch.Account(name=vm.user, password=password))
-    except cibpatch.PatchError as exc:
+    except (cibpatch.PatchError, OSError) as exc:
         raise Failure(
             f"{exc}\nSet CIB_VM_PACKER=1 to fall back to driving Setup Assistant instead."
         ) from None

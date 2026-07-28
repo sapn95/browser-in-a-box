@@ -891,12 +891,14 @@ def test_the_user_record_stores_every_value_as_a_list():
     assert record["uid"] == ["501"]
 
 
-def test_patching_a_directory_that_is_not_a_guest_volume_is_refused(tmp_path):
+def test_patching_a_directory_that_is_not_a_guest_volume_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
     with pytest.raises(cibpatch.PatchError, match="Data volume"):
         cibpatch.patch(tmp_path, cibpatch.Account("admin", "pw"))
 
 
-def test_patching_without_a_first_boot_state_says_so(tmp_path):
+def test_patching_without_a_first_boot_state_says_so(tmp_path, monkeypatch):
+    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
     (tmp_path / "private/var/db").mkdir(parents=True)
     with pytest.raises(cibpatch.PatchError, match="booted once"):
         cibpatch.patch(tmp_path, cibpatch.Account("admin", "pw"))
@@ -1056,3 +1058,46 @@ def test_the_container_is_found_through_its_physical_store(monkeypatch):
         lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=listing, stderr=b""),
     )
     assert cibpatch.data_volume("/dev/disk10") == "/dev/disk11s2"
+
+
+def test_patching_without_root_says_so_instead_of_a_traceback(tmp_path, monkeypatch):
+    # Writing dslocal and setting root ownership needs root; PermissionError is an
+    # OSError, so it would have escaped the PatchError handler entirely.
+    (tmp_path / "private/var/db").mkdir(parents=True)
+    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 501)
+    with pytest.raises(cibpatch.PatchError, match="needs root"):
+        cibpatch.patch(tmp_path, cibpatch.Account("admin", "pw"))
+
+
+def test_the_home_tree_is_owned_after_every_file_exists(tmp_path, monkeypatch):
+    # suppress_setup_assistant creates ~/Library/Preferences. Chowning the home
+    # before that leaves those directories root-owned, and cfprefsd then silently
+    # fails to write any preference the guest sets.
+    chowned: list[str] = []
+    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g: chowned.append(str(p)))
+    root = tmp_path
+    for sub in ("users", "groups"):
+        (root / f"private/var/db/dslocal/nodes/Default/{sub}").mkdir(parents=True)
+    import plistlib
+
+    for name in ("admin", "staff"):
+        path = root / f"private/var/db/dslocal/nodes/Default/groups/{name}.plist"
+        with path.open("wb") as fh:
+            plistlib.dump({"users": [], "groupmembers": []}, fh, fmt=plistlib.FMT_BINARY)
+    cibpatch.patch(root, cibpatch.Account("admin", "pw"))
+    prefs = root / "Users/admin/Library/Preferences"
+    assert prefs.is_dir()
+    assert str(prefs) in chowned, "the per-user preferences directory was never owned"
+
+
+def test_the_data_volume_is_matched_on_its_real_name(monkeypatch):
+    # The APFS volume is called "Data", not "Macintosh HD - Data" — that is a Finder
+    # display name.
+    listing = _apfs_listing("disk9s2", [{"DeviceIdentifier": "disk10s2", "Name": "Data"}])
+    monkeypatch.setattr(
+        cibpatch.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=listing, stderr=b""),
+    )
+    assert cibpatch.data_volume("/dev/disk9") == "/dev/disk10s2"

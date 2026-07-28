@@ -213,6 +213,10 @@ def create_account(root: Path, account: Account) -> None:
     home = root / f"Users/{account.name}"
     home.mkdir(parents=True, exist_ok=True)
     (home / ".CFUserTextEncoding").write_text("0:0")
+
+
+def own_home(root: Path, account: Account) -> None:
+    home = root / f"Users/{account.name}"
     for path in (home, *home.rglob("*")):
         os.chown(path, account.uid, account.gid)
 
@@ -227,6 +231,11 @@ def mark_setup_done(root: Path) -> None:
 
 def patch(root: Path, account: Account) -> None:
     """Apply everything to a mounted guest Data volume."""
+    if os.geteuid() != 0:
+        raise PatchError(
+            "preparing the guest writes into its dslocal database and has to set root "
+            "ownership, so this needs root — re-run with sudo"
+        )
     root = Path(root)
     if not (root / "private/var/db").is_dir():
         raise PatchError(f"{root} does not look like a macOS Data volume")
@@ -235,6 +244,12 @@ def patch(root: Path, account: Account) -> None:
     suppress_setup_assistant(root, account)
     enable_autologin(root, account)
     enable_remote_login(root)
+    # Last, not inside create_account: suppress_setup_assistant creates
+    # ~/Library/Preferences, and a home tree chowned before that leaves those
+    # directories owned by root. cfprefsd then silently fails to write anything,
+    # so no preference the guest sets — including the one this all depends on —
+    # would ever persist.
+    own_home(root, account)
 
 
 # --- attaching the guest's disk ------------------------------------------------
@@ -296,7 +311,7 @@ def data_volume(device: str) -> str:
             continue
         for volume in container.get("Volumes", []):
             roles = volume.get("Roles") or []
-            if "Data" in roles or volume.get("Name", "").endswith(" - Data"):
+            if "Data" in roles or volume.get("Name") == "Data":
                 return "/dev/" + volume["DeviceIdentifier"]
         raise PatchError(
             f"the container on {device} has no Data volume; it has "
