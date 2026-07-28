@@ -904,6 +904,22 @@ def test_patching_without_a_first_boot_state_says_so(tmp_path, monkeypatch):
         cibpatch.patch(tmp_path, cibpatch.Account("admin", "pw"))
 
 
+class _FakeBoot:
+    """Stands in for the `tart run` child: alive until stopped, like a real boot."""
+
+    returncode = 0
+    stderr = None
+
+    def poll(self):
+        return None
+
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self):
+        return None
+
+
 def _fake_guest_disk(monkeypatch, tmp_path):
     """A stand-in for ~/.tart/vms/<name>/disk.img, so nothing patches Path.exists
     globally — that would also make the credentials file look present."""
@@ -923,7 +939,7 @@ def test_create_prepares_the_guest_offline_by_default(calls, credentials, monkey
     monkeypatch.setattr(
         cib.subprocess,
         "Popen",
-        lambda *a, **k: type("P", (), {"wait": lambda self, timeout=None: 0})(),
+        lambda *a, **k: _FakeBoot(),
     )
     monkeypatch.setattr(
         cib.subprocess,
@@ -959,7 +975,7 @@ def test_a_failed_patch_names_the_fallback(calls, credentials, monkeypatch, tmp_
     monkeypatch.setattr(
         cib.subprocess,
         "Popen",
-        lambda *a, **k: type("P", (), {"wait": lambda self, timeout=None: 0})(),
+        lambda *a, **k: _FakeBoot(),
     )
 
     # The sudo probe must succeed so we reach the patch itself.
@@ -1125,7 +1141,7 @@ def test_the_patcher_is_run_with_a_real_interpreter(calls, credentials, monkeypa
     monkeypatch.setattr(
         cib.subprocess,
         "Popen",
-        lambda *a, **k: type("P", (), {"wait": lambda self, timeout=None: 0})(),
+        lambda *a, **k: _FakeBoot(),
     )
     monkeypatch.setattr(cib.sys, "executable", "/opt/homebrew/bin/cib")  # a binary
     monkeypatch.setattr(cib.shutil, "which", lambda n: "/usr/bin/python3")
@@ -1167,3 +1183,63 @@ def test_prepare_can_be_retried_without_rebuilding(calls, credentials, monkeypat
     cib.cmd_vm_prepare("tart", cib.VmConfig())
     assert "cibpatch.py" in " ".join(seen["cmd"])
     assert "create" not in flat(calls)
+
+
+def test_a_first_boot_that_never_happened_is_not_called_built(
+    calls, credentials, monkeypatch, tmp_path
+):
+    # Otherwise cib patches a guest that never booted and prints "Built."
+    import io
+
+    class Died(_FakeBoot):
+        returncode = 2
+        stderr = io.StringIO("VM is already running!")
+
+        def poll(self):
+            return 2
+
+    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(cib.time, "sleep", lambda s: None)
+    monkeypatch.setattr(cib.subprocess, "Popen", lambda *a, **k: Died())
+    _fake_guest_disk(monkeypatch, tmp_path)
+    with pytest.raises(cib.Failure, match="exited immediately"):
+        cib.cmd_vm_create("tart", cib.VmConfig())
+
+
+@pytest.mark.parametrize("name", ["../../etc/pam.d/x", "-oProxyCommand=x", "My User", "/abs"])
+def test_a_dangerous_account_name_is_refused_before_root_runs(name, monkeypatch):
+    # This value reaches a root-privileged patcher that builds paths from it.
+    monkeypatch.setenv("CIB_VM_USER", name)
+    with pytest.raises(cib.Failure, match="not a usable account name"):
+        cib.validate_vm_user(cib.VmConfig().user)
+
+
+def test_the_patcher_refuses_a_dangerous_name_itself(tmp_path, monkeypatch):
+    # The privileged half does not trust its caller either.
+    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
+    with pytest.raises(cibpatch.PatchError, match="refusing to use"):
+        cibpatch.patch(tmp_path, cibpatch.Account("../../etc/x", "pw"))
+
+
+def test_the_disk_is_looked_for_where_tart_actually_puts_it(monkeypatch, tmp_path):
+    # tart honours TART_HOME; looking under ~/.tart would miss the disk entirely.
+    monkeypatch.setenv("TART_HOME", str(tmp_path / "elsewhere"))
+    disk = tmp_path / "elsewhere" / "vms" / "chrome-vm" / "disk.img"
+    disk.parent.mkdir(parents=True)
+    disk.touch()
+    monkeypatch.setattr(
+        cib.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1)
+    )
+    with pytest.raises(cib.Failure, match="sudo"):  # got past the disk lookup
+        cib._prepare_guest(cib.VmConfig(), "pw")
+
+
+def test_mount_failures_report_the_reason(monkeypatch):
+    # diskutil writes its diagnosis to stderr; reporting stdout gave a bare colon.
+    monkeypatch.setattr(
+        cibpatch.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="Failed to find disk"),
+    )
+    with pytest.raises(cibpatch.PatchError, match="Failed to find disk"):
+        cibpatch.mount("/dev/disk99s9")
