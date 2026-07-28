@@ -471,6 +471,17 @@ def cmd_vm_create(tart: str, vm: VmConfig) -> None:
     return _create_offline(tart, vm)
 
 
+def cmd_vm_prepare(tart: str, vm: VmConfig) -> None:
+    """Run just the preparation step against an existing VM.
+
+    Building the guest takes half an hour; if only the patch failed there is no
+    reason to do it all again.
+    """
+    if not vm_exists(tart, vm):
+        raise Failure(f"{vm.name!r} does not exist — run 'cib vm create' first")
+    _prepare_guest(vm, guest_password())
+
+
 def _create_offline(tart: str, vm: VmConfig) -> None:
     """Build the guest and prepare it by patching its disk, so Setup Assistant is
     never shown. Deterministic, unlike typing into it."""
@@ -503,16 +514,51 @@ def _create_offline(tart: str, vm: VmConfig) -> None:
     run(tart, "stop", vm.name, check=False, capture=True)
     boot.wait(timeout=120)
 
+    _prepare_guest(vm, password)
+    print()
+    print(f"Built. The account is {vm.user!r}; 'cib vm password' prints its password.")
+    print("Next:")
+    print("  1. cib vm up          — boots straight to the desktop, no Setup Assistant")
+    print("  2. cib vm setup       — installs Chrome, the clipboard agent and downloads")
+    print("  3. sign in to your Apple Account, then turn on iCloud Keychain")
+
+
+def _prepare_guest(vm: VmConfig, password: str) -> None:
+    """Write what Setup Assistant would have produced onto the guest's disk.
+
+    Split out so a failure here can be retried with 'cib vm prepare' instead of
+    rebuilding a VM that took half an hour.
+    """
     disk = Path.home() / ".tart" / "vms" / vm.name / "disk.img"
     if not disk.exists():
         raise Failure(f"the guest's disk is not where it was expected: {disk}")
-    # Only this step needs root — writing the guest's user database and setting
-    # ownership inside it. The download and the boot above do not, so sudo is asked
-    # for here rather than for the whole command.
-    print("Preparing the guest without Setup Assistant (this step needs sudo) ...")
     patcher = Path(__file__).resolve().parent / "cibpatch.py"
+    if not patcher.exists():
+        raise Failure(
+            f"the patcher is missing at {patcher} — the offline path needs a checkout; "
+            "set CIB_VM_PACKER=1 or run cib.py from the repository"
+        )
+    # sys.executable is the compiled binary itself under Nuitka, not an interpreter,
+    # so it cannot be used to run a script. Find a real python instead.
+    python = (
+        sys.executable
+        if Path(sys.executable).name.startswith("python")
+        else (shutil.which("python3") or "/usr/bin/python3")
+    )
+    # Only this step needs root — writing the guest's user database and setting
+    # ownership inside it. The download and the boot do not, so sudo is asked for
+    # here rather than for the whole command. sudo prompts on its own tty, so it
+    # cannot ask for anything when cib runs detached; check before trying.
+    print("Preparing the guest without Setup Assistant (this step needs sudo) ...")
+    probe = subprocess.run(["/usr/bin/sudo", "-n", "true"], check=False, capture_output=True)
+    if probe.returncode != 0:
+        raise Failure(
+            "this step needs sudo and there is no cached credential to use.\n"
+            "Run 'sudo -v' first, or run cib in a terminal where sudo can prompt.\n"
+            f"The VM {vm.name!r} is kept, so 'cib vm prepare' redoes only this step."
+        )
     result = subprocess.run(  # noqa: S603
-        ["/usr/bin/sudo", sys.executable, str(patcher), "--disk", str(disk), "--user", vm.user],
+        ["/usr/bin/sudo", python, str(patcher), "--disk", str(disk), "--user", vm.user],
         input=password + "\n",
         text=True,
         check=False,
@@ -522,12 +568,6 @@ def _create_offline(tart: str, vm: VmConfig) -> None:
             "preparing the guest failed (see above).\n"
             "Set CIB_VM_PACKER=1 to fall back to driving Setup Assistant instead."
         )
-    print()
-    print(f"Built. The account is {vm.user!r}; 'cib vm password' prints its password.")
-    print("Next:")
-    print("  1. cib vm up          — boots straight to the desktop, no Setup Assistant")
-    print("  2. cib vm setup       — installs Chrome, the clipboard agent and downloads")
-    print("  3. sign in to your Apple Account, then turn on iCloud Keychain")
 
 
 def _create_with_packer(tart: str, vm: VmConfig) -> None:
@@ -739,6 +779,7 @@ def cmd_vm_delete(tart: str, vm: VmConfig) -> None:
 VM_ACTIONS = {
     "create": cmd_vm_create,
     "up": cmd_vm_up,
+    "prepare": cmd_vm_prepare,
     "setup": cmd_vm_setup,
     "ssh": cmd_vm_ssh,
     "ip": cmd_vm_ip,
@@ -773,6 +814,7 @@ BOX_HELP = """\
 VM_HELP = """\
   create   build the VM from a fresh macOS image (large download, one time)
   up       start it; a window opens
+  prepare  redo just the offline preparation on an already-built VM
   setup    install Chrome in the guest over SSH (needs Remote Login on in it)
   ssh      open a shell in the guest
   ip       print the guest's address

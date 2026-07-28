@@ -962,8 +962,11 @@ def test_a_failed_patch_names_the_fallback(calls, credentials, monkeypatch, tmp_
         lambda *a, **k: type("P", (), {"wait": lambda self, timeout=None: 0})(),
     )
 
+    # The sudo probe must succeed so we reach the patch itself.
     monkeypatch.setattr(
-        cib.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1)
+        cib.subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0 if "-n" in cmd else 1),
     )
     with pytest.raises(cib.Failure, match="CIB_VM_PACKER=1"):
         cib.cmd_vm_create("tart", cib.VmConfig())
@@ -1111,3 +1114,56 @@ def test_the_data_volume_is_matched_on_its_real_name(monkeypatch):
         lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=listing, stderr=b""),
     )
     assert cibpatch.data_volume("/dev/disk9") == "/dev/disk10s2"
+
+
+def test_the_patcher_is_run_with_a_real_interpreter(calls, credentials, monkeypatch, tmp_path):
+    # Under Nuitka sys.executable is the compiled binary, which cannot run a script.
+    monkeypatch.setenv("CIB_VM_PACKER", "0")
+    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(cib.time, "sleep", lambda s: None)
+    _fake_guest_disk(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        cib.subprocess,
+        "Popen",
+        lambda *a, **k: type("P", (), {"wait": lambda self, timeout=None: 0})(),
+    )
+    monkeypatch.setattr(cib.sys, "executable", "/opt/homebrew/bin/cib")  # a binary
+    monkeypatch.setattr(cib.shutil, "which", lambda n: "/usr/bin/python3")
+    seen = {}
+    monkeypatch.setattr(
+        cib.subprocess,
+        "run",
+        lambda cmd, **kw: seen.update(cmd=cmd) or subprocess.CompletedProcess(cmd, 0),
+    )
+    cib.cmd_vm_create("tart", cib.VmConfig())
+    assert seen["cmd"][1] == "/usr/bin/python3"
+    assert not seen["cmd"][1].endswith("/cib")
+
+
+def test_a_missing_sudo_credential_is_named_before_anything_is_tried(monkeypatch, tmp_path):
+    # sudo prompts on its own tty and cannot ask for anything when cib runs
+    # detached; that used to surface as a bare "preparing the guest failed".
+    _fake_guest_disk(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        cib.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1)
+    )
+    with pytest.raises(cib.Failure, match="sudo -v"):
+        cib._prepare_guest(cib.VmConfig(), "pw")
+
+
+def test_prepare_can_be_retried_without_rebuilding(calls, credentials, monkeypatch, tmp_path):
+    # Building takes half an hour; a failed patch must not cost that again.
+    cib.guest_password(create=True)  # as a real build would have left it
+    _fake_guest_disk(monkeypatch, tmp_path)
+    seen = {}
+    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: True)
+    monkeypatch.setattr(
+        cib.subprocess,
+        "run",
+        lambda cmd, **kw: (
+            (None if "-n" in cmd else seen.update(cmd=cmd)) or subprocess.CompletedProcess(cmd, 0)
+        ),
+    )
+    cib.cmd_vm_prepare("tart", cib.VmConfig())
+    assert "cibpatch.py" in " ".join(seen["cmd"])
+    assert "create" not in flat(calls)
