@@ -474,8 +474,6 @@ def cmd_vm_create(tart: str, vm: VmConfig) -> None:
 def _create_offline(tart: str, vm: VmConfig) -> None:
     """Build the guest and prepare it by patching its disk, so Setup Assistant is
     never shown. Deterministic, unlike typing into it."""
-    import cibpatch
-
     password = guest_password(create=True)
     print(f"Creating {vm.name!r} from a fresh macOS image ...")
     run(tart, "create", "--from-ipsw=latest", vm.name)
@@ -508,13 +506,22 @@ def _create_offline(tart: str, vm: VmConfig) -> None:
     disk = Path.home() / ".tart" / "vms" / vm.name / "disk.img"
     if not disk.exists():
         raise Failure(f"the guest's disk is not where it was expected: {disk}")
-    print("Preparing the guest without Setup Assistant ...")
-    try:
-        cibpatch.prepare(disk, cibpatch.Account(name=vm.user, password=password))
-    except (cibpatch.PatchError, OSError) as exc:
+    # Only this step needs root — writing the guest's user database and setting
+    # ownership inside it. The download and the boot above do not, so sudo is asked
+    # for here rather than for the whole command.
+    print("Preparing the guest without Setup Assistant (this step needs sudo) ...")
+    patcher = Path(__file__).resolve().parent / "cibpatch.py"
+    result = subprocess.run(  # noqa: S603
+        ["/usr/bin/sudo", sys.executable, str(patcher), "--disk", str(disk), "--user", vm.user],
+        input=password + "\n",
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
         raise Failure(
-            f"{exc}\nSet CIB_VM_PACKER=1 to fall back to driving Setup Assistant instead."
-        ) from None
+            "preparing the guest failed (see above).\n"
+            "Set CIB_VM_PACKER=1 to fall back to driving Setup Assistant instead."
+        )
     print()
     print(f"Built. The account is {vm.user!r}; 'cib vm password' prints its password.")
     print("Next:")
