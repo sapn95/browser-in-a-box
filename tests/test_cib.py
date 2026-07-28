@@ -546,6 +546,7 @@ def test_asking_for_a_password_before_the_build_says_so(credentials):
 
 
 def test_create_drives_packer_with_the_generated_password(calls, credentials, monkeypatch):
+    monkeypatch.setenv("CIB_VM_PACKER", "1")  # this covers the fallback path
     monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
     monkeypatch.setattr(cib, "find_packer", lambda: "packer")
     cib.cmd_vm_create("tart", cib.VmConfig())
@@ -615,6 +616,7 @@ def test_a_bad_numeric_setting_is_an_error_not_a_traceback(name, value, expected
 
 
 def test_memory_is_rounded_up_not_truncated(calls, credentials, monkeypatch):
+    monkeypatch.setenv("CIB_VM_PACKER", "1")  # this covers the fallback path
     # 8000 MB is 8 GB worth of intent; truncating gives the guest 7.
     monkeypatch.setenv("CIB_VM_MEMORY", "8000")
     monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
@@ -674,6 +676,7 @@ def test_follow_is_rejected_where_it_means_nothing(monkeypatch):
 
 
 def test_create_runs_packer_init_first(calls, credentials, monkeypatch):
+    monkeypatch.setenv("CIB_VM_PACKER", "1")  # this covers the fallback path
     # Without it, every first-time user hits "Did you run packer init".
     monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
     monkeypatch.setattr(cib, "find_packer", lambda: "packer")
@@ -769,6 +772,7 @@ def test_a_zero_resolution_is_rejected():
 
 
 def test_the_password_never_reaches_the_argument_list(calls, credentials, monkeypatch):
+    monkeypatch.setenv("CIB_VM_PACKER", "1")  # this covers the fallback path
     # argv is world-readable while the build runs, and is printed on failure.
     monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
     monkeypatch.setattr(cib, "find_packer", lambda: "packer")
@@ -896,3 +900,103 @@ def test_patching_without_a_first_boot_state_says_so(tmp_path):
     (tmp_path / "private/var/db").mkdir(parents=True)
     with pytest.raises(cibpatch.PatchError, match="booted once"):
         cibpatch.patch(tmp_path, cibpatch.Account("admin", "pw"))
+
+
+def _fake_guest_disk(monkeypatch, tmp_path):
+    """A stand-in for ~/.tart/vms/<name>/disk.img, so nothing patches Path.exists
+    globally — that would also make the credentials file look present."""
+    disk = tmp_path / ".tart" / "vms" / "chrome-vm" / "disk.img"
+    disk.parent.mkdir(parents=True, exist_ok=True)
+    disk.touch()
+    monkeypatch.setattr(cib.Path, "home", classmethod(lambda cls: tmp_path))
+    return disk
+
+
+def test_create_prepares_the_guest_offline_by_default(calls, credentials, monkeypatch, tmp_path):
+    # Typing into Setup Assistant is the fallback now, not the default.
+    seen = {}
+    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(cib.time, "sleep", lambda s: None)
+    _fake_guest_disk(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        cib.subprocess,
+        "Popen",
+        lambda *a, **k: type("P", (), {"wait": lambda self, timeout=None: 0})(),
+    )
+    monkeypatch.setattr(cibpatch, "prepare", lambda disk, account: seen.update(user=account.name))
+    cib.cmd_vm_create("tart", cib.VmConfig())
+    out = flat(calls)
+    assert "create --from-ipsw=latest chrome-vm" in out
+    assert "packer" not in out
+    assert seen["user"] == "admin"
+
+
+def test_the_packer_path_is_still_reachable(calls, credentials, monkeypatch):
+    monkeypatch.setenv("CIB_VM_PACKER", "1")
+    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(cib, "find_packer", lambda: "packer")
+    cib.cmd_vm_create("tart", cib.VmConfig())
+    assert "packer build" in flat(calls)
+
+
+def test_a_failed_patch_names_the_fallback(calls, credentials, monkeypatch, tmp_path):
+    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(cib.time, "sleep", lambda s: None)
+    _fake_guest_disk(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        cib.subprocess,
+        "Popen",
+        lambda *a, **k: type("P", (), {"wait": lambda self, timeout=None: 0})(),
+    )
+
+    def boom(disk, account):
+        raise cibpatch.PatchError("no APFS Data volume")
+
+    monkeypatch.setattr(cibpatch, "prepare", boom)
+    with pytest.raises(cib.Failure, match="CIB_VM_PACKER=1"):
+        cib.cmd_vm_create("tart", cib.VmConfig())
+
+
+def test_the_data_volume_is_chosen_by_role_not_by_name(monkeypatch):
+    # The System volume is sealed; writing to it silently achieves nothing.
+    import plistlib
+
+    listing = plistlib.dumps(
+        {
+            "AllDisksAndPartitions": [
+                {
+                    "APFSVolumes": [
+                        {
+                            "DeviceIdentifier": "disk5s1",
+                            "VolumeName": "Macintosh HD",
+                            "APFSVolumeRoles": ["System"],
+                        },
+                        {
+                            "DeviceIdentifier": "disk5s5",
+                            "VolumeName": "Macintosh HD - Data",
+                            "APFSVolumeRoles": ["Data"],
+                        },
+                    ]
+                }
+            ]
+        }
+    )
+    monkeypatch.setattr(
+        cibpatch.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=listing, stderr=b""),
+    )
+    assert cibpatch.data_volume("/dev/disk5") == "/dev/disk5s5"
+
+
+def test_a_disk_without_a_data_volume_is_reported(monkeypatch):
+    import plistlib
+
+    empty = plistlib.dumps({"AllDisksAndPartitions": []})
+    monkeypatch.setattr(
+        cibpatch.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=empty, stderr=b""),
+    )
+    with pytest.raises(cibpatch.PatchError, match="no APFS Data volume"):
+        cibpatch.data_volume("/dev/disk9")

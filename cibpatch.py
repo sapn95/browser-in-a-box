@@ -267,3 +267,70 @@ def detach(device: str) -> None:
         capture_output=True,
         check=False,
     )
+
+
+def data_volume(device: str) -> str:
+    """The guest's writable volume.
+
+    A macOS install has several volumes and the System one is sealed and read-only,
+    so writing to the wrong one silently achieves nothing. Matched on the APFS role
+    rather than the name, which differs between installs.
+    """
+    result = subprocess.run(  # noqa: S603
+        ["/usr/sbin/diskutil", "list", "-plist", device],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise PatchError(f"could not list the volumes on {device}")
+    for disk in plistlib.loads(result.stdout).get("AllDisksAndPartitions", []):
+        for volume in disk.get("APFSVolumes", []):
+            roles = volume.get("APFSVolumeRoles") or []
+            if "Data" in roles or volume.get("VolumeName", "").endswith(" - Data"):
+                return "/dev/" + volume["DeviceIdentifier"]
+    raise PatchError(f"{device} has no APFS Data volume — is this a macOS guest disk?")
+
+
+def mount(volume: str) -> Path:
+    result = subprocess.run(  # noqa: S603
+        ["/usr/sbin/diskutil", "mount", volume],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise PatchError(f"could not mount {volume}: {result.stdout.strip()}")
+    info = subprocess.run(  # noqa: S603
+        ["/usr/sbin/diskutil", "info", "-plist", volume],
+        capture_output=True,
+        check=False,
+    )
+    point = plistlib.loads(info.stdout).get("MountPoint")
+    if not point:
+        raise PatchError(f"{volume} mounted but reported no mount point")
+    return Path(point)
+
+
+def unmount(volume: str) -> None:
+    subprocess.run(  # noqa: S603
+        ["/usr/sbin/diskutil", "unmount", volume],
+        capture_output=True,
+        check=False,
+    )
+
+
+def prepare(disk: Path, account: Account) -> None:
+    """Attach the guest's disk, patch its Data volume, and put it all back.
+
+    Unwound in reverse even when the patch fails, so a half-finished run never
+    leaves a disk image attached to the host.
+    """
+    device = attach(disk)
+    volume = None
+    try:
+        volume = data_volume(device)
+        patch(mount(volume), account)
+    finally:
+        if volume:
+            unmount(volume)
+        detach(device)
