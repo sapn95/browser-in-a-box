@@ -710,7 +710,7 @@ def _run_guest_script(script: str, home, share_exists: bool):
     """Execute the guest script the way packer/ssh would: /bin/sh -e, with fakes."""
     bin_dir = home / "fakebin"
     bin_dir.mkdir(parents=True, exist_ok=True)
-    for name in ("curl", "hdiutil", "cp", "rm"):
+    for name in ("curl", "hdiutil", "cp", "rm", "tar", "sudo", "install"):
         (bin_dir / name).write_text("#!/bin/sh\nexit 0\n")
         (bin_dir / name).chmod(0o755)
     share = Path(cib.GUEST_SHARE)
@@ -1243,3 +1243,27 @@ def test_mount_failures_report_the_reason(monkeypatch):
     )
     with pytest.raises(cibpatch.PatchError, match="Failed to find disk"):
         cibpatch.mount("/dev/disk99s9")
+
+
+def test_the_guest_script_survives_a_home_with_no_downloads(tmp_path):
+    # The offline path creates the home itself, so Downloads may not exist — under
+    # `set -e` the old two-state handling killed the script before Chrome.
+    result = _run_guest_script(cib.GUEST_INSTALL_CHROME, tmp_path, share_exists=True)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "Downloads").is_symlink()
+
+
+def test_setup_installs_the_clipboard_agent_too():
+    # It used to be installed only by the packer path, while cib told the user that
+    # `vm setup` had done it.
+    assert "tart-guest-agent" in cib.GUEST_INSTALL_CHROME
+    assert "--install-daemon=launchd" in cib.GUEST_INSTALL_CHROME
+    assert cib.GUEST_AGENT_VERSION in cib.GUEST_INSTALL_CHROME
+
+
+def test_the_image_volume_is_attached_with_ownership():
+    # macOS mounts an image volume noowners, where chown returns success and writes
+    # nothing — so every file the patcher creates would stay root-owned.
+    source = Path(cibpatch.__file__).read_text()
+    assert '"-owners"' in source
+    assert "noowners" in source  # and it is checked, not merely requested

@@ -56,6 +56,9 @@ MIN_PASSWORD_LEN = 6
 # DynamicQualityMax above 9 makes Xvnc exit with a fatal error.
 VNC_OPTIONS = "-DisableBasicAuth=1 -DynamicQualityMin=8 -DynamicQualityMax=9 -DLP_ClipDelay=0"
 
+# renovate: datasource=github-releases depName=cirruslabs/tart-guest-agent
+GUEST_AGENT_VERSION = "0.11.0"
+
 CHROME_BIN = "/opt/google/chrome/google-chrome"
 PROFILE_DIR = "/home/kasm-user/.config/google-chrome"
 
@@ -485,8 +488,8 @@ def cmd_vm_prepare(tart: str, vm: VmConfig) -> None:
 def _create_offline(tart: str, vm: VmConfig) -> None:
     """Build the guest and prepare it by patching its disk, so Setup Assistant is
     never shown. Deterministic, unlike typing into it."""
-    validate_vm_user(vm.user)
     password = guest_password(create=True)
+    firstboot = _env_int("CIB_VM_FIRSTBOOT_SECS", "180", 0)  # before anything is built
     print(f"Creating {vm.name!r} from a fresh macOS image ...")
     run(tart, "create", "--from-ipsw=latest", vm.name)
     run(
@@ -512,7 +515,7 @@ def _create_offline(tart: str, vm: VmConfig) -> None:
         stderr=subprocess.PIPE,
         text=True,
     )
-    time.sleep(_env_int("CIB_VM_FIRSTBOOT_SECS", "180", 0))
+    time.sleep(firstboot)
     # A boot that never happened would otherwise be patched and called "Built".
     if boot.poll() is not None:
         raise Failure(
@@ -546,6 +549,7 @@ def _prepare_guest(vm: VmConfig, password: str) -> None:
     rebuilding a VM that took half an hour.
     """
     tart_home = Path(os.environ.get("TART_HOME") or Path.home() / ".tart")
+    validate_vm_user(vm.user)
     disk = tart_home / "vms" / vm.name / "disk.img"
     if not disk.exists():
         raise Failure(f"the guest's disk is not where it was expected: {disk}")
@@ -674,7 +678,9 @@ GUEST_INSTALL_CHROME = f"""set -eu
 # Downloads land on the host: replace the guest's own Downloads folder with the
 # shared one, so every app follows, not just Chrome.
 if [ -d "{GUEST_SHARE}" ]; then
-  if [ ! -L "$HOME/Downloads" ]; then
+  # Three states, not two: the offline path creates the home itself, so Downloads
+  # may not exist at all. -e is false for a dangling link, so a stale one is replaced.
+  if [ -e "$HOME/Downloads" ] && [ ! -L "$HOME/Downloads" ]; then
     rmdir "$HOME/Downloads" 2>/dev/null || mv "$HOME/Downloads" "$HOME/Downloads.local"
   fi
   ln -sfn "{GUEST_SHARE}" "$HOME/Downloads"
@@ -693,6 +699,18 @@ else
   rm -f /tmp/chrome.dmg
 fi
 '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --version
+if [ ! -x /usr/local/bin/tart-guest-agent ]; then
+  # Host/guest copy-paste needs an agent inside the guest. Without it the generated
+  # password would have to be typed by hand at every passkey prompt, which is the
+  # one thing generating it was meant to avoid.
+  curl -fsSL -o /tmp/agent.tar.gz \
+    "https://github.com/cirruslabs/tart-guest-agent/releases/download/v{GUEST_AGENT_VERSION}/tart-guest-agent-darwin-all.tar.gz"
+  tar -xzf /tmp/agent.tar.gz -C /tmp
+  sudo -n install -m 0755 /tmp/tart-guest-agent /usr/local/bin/tart-guest-agent ||
+    echo "could not install the clipboard agent; copy-paste will not work" >&2
+  sudo -n /usr/local/bin/tart-guest-agent --install-daemon=launchd || true
+  rm -f /tmp/agent.tar.gz /tmp/tart-guest-agent
+fi
 """
 
 SSH_OPTIONS = [
