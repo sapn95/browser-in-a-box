@@ -957,29 +957,22 @@ def test_a_failed_patch_names_the_fallback(calls, credentials, monkeypatch, tmp_
         cib.cmd_vm_create("tart", cib.VmConfig())
 
 
-def test_the_data_volume_is_chosen_by_role_not_by_name(monkeypatch):
-    # The System volume is sealed; writing to it silently achieves nothing.
+def _apfs_listing(store: str, volumes: list[dict]) -> bytes:
     import plistlib
 
-    listing = plistlib.dumps(
-        {
-            "AllDisksAndPartitions": [
-                {
-                    "APFSVolumes": [
-                        {
-                            "DeviceIdentifier": "disk5s1",
-                            "VolumeName": "Macintosh HD",
-                            "APFSVolumeRoles": ["System"],
-                        },
-                        {
-                            "DeviceIdentifier": "disk5s5",
-                            "VolumeName": "Macintosh HD - Data",
-                            "APFSVolumeRoles": ["Data"],
-                        },
-                    ]
-                }
-            ]
-        }
+    return plistlib.dumps(
+        {"Containers": [{"PhysicalStores": [{"DeviceIdentifier": store}], "Volumes": volumes}]}
+    )
+
+
+def test_the_data_volume_is_chosen_by_role_not_by_name(monkeypatch):
+    # The System volume is sealed; writing to it silently achieves nothing.
+    listing = _apfs_listing(
+        "disk5s2",
+        [
+            {"DeviceIdentifier": "disk5s1", "Name": "Macintosh HD", "Roles": ["System"]},
+            {"DeviceIdentifier": "disk5s5", "Name": "Macintosh HD - Data", "Roles": ["Data"]},
+        ],
     )
     monkeypatch.setattr(
         cibpatch.subprocess,
@@ -992,13 +985,13 @@ def test_the_data_volume_is_chosen_by_role_not_by_name(monkeypatch):
 def test_a_disk_without_a_data_volume_is_reported(monkeypatch):
     import plistlib
 
-    empty = plistlib.dumps({"AllDisksAndPartitions": []})
+    empty = plistlib.dumps({"Containers": []})
     monkeypatch.setattr(
         cibpatch.subprocess,
         "run",
         lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=empty, stderr=b""),
     )
-    with pytest.raises(cibpatch.PatchError, match="no APFS Data volume"):
+    with pytest.raises(cibpatch.PatchError, match="physical store"):
         cibpatch.data_volume("/dev/disk9")
 
 
@@ -1047,3 +1040,19 @@ def test_the_account_and_its_group_entries_share_one_guid(tmp_path, monkeypatch)
         guid = plistlib.load(fh)["generateduid"][0]
     with (groups / "admin.plist").open("rb") as fh:
         assert guid in plistlib.load(fh)["groupmembers"]
+
+
+def test_the_container_is_found_through_its_physical_store(monkeypatch):
+    # Attaching an image synthesises the APFS container onto a *different* disk
+    # number, so listing the attached device alone finds nothing. This is what the
+    # first real run failed on.
+    listing = _apfs_listing(
+        "disk10s2",
+        [{"DeviceIdentifier": "disk11s2", "Name": "Data", "Roles": ["Data"]}],
+    )
+    monkeypatch.setattr(
+        cibpatch.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=listing, stderr=b""),
+    )
+    assert cibpatch.data_volume("/dev/disk10") == "/dev/disk11s2"
