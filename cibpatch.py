@@ -268,6 +268,11 @@ def attach(disk: Path) -> str:
             "attach",
             "-imagekey",
             "diskimage-class=CRawDiskImage",
+            # Without this macOS mounts the volume noowners, where chown returns
+            # success and writes nothing — every file the patcher creates would stay
+            # root-owned and the guest could not write its own home.
+            "-owners",
+            "on",
             "-nomount",
             str(disk),
         ],
@@ -329,6 +334,16 @@ def data_volume(device: str) -> str:
     raise PatchError(f"nothing on this host has {device} as its physical store")
 
 
+def ownership_is_honoured(mountpoint: Path) -> bool:
+    """Whether the mount records ownership. On a noowners mount chown is a silent
+    no-op, so a home directory would stay root-owned however carefully it is set."""
+    result = subprocess.run(["/sbin/mount"], capture_output=True, text=True, check=False)
+    for line in result.stdout.splitlines():
+        if f" on {mountpoint} " in line:
+            return "noowners" not in line
+    return False
+
+
 def mount(volume: str) -> Path:
     result = subprocess.run(  # noqa: S603
         ["/usr/sbin/diskutil", "mount", volume],
@@ -346,7 +361,21 @@ def mount(volume: str) -> Path:
     point = plistlib.loads(info.stdout).get("MountPoint")
     if not point:
         raise PatchError(f"{volume} mounted but reported no mount point")
-    return Path(point)
+    mountpoint = Path(point)
+    if not ownership_is_honoured(mountpoint):
+        # Enabling it here rather than failing: hdiutil -owners on covers the normal
+        # path, and this catches a volume that was already attached differently.
+        subprocess.run(  # noqa: S603
+            ["/usr/sbin/diskutil", "enableOwnership", volume],
+            capture_output=True,
+            check=False,
+        )
+        if not ownership_is_honoured(mountpoint):
+            raise PatchError(
+                f"{mountpoint} is mounted without ownership, so the guest's home would "
+                "stay root-owned and it could not write its own preferences"
+            )
+    return mountpoint
 
 
 def unmount(volume: str) -> None:
