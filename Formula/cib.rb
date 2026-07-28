@@ -13,6 +13,12 @@ class Cib < Formula
   license "MIT"
 
   on_macos do
+    on_intel do
+      # Only the container variant would work here anyway, and no Intel Mac binary
+      # is published; say so instead of failing with a missing url.
+      odie "cib ships macOS binaries for Apple silicon only; run ./cib.py from a checkout"
+    end
+
     on_arm do
       url "https://github.com/sapn95/chrome-in-a-box/releases/download/v1.3.0/cib-macos-arm64.tar.gz"
       sha256 "be4de68af2de47ce22afd75fc93fcd3683e1b4b102b50d2133411a8b2ed713c9"

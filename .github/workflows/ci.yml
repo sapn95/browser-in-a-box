@@ -19,8 +19,9 @@ concurrency:
 env:
   # UBI10 is the base everything Python runs in; the runner OS is only a host.
   # uv supplies the interpreter, because UBI10's own Python packages stop at 3.12.
-  UBI: registry.access.redhat.com/ubi10/ubi:latest
+  # Pinned so a new ruff release cannot turn an unrelated pull request red.
   PYTHON_VERSION: "3.14"
+  RUFF_VERSION: "0.16.0"
 
 jobs:
   lint:
@@ -34,9 +35,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v9.0.0
       - name: ruff check
-        run: uvx ruff check --output-format=github .
+        run: uvx "ruff==${RUFF_VERSION}" check --output-format=github .
       - name: ruff format
-        run: uvx ruff format --check --diff .
+        run: uvx "ruff==${RUFF_VERSION}" format --check --diff .
 
   workflows:
     name: lint workflows
@@ -50,6 +51,19 @@ jobs:
         run: pipx run yamllint .
       - name: markdownlint
         uses: DavidAnson/markdownlint-cli2-action@v24
+
+  packer:
+    name: packer template
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-packer@v3
+      - name: validate
+        run: |
+          packer fmt -check packer/
+          packer init packer/chrome-vm.pkr.hcl
+          packer validate -var 'password=validation-only' packer/chrome-vm.pkr.hcl
 
   secrets:
     name: secret scan
