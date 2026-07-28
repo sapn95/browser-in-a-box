@@ -774,3 +774,13 @@ def test_the_password_never_reaches_the_argument_list(calls, credentials, monkey
     monkeypatch.setattr(cib, "find_packer", lambda: "packer")
     cib.cmd_vm_create("tart", cib.VmConfig())
     assert credentials.read_text().strip() not in flat(calls)
+
+
+def test_the_template_installs_the_clipboard_agent():
+    # Copy and paste between host and guest is not a tart flag: it needs
+    # tart-guest-agent running inside the guest, and the password is meant to be
+    # pasted rather than typed.
+    template = (Path(__file__).resolve().parents[1] / cib.PACKER_TEMPLATE).read_text()
+    assert "tart-guest-agent" in template
+    assert "--install-daemon=launchd" in template
+    assert "test -x /usr/local/bin/tart-guest-agent" in template

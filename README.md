@@ -193,8 +193,10 @@ Two things stay manual, because Apple makes them interactive on purpose: the
 Apple Account → iCloud → Passwords & Keychain).
 
 The guest has no Touch ID, so every passkey confirmation asks for the account
-password. You never type it — `cib vm password` prints it and tart shares the
-clipboard, so paste it.
+password. You never type it — `cib vm password` prints it and you paste it.
+Clipboard sharing between host and guest is not a flag: it needs
+[tart-guest-agent](https://github.com/cirruslabs/tart-guest-agent) running inside
+the guest, which `vm create` installs.
 
 `up` is idempotent: if the container is already serving it just re-applies the
 resolution and revives Chrome, so your tabs survive. `CIB_FORCE=1` recreates it

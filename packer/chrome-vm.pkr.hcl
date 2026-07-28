@@ -191,6 +191,19 @@ build {
 
   provisioner "shell" {
     inline = [
+      # Clipboard sharing between host and guest is not a flag: it needs an agent
+      # running inside the guest. Without it, copy and paste silently do nothing —
+      # which matters here, because the account password is meant to be pasted.
+      "curl -fsSL -o /tmp/agent.tar.gz 'https://github.com/cirruslabs/tart-guest-agent/releases/latest/download/tart-guest-agent-darwin-all.tar.gz'",
+      "tar -xzf /tmp/agent.tar.gz -C /tmp",
+      "echo '${var.password}' | sudo -S install -m 0755 /tmp/tart-guest-agent /usr/local/bin/tart-guest-agent",
+      "echo '${var.password}' | sudo -S /usr/local/bin/tart-guest-agent --install-daemon=launchd",
+      "rm -f /tmp/agent.tar.gz /tmp/tart-guest-agent",
+    ]
+  }
+
+  provisioner "shell" {
+    inline = [
       # Chrome, which is the entire point of the VM.
       "curl -fsSL -o /tmp/chrome.dmg 'https://dl.google.com/chrome/mac/universal/stable/GGRO/googlechrome.dmg'",
       "hdiutil attach -nobrowse -quiet /tmp/chrome.dmg -mountpoint /tmp/chrome-mount",
@@ -206,6 +219,8 @@ build {
       # Prove the two things the guest is built for.
       "spctl --status | grep -q 'assessments enabled' || { echo 'Gatekeeper is off, it should not be'; exit 1; }",
       "test -d '/Applications/Google Chrome.app'",
+      # Clipboard sharing depends on this agent being installed and running.
+      "test -x /usr/local/bin/tart-guest-agent",
     ]
   }
 }
