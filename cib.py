@@ -24,6 +24,7 @@ Single file, standard library only: no venv, no pip install.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import platform
 import re
@@ -221,7 +222,7 @@ def wait_for_ui(engine: str, cfg: Config) -> None:
             sys.stderr.write(logs.stdout + logs.stderr)
             raise Failure("the container exited during boot (log above)")
         time.sleep(2)
-    raise Failure(f"the web UI did not come up within {cfg.wait_secs}s; check 'cib logs'")
+    raise Failure(f"the web UI did not come up within {cfg.wait_secs}s; check 'cib box logs'")
 
 
 def ensure_desktop(engine: str, cfg: Config) -> bool:
@@ -231,7 +232,9 @@ def ensure_desktop(engine: str, cfg: Config) -> bool:
         engine,
         "exec",
         "-e",
-        f"RES={cfg.resolution}",
+        # xrandr -s reads anything but lowercase <int>x<int> as a mode index, and
+        # check() accepts "1280X800" and "1280 x 800".
+        f"RES={''.join(cfg.resolution.lower().split())}",
         cfg.name,
         "bash",
         "-c",
@@ -298,11 +301,16 @@ def cmd_up(engine: str, cfg: Config) -> None:
 
 
 def cmd_down(engine: str, cfg: Config) -> None:
-    result = run(engine, "rm", "-f", cfg.name, check=False, capture=True)
-    if result.returncode == 0:
-        print(f"Stopped. The browser profile is kept in volume {cfg.volume!r}.")
-    else:
+    # podman's `rm -f` exits 0 for a container that never existed, so its exit code
+    # cannot tell "removed it" from "there was nothing there".
+    present = run(
+        engine, "container", "inspect", "-f", "{{.Id}}", cfg.name, check=False, capture=True
+    )
+    if present.returncode != 0:
         print("Not running.")
+        return
+    run(engine, "rm", "-f", cfg.name, check=False, capture=True)
+    print(f"Stopped. The browser profile is kept in volume {cfg.volume!r}.")
 
 
 def cmd_reset(engine: str, cfg: Config) -> None:
@@ -436,6 +444,19 @@ def find_tart() -> str:
     return path
 
 
+def vm_running(tart: str, vm: VmConfig) -> bool:
+    """tart exits non-zero on `run` for a VM that is already up. Without this the
+    generic failure path would blame bridged networking for it."""
+    result = run(tart, "list", "--format", "json", check=False, capture=True)
+    if result.returncode != 0:
+        return False
+    try:
+        entries = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return any(e.get("Name") == vm.name and e.get("Running") for e in entries)
+
+
 def vm_exists(tart: str, vm: VmConfig) -> bool:
     result = run(tart, "list", "--quiet", check=False, capture=True)
     return vm.name in result.stdout.split()
@@ -511,6 +532,9 @@ def vm_run_args(vm: VmConfig) -> list[str]:
 def cmd_vm_up(tart: str, vm: VmConfig) -> None:
     if not vm_exists(tart, vm):
         raise Failure(f"{vm.name!r} does not exist yet — run 'cib vm create' first")
+    if vm_running(tart, vm):
+        print(f"{vm.name!r} is already running.")
+        return
     print(f"Starting {vm.name!r} (a window will open) ...")
     result = run(tart, *vm_run_args(vm), check=False)
     if result.returncode != 0 and vm.net != "bridged":
@@ -603,7 +627,9 @@ def cmd_vm_ip(tart: str, vm: VmConfig) -> None:
 
 def cmd_vm_ssh(tart: str, vm: VmConfig) -> None:
     ip = vm_ip(tart, vm)
-    if guest_ssh(vm, ip) != 0:
+    # ssh passes the remote shell's exit status through; 255 is ssh's own "could not
+    # connect". Anything else just means the shell ended non-zero, which is normal.
+    if guest_ssh(vm, ip) == 255:
         raise Failure(
             f"could not open a shell on {vm.user}@{ip} — turn on System Settings > "
             "General > Sharing > Remote Login in the guest, and set CIB_VM_USER if "
