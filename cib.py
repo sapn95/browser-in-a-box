@@ -349,6 +349,7 @@ class VmConfig:
     net: str = field(default_factory=lambda: _env("CIB_VM_NET", "bridged"))
     interface: str = field(default_factory=lambda: _env("CIB_VM_INTERFACE", "en0"))
     user: str = field(default_factory=lambda: _env("CIB_VM_USER", "admin"))
+    golden: str = field(default_factory=lambda: _env("CIB_VM_GOLDEN", "chrome-vm-golden"))
 
 
 def find_tart() -> str:
@@ -363,14 +364,31 @@ def find_tart() -> str:
     return path
 
 
-def vm_exists(tart: str, vm: VmConfig) -> bool:
+def vm_exists(tart: str, vm: VmConfig, name: str | None = None) -> bool:
     result = run(tart, "list", "--quiet", check=False, capture=True)
-    return vm.name in result.stdout.split()
+    return (name or vm.name) in result.stdout.split()
+
+
+def cmd_vm_snapshot(tart: str, vm: VmConfig) -> None:
+    """Keep the configured guest as a golden image, so rebuilding it later does not
+    mean sitting through Setup Assistant again."""
+    if not vm_exists(tart, vm):
+        raise Failure(f"{vm.name!r} does not exist — nothing to snapshot")
+    run(tart, "delete", vm.golden, check=False, capture=True)
+    run(tart, "clone", vm.name, vm.golden)
+    print(f"Saved as {vm.golden!r}. A later 'cib vm create' will start from it.")
 
 
 def cmd_vm_create(tart: str, vm: VmConfig) -> None:
     if vm_exists(tart, vm):
         print(f"{vm.name!r} already exists. 'cib vm up' to start it.")
+        return
+    if vm_exists(tart, vm, name=vm.golden):
+        # Cloning skips Setup Assistant entirely. Apple re-derives a cloned VM's
+        # identity, so the guest asks to sign in to the Apple Account again — which
+        # is the one step that cannot be automated anyway.
+        print(f"Cloning {vm.golden!r} (no Setup Assistant; sign in to Apple Account again) ...")
+        run(tart, "clone", vm.golden, vm.name)
         return
     print(f"Creating {vm.name!r} from the latest macOS image (a large download) ...")
     # Built from a fresh image on purpose: Apple only grants a VM an Apple Account
@@ -524,6 +542,7 @@ VM_ACTIONS = {
     "create": cmd_vm_create,
     "up": cmd_vm_up,
     "setup": cmd_vm_setup,
+    "snapshot": cmd_vm_snapshot,
     "ssh": cmd_vm_ssh,
     "ip": cmd_vm_ip,
     "down": cmd_vm_down,
@@ -557,15 +576,18 @@ VM_HELP = """\
   create   build the VM from a fresh macOS image (large download, one time)
   up       start it; a window opens
   setup    install Chrome in the guest over SSH (needs Remote Login on in it)
+  snapshot keep the configured guest as a golden image, so the next create clones
+           it instead of running Setup Assistant again
   ssh      open a shell in the guest
   ip       print the guest's address
   down     stop it
   status   list VMs and their state
   delete   delete the VM and everything in it (asks first)
 
-Setup Assistant, the Apple Account sign-in and turning on iCloud Keychain cannot
-be automated — Apple makes them interactive on purpose. Everything after that is
-what `setup` is for."""
+The Apple Account sign-in and turning on iCloud Keychain stay manual: Apple makes
+them interactive on purpose, and no flag can change that. Setup Assistant does not
+have to be repeated though — run `snapshot` once the guest is configured, and every
+later `create` clones that instead."""
 
 
 def build_parser() -> argparse.ArgumentParser:
