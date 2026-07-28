@@ -41,7 +41,7 @@ def flat(calls: list[list[str]]) -> str:
 def test_defaults_are_the_values_the_container_needs():
     cfg = cib.Config()
     assert len(cfg.password) >= cib.MIN_PASSWORD_LEN
-    assert cfg.resolution == "1920x1200"
+    assert cfg.resolution == ""  # dynamic: the desktop follows the browser window
     assert cfg.port == 6901
     cfg.check()
 
@@ -550,3 +550,13 @@ def test_the_template_drives_setup_assistant_and_keeps_gatekeeper():
     assert "assessments enabled" in template
     # The Apple ID pane is skipped: 2FA cannot be automated.
     assert "skip signing in with an Apple ID" in template
+
+
+def test_the_desktop_follows_the_window_unless_a_size_is_forced():
+    # ?resize=remote asks KasmVNC to match the client; pinning a mode would fight it.
+    assert "resize=remote" in cib.Config().url
+    assert 'if [ -n "$RES" ]' in cib.DESKTOP_SCRIPT
+
+
+def test_an_empty_resolution_passes_preflight():
+    cib.Config(resolution="").check()

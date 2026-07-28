@@ -111,6 +111,8 @@ jobs:
     env:
       # Pulling ~3GB and booting an amd64 desktop takes a while on a cold runner.
       CIB_WAIT_SECS: "300"
+      # Pin a size so the assertion below has something deterministic to check.
+      CIB_RESOLUTION: "1920x1200"
     steps:
       - uses: actions/checkout@v7
       - name: start the container

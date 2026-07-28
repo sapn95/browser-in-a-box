@@ -61,7 +61,10 @@ PROFILE_DIR = "/home/kasm-user/.config/google-chrome"
 # applies the resolution, and starts Chrome if the image's own launch did not.
 DESKTOP_SCRIPT = f"""
 export DISPLAY=:1
-xrandr -s "$RES" >/dev/null || echo "could not set mode $RES (KasmVNC ships a fixed mode list)" >&2
+if [ -n "$RES" ]; then
+  xrandr -s "$RES" >/dev/null ||
+    echo "could not set mode $RES (KasmVNC ships a fixed mode list)" >&2
+fi
 if ! pgrep chrome >/dev/null 2>&1; then
   rm -f {PROFILE_DIR}/Singleton*
   nohup {CHROME_BIN} --no-sandbox --start-maximized \
@@ -89,14 +92,17 @@ class Config:
     name: str = field(default_factory=lambda: _env("CIB_NAME", "chrome-in-a-box"))
     volume: str = field(default_factory=lambda: _env("CIB_VOLUME", "chrome-in-a-box-profile"))
     port: int = field(default_factory=lambda: int(_env("CIB_PORT", "6901")))
-    resolution: str = field(default_factory=lambda: _env("CIB_RESOLUTION", "1920x1200"))
+    # Empty means "follow the browser window": KasmVNC resizes the desktop to the
+    # client, which is what ?resize=remote asks for. Pinning a mode as well would
+    # fight it, so a fixed size is opt-in via CIB_RESOLUTION.
+    resolution: str = field(default_factory=lambda: _env("CIB_RESOLUTION", ""))
     password: str = field(default_factory=lambda: _env("CIB_PASSWORD", "chromeinabox"))
     wait_secs: int = field(default_factory=lambda: int(_env("CIB_WAIT_SECS", "120")))
     log_tail: str = field(default_factory=lambda: _env("CIB_LOG_TAIL", "200"))
 
     @property
     def url(self) -> str:
-        return f"https://localhost:{self.port}/?resize=scale"
+        return f"https://localhost:{self.port}/?resize=remote"
 
     def check(self) -> None:
         """Reject the settings that are known to kill the container, with an
@@ -106,6 +112,8 @@ class Config:
                 f"CIB_PASSWORD must be at least {MIN_PASSWORD_LEN} characters; "
                 "KasmVNC refuses to start with a shorter one"
             )
+        if not self.resolution:
+            return
         try:
             width, height = (int(part) for part in self.resolution.lower().split("x"))
         except ValueError:
