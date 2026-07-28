@@ -77,6 +77,13 @@ variable "timezone" {
   default = "Europe/Zurich"
 }
 
+variable "guest_agent_version" {
+  type = string
+  # renovate: datasource=github-releases depName=cirruslabs/tart-guest-agent
+  default     = "0.11.0"
+  description = "tart-guest-agent, which is what makes host/guest copy-paste work."
+}
+
 variable "timezone_city" {
   type        = string
   default     = "Zurich"
@@ -194,7 +201,7 @@ build {
       # Clipboard sharing between host and guest is not a flag: it needs an agent
       # running inside the guest. Without it, copy and paste silently do nothing —
       # which matters here, because the account password is meant to be pasted.
-      "curl -fsSL -o /tmp/agent.tar.gz 'https://github.com/cirruslabs/tart-guest-agent/releases/latest/download/tart-guest-agent-darwin-all.tar.gz'",
+      "curl -fsSL -o /tmp/agent.tar.gz \"https://github.com/cirruslabs/tart-guest-agent/releases/download/v${var.guest_agent_version}/tart-guest-agent-darwin-all.tar.gz\"",
       "tar -xzf /tmp/agent.tar.gz -C /tmp",
       "echo '${var.password}' | sudo -S install -m 0755 /tmp/tart-guest-agent /usr/local/bin/tart-guest-agent",
       "echo '${var.password}' | sudo -S /usr/local/bin/tart-guest-agent --install-daemon=launchd",
