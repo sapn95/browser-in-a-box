@@ -420,14 +420,17 @@ def test_the_formula_updater_rejects_a_bad_checksum(tmp_path):
 def test_the_vm_uses_bridged_networking_by_default():
     # Shared networking hands out a vmnet gateway that does not always answer DNS,
     # which leaves the guest with an address but no name resolution.
-    assert cib.vm_run_args(cib.VmConfig()) == ["run", "--net-bridged=en0", "chrome-vm"]
+    args = cib.vm_run_args(cib.VmConfig())
+    assert "--net-bridged=en0" in args
+    assert args[-1] == "chrome-vm"
 
 
 def test_the_vm_network_mode_and_interface_are_overridable(monkeypatch):
     monkeypatch.setenv("CIB_VM_INTERFACE", "en1")
     assert "--net-bridged=en1" in cib.vm_run_args(cib.VmConfig())
     monkeypatch.setenv("CIB_VM_NET", "shared")
-    assert cib.vm_run_args(cib.VmConfig()) == ["run", "chrome-vm"]
+    args = cib.vm_run_args(cib.VmConfig())
+    assert not any(a.startswith("--net-") for a in args)
     monkeypatch.setenv("CIB_VM_NET", "host")
     assert "--net-host" in cib.vm_run_args(cib.VmConfig())
 
@@ -670,3 +673,18 @@ def test_the_template_is_resolved_next_to_the_module_not_the_cwd():
     # Otherwise `cib vm create` only works from a checkout, in the right directory.
     assert cib.PACKER_TEMPLATE.is_absolute()
     assert cib.PACKER_TEMPLATE.parent.parent == Path(cib.__file__).resolve().parent
+
+
+def test_the_guest_shares_a_host_folder_for_downloads(tmp_path, monkeypatch):
+    # Downloads should land on the host, not inside the VM's disk image.
+    monkeypatch.setenv("CIB_VM_SHARE", str(tmp_path / "dl"))
+    args = cib.vm_run_args(cib.VmConfig())
+    assert f"--dir=downloads:{tmp_path / 'dl'}" in args
+    assert (tmp_path / "dl").is_dir()  # created if missing, so tart does not fail
+
+
+def test_setup_points_the_guest_downloads_at_the_share():
+    assert cib.GUEST_SHARE in cib.GUEST_INSTALL_CHROME
+    assert "ln -sfn" in cib.GUEST_INSTALL_CHROME
+    # An existing real folder must not be destroyed.
+    assert "Downloads.local" in cib.GUEST_INSTALL_CHROME

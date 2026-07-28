@@ -372,6 +372,10 @@ class VmConfig:
     net: str = field(default_factory=lambda: _env("CIB_VM_NET", "bridged"))
     interface: str = field(default_factory=lambda: _env("CIB_VM_INTERFACE", "en0"))
     user: str = field(default_factory=lambda: _env("CIB_VM_USER", "admin"))
+    # Shared with the guest, so downloads land on the host rather than inside a disk
+    # image. A folder under ~/Downloads rather than ~/Downloads itself: the guest
+    # gets what it needs and no more.
+    share: str = field(default_factory=lambda: _env("CIB_VM_SHARE", "~/Downloads/chrome-vm"))
 
 
 PACKER_TEMPLATE = Path(__file__).resolve().parent / "packer" / "chrome-vm.pkr.hcl"
@@ -472,14 +476,21 @@ def cmd_vm_create(tart: str, vm: VmConfig) -> None:
     print("  2. System Settings > Apple Account > iCloud > turn on Passwords & Keychain")
 
 
+# Where a tart directory share appears inside a macOS guest.
+GUEST_SHARE = "/Volumes/My Shared Files/downloads"
+
+
 def vm_run_args(vm: VmConfig) -> list[str]:
+    share = Path(vm.share).expanduser()
+    share.mkdir(parents=True, exist_ok=True)
+    args = ["run", f"--dir=downloads:{share}"]
     if vm.net == "bridged":
-        return ["run", f"--net-bridged={vm.interface}", vm.name]
+        return [*args, f"--net-bridged={vm.interface}", vm.name]
     if vm.net == "host":
-        return ["run", "--net-host", vm.name]
+        return [*args, "--net-host", vm.name]
     if vm.net != "shared":
         raise Failure(f"CIB_VM_NET must be bridged, shared or host, got {vm.net!r}")
-    return ["run", vm.name]
+    return [*args, vm.name]
 
 
 def cmd_vm_up(tart: str, vm: VmConfig) -> None:
@@ -496,7 +507,17 @@ def cmd_vm_up(tart: str, vm: VmConfig) -> None:
 
 
 # Installs Chrome in the guest. Runs there, not here, so it is a shell script.
-GUEST_INSTALL_CHROME = """set -eu
+GUEST_INSTALL_CHROME = f"""set -eu
+# Downloads land on the host: replace the guest's own Downloads folder with the
+# shared one, so every app follows, not just Chrome.
+if [ -d "{GUEST_SHARE}" ]; then
+  if [ ! -L "$HOME/Downloads" ]; then
+    rmdir "$HOME/Downloads" 2>/dev/null || mv "$HOME/Downloads" "$HOME/Downloads.local"
+  fi
+  ln -sfn "{GUEST_SHARE}" "$HOME/Downloads"
+else
+  echo "the shared downloads folder is not mounted; is the VM started by cib?" >&2
+fi
 if [ -d '/Applications/Google Chrome.app' ]; then
   echo 'Chrome is already installed'
 else
@@ -647,6 +668,8 @@ VM_HELP = """\
   ssh      open a shell in the guest
   ip       print the guest's address
   password print the generated guest account password (copy it, do not retype it)
+
+Downloads in the guest land in ~/Downloads/chrome-vm on the host (CIB_VM_SHARE).
   down     stop it
   status   list VMs and their state
   delete   delete the VM and everything in it (asks first)
