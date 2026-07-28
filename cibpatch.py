@@ -217,9 +217,20 @@ def create_account(root: Path, account: Account) -> None:
 
 
 def own_home(root: Path, account: Account) -> None:
+    """Give the account its home, without ever following a link.
+
+    The guest is where untrusted browsing happens, and this runs as root on the
+    host. A symlink stored in the guest resolves against the *host* filesystem, so
+    following one here would hand host paths to the guest: `ln -s / ~` inside the
+    guest would otherwise chown the host's root filesystem on the next prepare.
+    """
     home = root / f"Users/{account.name}"
-    for path in (home, *home.rglob("*")):
-        os.chown(path, account.uid, account.gid)
+    if home.is_symlink():
+        raise PatchError(f"{home} is a symlink; refusing to own a link's target")
+    os.chown(home, account.uid, account.gid, follow_symlinks=False)
+    for parent, dirs, files in os.walk(home, followlinks=False):
+        for name in dirs + files:
+            os.chown(Path(parent) / name, account.uid, account.gid, follow_symlinks=False)
 
 
 def mark_setup_done(root: Path) -> None:
