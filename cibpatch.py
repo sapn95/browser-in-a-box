@@ -88,7 +88,7 @@ def shadow_hash_data(password: str) -> bytes:
     )
 
 
-def user_record(account: Account) -> dict[str, list]:
+def user_record(account: Account, guid: str | None = None) -> dict[str, list]:
     """A dslocal user plist. Every value is a list — that is how DirectoryService
     stores single values, and a plain string is silently ignored."""
     return {
@@ -98,7 +98,7 @@ def user_record(account: Account) -> dict[str, list]:
         "gid": [str(account.gid)],
         "home": [f"/Users/{account.name}"],
         "shell": ["/bin/zsh"],
-        "generateduid": [str(uuid.uuid4()).upper()],
+        "generateduid": [guid or str(uuid.uuid4()).upper()],
         "authentication_authority": [";ShadowHash;HASHLIST:<SALTED-SHA512-PBKDF2>"],
         "passwd": ["********"],
         "ShadowHashData": [shadow_hash_data(account.password)],
@@ -133,17 +133,19 @@ def read_plist(path: Path) -> dict:
         return {}
 
 
-def add_to_group(root: Path, group: str, account: Account) -> None:
-    """Append the account to a dslocal group, keeping whatever is already there."""
+def add_to_group(root: Path, group: str, account: Account, guid: str) -> None:
+    """Append the account to a dslocal group, keeping whatever is already there.
+
+    Both lists have to be written: "users" holds short names, "groupmembers" holds
+    the *user's* GUID. Writing only one leaves the membership half-recorded, and
+    macOS believes whichever it consults first.
+    """
     path = root / f"private/var/db/dslocal/nodes/Default/groups/{group}.plist"
     record = read_plist(path)
     if not record:
         raise PatchError(f"the guest has no {group} group at {path}")
-    for key, value in (("users", account.name), ("groupmembers", record.get("generateduid"))):
-        if key == "groupmembers" and not value:
-            continue
+    for key, member in (("users", account.name), ("groupmembers", guid)):
         members = list(record.get(key, []))
-        member = value[0] if isinstance(value, list) else value
         if member not in members:
             members.append(member)
         record[key] = members
@@ -204,10 +206,10 @@ def create_account(root: Path, account: Account) -> None:
             f"{users} is missing — is this the guest's Data volume, and has the guest "
             "been booted once so its first-boot state exists?"
         )
-    record = user_record(account)
-    write_plist(users / f"{account.name}.plist", record)
+    guid = str(uuid.uuid4()).upper()
+    write_plist(users / f"{account.name}.plist", user_record(account, guid))
     for group in ("admin", "staff"):
-        add_to_group(root, group, account)
+        add_to_group(root, group, account, guid)
     home = root / f"Users/{account.name}"
     home.mkdir(parents=True, exist_ok=True)
     (home / ".CFUserTextEncoding").write_text("0:0")

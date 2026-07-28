@@ -1000,3 +1000,50 @@ def test_a_disk_without_a_data_volume_is_reported(monkeypatch):
     )
     with pytest.raises(cibpatch.PatchError, match="no APFS Data volume"):
         cibpatch.data_volume("/dev/disk9")
+
+
+def test_group_membership_records_the_users_guid_not_the_groups(tmp_path):
+    # Writing the group's own GUID into groupmembers leaves the account a member by
+    # name only, and macOS believes whichever list it consults first.
+    import plistlib
+
+    root = tmp_path
+    groups = root / "private/var/db/dslocal/nodes/Default/groups"
+    groups.mkdir(parents=True)
+    for name in ("admin", "staff"):
+        with (groups / f"{name}.plist").open("wb") as fh:
+            plistlib.dump(
+                {
+                    "users": ["root"],
+                    "groupmembers": ["GROUP-OWN-GUID"],
+                    "generateduid": ["GROUP-OWN-GUID"],
+                },
+                fh,
+                fmt=plistlib.FMT_BINARY,
+            )
+    account = cibpatch.Account("admin", "pw")
+    cibpatch.add_to_group(root, "admin", account, "USER-GUID-1234")
+    with (groups / "admin.plist").open("rb") as fh:
+        record = plistlib.load(fh)
+    assert "USER-GUID-1234" in record["groupmembers"]
+    assert "admin" in record["users"]
+    assert "root" in record["users"]  # existing members are kept
+
+
+def test_the_account_and_its_group_entries_share_one_guid(tmp_path, monkeypatch):
+    import plistlib
+
+    root = tmp_path
+    for sub in ("users", "groups"):
+        (root / f"private/var/db/dslocal/nodes/Default/{sub}").mkdir(parents=True)
+    groups = root / "private/var/db/dslocal/nodes/Default/groups"
+    for name in ("admin", "staff"):
+        with (groups / f"{name}.plist").open("wb") as fh:
+            plistlib.dump({"users": [], "groupmembers": []}, fh, fmt=plistlib.FMT_BINARY)
+    monkeypatch.setattr(cibpatch.os, "chown", lambda *a: None)
+    account = cibpatch.Account("admin", "pw")
+    cibpatch.create_account(root, account)
+    with (root / "private/var/db/dslocal/nodes/Default/users/admin.plist").open("rb") as fh:
+        guid = plistlib.load(fh)["generateduid"][0]
+    with (groups / "admin.plist").open("rb") as fh:
+        assert guid in plistlib.load(fh)["groupmembers"]
