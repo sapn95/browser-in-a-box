@@ -274,23 +274,35 @@ def detach(device: str) -> None:
 def data_volume(device: str) -> str:
     """The guest's writable volume.
 
-    A macOS install has several volumes and the System one is sealed and read-only,
-    so writing to the wrong one silently achieves nothing. Matched on the APFS role
-    rather than the name, which differs between installs.
+    Attaching a disk image gives a device whose partitions hold an APFS *container*,
+    and macOS synthesises that container onto a different disk number — so listing
+    the attached device alone shows no volumes at all. The container is therefore
+    found by its physical store pointing back at our device.
+
+    Matched on the APFS role rather than the name, because the System volume is
+    sealed and read-only: writing to the wrong one silently achieves nothing.
     """
-    result = subprocess.run(  # noqa: S603
-        ["/usr/sbin/diskutil", "list", "-plist", device],
+    result = subprocess.run(
+        ["/usr/sbin/diskutil", "apfs", "list", "-plist"],
         capture_output=True,
         check=False,
     )
     if result.returncode != 0:
-        raise PatchError(f"could not list the volumes on {device}")
-    for disk in plistlib.loads(result.stdout).get("AllDisksAndPartitions", []):
-        for volume in disk.get("APFSVolumes", []):
-            roles = volume.get("APFSVolumeRoles") or []
-            if "Data" in roles or volume.get("VolumeName", "").endswith(" - Data"):
+        raise PatchError("could not list the APFS containers on this host")
+    ours = Path(device).name  # e.g. "disk10"
+    for container in plistlib.loads(result.stdout).get("Containers", []):
+        stores = container.get("PhysicalStores", [])
+        if not any(st.get("DeviceIdentifier", "").startswith(ours) for st in stores):
+            continue
+        for volume in container.get("Volumes", []):
+            roles = volume.get("Roles") or []
+            if "Data" in roles or volume.get("Name", "").endswith(" - Data"):
                 return "/dev/" + volume["DeviceIdentifier"]
-    raise PatchError(f"{device} has no APFS Data volume — is this a macOS guest disk?")
+        raise PatchError(
+            f"the container on {device} has no Data volume; it has "
+            + ", ".join(v.get("Name", "?") for v in container.get("Volumes", []))
+        )
+    raise PatchError(f"nothing on this host has {device} as its physical store")
 
 
 def mount(volume: str) -> Path:
