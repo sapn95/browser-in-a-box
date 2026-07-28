@@ -348,6 +348,7 @@ class VmConfig:
     # connected to the Internet" in Setup Assistant.
     net: str = field(default_factory=lambda: _env("CIB_VM_NET", "bridged"))
     interface: str = field(default_factory=lambda: _env("CIB_VM_INTERFACE", "en0"))
+    user: str = field(default_factory=lambda: _env("CIB_VM_USER", "admin"))
 
 
 def find_tart() -> str:
@@ -417,6 +418,87 @@ def cmd_vm_up(tart: str, vm: VmConfig) -> None:
         )
 
 
+# Installs Chrome in the guest. Runs there, not here, so it is a shell script.
+GUEST_INSTALL_CHROME = """set -eu
+if [ -d '/Applications/Google Chrome.app' ]; then
+  echo 'Chrome is already installed'
+else
+  curl -fsSL -o /tmp/chrome.dmg \
+    'https://dl.google.com/chrome/mac/universal/stable/GGRO/googlechrome.dmg'
+  hdiutil attach -nobrowse -quiet /tmp/chrome.dmg -mountpoint /tmp/chrome-mount
+  cp -R '/tmp/chrome-mount/Google Chrome.app' /Applications/
+  hdiutil detach -quiet /tmp/chrome-mount
+  rm -f /tmp/chrome.dmg
+fi
+'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --version
+"""
+
+SSH_OPTIONS = [
+    # The guest is recreated freely and reached by a changing address, so a
+    # remembered host key would only ever be in the way.
+    "-o",
+    "StrictHostKeyChecking=no",
+    "-o",
+    "UserKnownHostsFile=/dev/null",
+    "-o",
+    "LogLevel=ERROR",
+    "-o",
+    "ConnectTimeout=10",
+]
+
+
+def vm_ip(tart: str, vm: VmConfig, wait: str = "60") -> str:
+    """Resolve the guest's address. Bridged guests get theirs from the real
+    network, so the DHCP lease file the default resolver reads is empty."""
+    resolver = "arp" if vm.net == "bridged" else "dhcp"
+    result = run(
+        tart, "ip", "--resolver", resolver, "--wait", wait, vm.name, check=False, capture=True
+    )
+    ip = result.stdout.strip()
+    if result.returncode != 0 or not ip:
+        raise Failure(
+            f"could not work out the address of {vm.name!r} — is it running and past "
+            "Setup Assistant? ('cib vm up')"
+        )
+    return ip
+
+
+def ssh_command(vm: VmConfig, ip: str, script: str | None = None) -> list[str]:
+    target = [f"{vm.user}@{ip}"]
+    return ["ssh", *SSH_OPTIONS, *target, *([script] if script else [])]
+
+
+def guest_ssh(vm: VmConfig, ip: str, script: str | None = None) -> int:
+    return subprocess.run(ssh_command(vm, ip, script), check=False).returncode  # noqa: S603
+
+
+def cmd_vm_ip(tart: str, vm: VmConfig) -> None:
+    print(vm_ip(tart, vm))
+
+
+def cmd_vm_ssh(tart: str, vm: VmConfig) -> None:
+    ip = vm_ip(tart, vm)
+    if guest_ssh(vm, ip) != 0:
+        raise Failure(
+            f"could not open a shell on {vm.user}@{ip} — turn on System Settings > "
+            "General > Sharing > Remote Login in the guest, and set CIB_VM_USER if "
+            "the account is not called 'admin'"
+        )
+
+
+def cmd_vm_setup(tart: str, vm: VmConfig) -> None:
+    """Finish the guest from here: everything after Setup Assistant."""
+    ip = vm_ip(tart, vm)
+    print(f"Installing Chrome on {vm.user}@{ip} ...")
+    if guest_ssh(vm, ip, GUEST_INSTALL_CHROME) != 0:
+        raise Failure(
+            f"the guest at {ip} refused the connection or the install failed — turn on "
+            "System Settings > General > Sharing > Remote Login in the guest, and set "
+            "CIB_VM_USER if the account is not called 'admin'"
+        )
+    print("Done. In the guest, sign Chrome into your Google account.")
+
+
 def cmd_vm_down(tart: str, vm: VmConfig) -> None:
     result = run(tart, "stop", vm.name, check=False, capture=True)
     print("Stopped." if result.returncode == 0 else "Not running.")
@@ -441,6 +523,9 @@ def cmd_vm_delete(tart: str, vm: VmConfig) -> None:
 VM_ACTIONS = {
     "create": cmd_vm_create,
     "up": cmd_vm_up,
+    "setup": cmd_vm_setup,
+    "ssh": cmd_vm_ssh,
+    "ip": cmd_vm_ip,
     "down": cmd_vm_down,
     "status": cmd_vm_status,
     "delete": cmd_vm_delete,
@@ -471,9 +556,16 @@ BOX_HELP = """\
 VM_HELP = """\
   create   build the VM from a fresh macOS image (large download, one time)
   up       start it; a window opens
+  setup    install Chrome in the guest over SSH (needs Remote Login on in it)
+  ssh      open a shell in the guest
+  ip       print the guest's address
   down     stop it
   status   list VMs and their state
-  delete   delete the VM and everything in it (asks first)"""
+  delete   delete the VM and everything in it (asks first)
+
+Setup Assistant, the Apple Account sign-in and turning on iCloud Keychain cannot
+be automated — Apple makes them interactive on purpose. Everything after that is
+what `setup` is for."""
 
 
 def build_parser() -> argparse.ArgumentParser:

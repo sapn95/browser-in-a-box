@@ -449,3 +449,75 @@ def test_a_failed_bridged_start_explains_the_alternatives(monkeypatch):
     )
     with pytest.raises(cib.Failure, match="CIB_VM_NET=shared"):
         cib.cmd_vm_up("tart", cib.VmConfig())
+
+
+# --- taking the guest over from here ------------------------------------------
+
+
+@pytest.fixture
+def resolving(monkeypatch):
+    """Record engine calls and answer the ip lookup with an address."""
+    recorded: list[list[str]] = []
+
+    def fake_run(engine, *args, check=True, capture=False):
+        recorded.append([engine, *args])
+        return subprocess.CompletedProcess([engine, *args], 0, stdout="192.168.1.50\n", stderr="")
+
+    monkeypatch.setattr(cib, "run", fake_run)
+    return recorded
+
+
+def test_a_bridged_guest_is_resolved_by_arp(resolving):
+    # Bridged guests get their address from the real network, so tart's default
+    # DHCP-lease resolver has nothing to read.
+    assert cib.vm_ip("tart", cib.VmConfig()) == "192.168.1.50"
+    assert "ip --resolver arp --wait 60 chrome-vm" in flat(resolving)
+
+
+def test_a_shared_guest_is_resolved_by_dhcp(resolving, monkeypatch):
+    monkeypatch.setenv("CIB_VM_NET", "shared")
+    cib.vm_ip("tart", cib.VmConfig())
+    assert "--resolver dhcp" in flat(resolving)
+
+
+def test_an_unresolvable_guest_is_reported_clearly(monkeypatch):
+    monkeypatch.setattr(
+        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="", stderr="")
+    )
+    with pytest.raises(cib.Failure, match="Setup Assistant"):
+        cib.vm_ip("tart", cib.VmConfig())
+
+
+def test_the_ssh_command_does_not_pin_a_host_key():
+    cmd = cib.ssh_command(cib.VmConfig(), "192.168.1.50")
+    assert cmd[0] == "ssh"
+    assert "StrictHostKeyChecking=no" in cmd
+    assert cmd[-1] == "admin@192.168.1.50"
+
+
+def test_the_ssh_user_is_overridable(monkeypatch):
+    monkeypatch.setenv("CIB_VM_USER", "sapn")
+    assert cib.ssh_command(cib.VmConfig(), "10.0.0.1")[-1] == "sapn@10.0.0.1"
+
+
+def test_setup_installs_chrome_and_is_idempotent():
+    assert "googlechrome.dmg" in cib.GUEST_INSTALL_CHROME
+    assert "already installed" in cib.GUEST_INSTALL_CHROME
+    assert cib.GUEST_INSTALL_CHROME.startswith("set -eu")
+
+
+def test_setup_names_the_one_switch_the_guest_needs(monkeypatch, capsys):
+    monkeypatch.setattr(cib, "vm_ip", lambda *a, **k: "192.168.1.50")
+    monkeypatch.setattr(cib, "guest_ssh", lambda *a, **k: 255)
+    with pytest.raises(cib.Failure, match="Remote Login"):
+        cib.cmd_vm_setup("tart", cib.VmConfig())
+
+
+def test_setup_passes_the_install_script_to_the_guest(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cib, "vm_ip", lambda *a, **k: "192.168.1.50")
+    monkeypatch.setattr(
+        cib, "guest_ssh", lambda vm, ip, script=None: seen.update(script=script) or 0
+    )
+    cib.cmd_vm_setup("tart", cib.VmConfig())
+    assert seen["script"] == cib.GUEST_INSTALL_CHROME

@@ -173,13 +173,21 @@ The macOS VM variant (Apple silicon):
 | --------------- | ----------------------------------------------- |
 | `cib vm create` | build the VM from a fresh macOS image (large)   |
 | `cib vm up`     | start it — a window opens                       |
+| `cib vm setup`  | install Chrome in the guest over SSH            |
+| `cib vm ssh`    | open a shell in the guest                       |
+| `cib vm ip`     | print the guest's address                       |
 | `cib vm down`   | stop it                                         |
 | `cib vm status` | list VMs and their state                        |
 | `cib vm delete` | delete the VM and everything in it (asks first) |
 
-After `vm create`, finish it once by hand: Setup Assistant → sign in to your Apple
-Account → System Settings → Apple Account → iCloud → turn on **Passwords &
-Keychain** → install Chrome → sign in to Google.
+After `vm create`, three things have to be done by hand in the guest, because Apple
+makes them interactive on purpose: Setup Assistant (choose **Set up as new**), the
+**Apple Account** sign-in, and System Settings → Apple Account → iCloud → turn on
+**Passwords & Keychain**. Then turn on System Settings → General → Sharing →
+**Remote Login** and the rest is `cib vm setup`, which installs Chrome for you.
+
+The guest has no Touch ID, so remember the local account password: every passkey
+confirmation asks for it.
 
 `up` is idempotent: if the container is already serving it just re-applies the
 resolution and revives Chrome, so your tabs survive. `CIB_FORCE=1` recreates it
@@ -188,7 +196,7 @@ instead, which is what you need after changing the image or an environment setti
 Overridable: `CIB_PORT`, `CIB_RESOLUTION`, `CIB_WAIT_SECS`, `CIB_ENGINE`,
 `CIB_IMAGE`, `CIB_NAME`, `CIB_VOLUME`, `CIB_PASSWORD`, `CIB_LOG_TAIL`, `CIB_FORCE`,
 and for the VM `CIB_VM_NAME`, `CIB_VM_CPUS`, `CIB_VM_MEMORY`, `CIB_VM_DISK`,
-`CIB_VM_DISPLAY`, `CIB_VM_NET`, `CIB_VM_INTERFACE`.
+`CIB_VM_DISPLAY`, `CIB_VM_NET`, `CIB_VM_INTERFACE`, `CIB_VM_USER`.
 
 ## Passkeys — what does and does not work
 
