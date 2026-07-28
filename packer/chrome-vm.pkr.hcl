@@ -60,15 +60,27 @@ variable "disk_size_gb" {
   default = 100
 }
 
-variable "keyboard_layout" {
+variable "keyboard_layout_id" {
+  type        = number
+  default     = 19
+  description = "HIToolbox KeyboardLayout ID. 19 is Swiss German, 0 is U.S."
+}
+
+variable "keyboard_layout_name" {
   type        = string
-  default     = "com.apple.keylayout.SwissGerman"
-  description = "Input source id, e.g. com.apple.keylayout.SwissGerman or .US"
+  default     = "Swiss German"
+  description = "HIToolbox KeyboardLayout Name — the display name, with the space."
 }
 
 variable "timezone" {
   type    = string
   default = "Europe/Zurich"
+}
+
+variable "timezone_city" {
+  type        = string
+  default     = "Zurich"
+  description = "Setup Assistant's time-zone field searches for a city, not an Olson id."
 }
 
 source "tart-cli" "chrome-vm" {
@@ -93,7 +105,7 @@ source "tart-cli" "chrome-vm" {
     # list already sits on "English"; stepping via another language avoids that.
     "<wait30s>italiano<esc>english<enter>",
     # Select Your Country or Region
-    "<wait60s><click 'Select Your Country or Region'><wait5s>switzerland<leftShiftOn><tab><leftShiftOff><spacebar>",
+    "<wait60s><click 'Select Your Country or Region'><wait5s>united states<leftShiftOn><tab><leftShiftOff><spacebar>",
     # Transfer Your Data to This Mac -> set up as new
     "<wait10s><tab><tab><tab><spacebar><tab><tab><spacebar>",
     # Written and Spoken Languages
@@ -121,8 +133,9 @@ source "tart-cli" "chrome-vm" {
     # Enable Location Services -> no
     "<wait10s><leftShiftOn><tab><leftShiftOff><spacebar>",
     "<wait10s><tab><spacebar>",
-    # Select Your Time Zone
-    "<wait10s><tab><tab><tab>${var.timezone}<enter><leftShiftOn><tab><leftShiftOff><spacebar>",
+    # Select Your Time Zone. This field wants a city, not an Olson id; the id is
+    # applied properly by a provisioner below.
+    "<wait10s><tab><tab><tab>${var.timezone_city}<enter><leftShiftOn><tab><leftShiftOff><spacebar>",
     # Analytics -> no
     "<wait10s><leftShiftOn><tab><leftShiftOff><spacebar>",
     # Screen Time -> later
@@ -158,12 +171,18 @@ build {
 
   provisioner "shell" {
     inline = [
-      # Keyboard layout, so typing in the guest matches the host.
-      "defaults write com.apple.HIToolbox AppleEnabledInputSources -array-add '{\"InputSourceKind\"=\"Keyboard Layout\"; \"KeyboardLayout ID\"=19; \"KeyboardLayout Name\"=\"SwissGerman\";}' || true",
-      "defaults write com.apple.HIToolbox AppleCurrentKeyboardLayoutInputSourceID -string '${var.keyboard_layout}' || true",
-      "sudo systemsetup -settimezone ${var.timezone} 2>/dev/null || true",
+      # Keyboard layout. `defaults write` stores "KeyboardLayout ID" as a string in an
+      # old-style plist and HIToolbox then ignores the entry, so PlistBuddy is used to
+      # keep it an integer. Both the enabled and the selected list have to be written;
+      # only writing the enabled one leaves the layout inactive.
+      "PLIST=$HOME/Library/Preferences/com.apple.HIToolbox.plist",
+      "/usr/libexec/PlistBuddy -c 'Delete :AppleEnabledInputSources' \"$PLIST\" 2>/dev/null || true",
+      "for KEY in AppleEnabledInputSources AppleSelectedInputSources; do /usr/libexec/PlistBuddy -c \"Delete :$KEY\" \"$PLIST\" 2>/dev/null; /usr/libexec/PlistBuddy -c \"Add :$KEY array\" -c \"Add :$KEY:0 dict\" -c \"Add :$KEY:0:InputSourceKind string 'Keyboard Layout'\" -c \"Add :$KEY:0:'KeyboardLayout ID' integer ${var.keyboard_layout_id}\" -c \"Add :$KEY:0:'KeyboardLayout Name' string '${var.keyboard_layout_name}'\" \"$PLIST\"; done",
+      "killall cfprefsd 2>/dev/null || true",
+      # sudo has no tty under a provisioner, so the password goes in on stdin.
+      "echo '${var.password}' | sudo -S systemsetup -settimezone ${var.timezone}",
       # Do not let the guest fall asleep mid-download.
-      "sudo systemsetup -setsleep Off 2>/dev/null || true",
+      "echo '${var.password}' | sudo -S systemsetup -setsleep Off",
     ]
   }
 

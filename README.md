@@ -5,9 +5,9 @@ one your machine's policy manages. One command up, one command down, and the
 profile survives restarts.
 
 ```bash
-cib up      # start it
-cib open    # open https://localhost:6901/?resize=scale
-cib down    # stop it (profile is kept)
+cib box up  # start it
+cib box open # open https://localhost:6901/?resize=remote
+cib box down # stop it (profile is kept)
 ```
 
 One file, standard library only. Run it straight from a checkout with `./cib.py box up`,
@@ -50,7 +50,7 @@ flowchart TD
     A{What do you need?} --> B[Google account sync,<br/>Password Manager]
     A --> C[iCloud Keychain<br/>passkeys]
     A --> D[USB security key<br/>or Touch ID]
-    B --> E([container<br/>cib up])
+    B --> E([container<br/>cib box up])
     C --> F{Apple silicon?}
     F -- yes --> G([macOS VM<br/>cib vm create])
     F -- no --> H([not possible])
@@ -120,7 +120,7 @@ git clone https://github.com/sapn95/chrome-in-a-box && cd chrome-in-a-box
 # 2. with Homebrew (the tap lives in this repo, no second repo to add)
 brew tap sapn95/tap https://github.com/sapn95/chrome-in-a-box
 brew install sapn95/tap/cib     # the full name is what grants trust; plain
-cib up                          # `brew install cib` asks you to `brew trust` first
+cib box up                      # `brew install cib` asks you to `brew trust` first
 
 # 3. as a command, in its own environment
 uv tool install git+https://github.com/sapn95/chrome-in-a-box    # or: pipx install ...
@@ -137,7 +137,8 @@ binaries are built inside UBI10 so they link against a supported base.
 
 ## Requirements
 
-- Python 3.10 or newer (macOS and every Linux ship one)
+- Python 3.10 or newer. Note that macOS ships 3.9, so install one (`brew install
+  python@3.14`) or use the Homebrew/binary install below, which need no Python
 - For the container: **podman or docker**
 - For the macOS VM: **Apple silicon**, [tart](https://tart.run)
   (`brew install cirruslabs/cli/tart`) and [Packer](https://packer.io)
@@ -273,9 +274,11 @@ into Google Password Manager (Chrome ships no importer).
   third-party Chromium builds ship without Google's API keys, so there is no
   account sync and no Google Password Manager. That is the whole point here, so the
   amd64 Chrome image plus Rosetta wins.
-- **Why the resolution is fixed at 1920x1200.** KasmVNC only ships modes up to that
-  size; larger values silently fall back to 1024x768. `?resize=scale` then scales it
-  to your window, which stays crisp on a HiDPI display.
+- **Why the desktop size is dynamic.** The client asks for `?resize=remote`, so
+  KasmVNC resizes the desktop to your browser window and maximising actually gives
+  you more desktop. Pinning a mode with `CIB_RESOLUTION` is possible but then the
+  two fight: KasmVNC only ships modes up to 1920x1200, and larger values silently
+  fall back to 1024x768.
 - **Why there is a password despite no login prompt.** KasmVNC refuses to start with
   a password under 6 characters, so one is set and the prompt is disabled with
   `DisableBasicAuth`. The port is bound to `127.0.0.1`, so nothing is reachable from

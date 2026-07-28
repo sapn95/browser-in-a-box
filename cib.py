@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import os
 import platform
+import re
 import secrets
 import shutil
 import ssl
@@ -85,19 +86,31 @@ def _env(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
 
+def _env_int(name: str, default: str, minimum: int = 1) -> int:
+    """An integer setting. A bad value is the user's typo, not a crash."""
+    raw = os.environ.get(name, default)
+    try:
+        value = int(raw)
+    except ValueError:
+        raise Failure(f"{name} must be a whole number, got {raw!r}") from None
+    if value < minimum:
+        raise Failure(f"{name} must be at least {minimum}, got {value}")
+    return value
+
+
 @dataclass(frozen=True)
 class Config:
     # Read at instantiation, not at import, so the environment is always current.
     image: str = field(default_factory=lambda: _env("CIB_IMAGE", DEFAULT_IMAGE))
     name: str = field(default_factory=lambda: _env("CIB_NAME", "chrome-in-a-box"))
     volume: str = field(default_factory=lambda: _env("CIB_VOLUME", "chrome-in-a-box-profile"))
-    port: int = field(default_factory=lambda: int(_env("CIB_PORT", "6901")))
+    port: int = field(default_factory=lambda: _env_int("CIB_PORT", "6901"))
     # Empty means "follow the browser window": KasmVNC resizes the desktop to the
     # client, which is what ?resize=remote asks for. Pinning a mode as well would
     # fight it, so a fixed size is opt-in via CIB_RESOLUTION.
     resolution: str = field(default_factory=lambda: _env("CIB_RESOLUTION", ""))
     password: str = field(default_factory=lambda: _env("CIB_PASSWORD", "chromeinabox"))
-    wait_secs: int = field(default_factory=lambda: int(_env("CIB_WAIT_SECS", "120")))
+    wait_secs: int = field(default_factory=lambda: _env_int("CIB_WAIT_SECS", "120", 0))
     log_tail: str = field(default_factory=lambda: _env("CIB_LOG_TAIL", "200"))
 
     @property
@@ -347,9 +360,9 @@ def cmd_engine(engine: str, cfg: Config) -> None:
 @dataclass(frozen=True)
 class VmConfig:
     name: str = field(default_factory=lambda: _env("CIB_VM_NAME", "chrome-vm"))
-    cpus: str = field(default_factory=lambda: _env("CIB_VM_CPUS", "4"))
-    memory: str = field(default_factory=lambda: _env("CIB_VM_MEMORY", "8192"))
-    disk: str = field(default_factory=lambda: _env("CIB_VM_DISK", "100"))
+    cpus: int = field(default_factory=lambda: _env_int("CIB_VM_CPUS", "4"))
+    memory: int = field(default_factory=lambda: _env_int("CIB_VM_MEMORY", "8192", 1024))
+    disk: int = field(default_factory=lambda: _env_int("CIB_VM_DISK", "100", 20))
     display: str = field(default_factory=lambda: _env("CIB_VM_DISPLAY", "1920x1200"))
     # "bridged" gives the guest an address from the real network, so it inherits a
     # working DNS resolver. tart's default "shared" mode hands out the vmnet gateway
@@ -361,7 +374,7 @@ class VmConfig:
     user: str = field(default_factory=lambda: _env("CIB_VM_USER", "admin"))
 
 
-PACKER_TEMPLATE = "packer/chrome-vm.pkr.hcl"
+PACKER_TEMPLATE = Path(__file__).resolve().parent / "packer" / "chrome-vm.pkr.hcl"
 # Where the generated guest password is kept, so it survives between commands and
 # can be pasted rather than typed.
 CREDENTIALS = Path.home() / ".config" / "chrome-in-a-box" / "vm-credentials"
@@ -371,7 +384,7 @@ def find_packer() -> str:
     path = shutil.which("packer")
     if not path:
         raise Failure(
-            "packer is not on PATH — install it with: brew install packer\n"
+            "packer is not on PATH — install it with: brew install hashicorp/tap/packer\n"
             "(the guest is built unattended, which is what packer drives)"
         )
     return path
@@ -381,13 +394,22 @@ def guest_password(create: bool = False) -> str:
     """The guest account password. Generated once, then remembered — you paste it,
     you never type it."""
     if CREDENTIALS.exists():
-        return CREDENTIALS.read_text().strip()
+        saved = CREDENTIALS.read_text().strip()
+        if saved:
+            return saved
+        # An interrupted write must not become an empty password.
+        CREDENTIALS.unlink()
     if not create:
         raise Failure(f"no saved guest password at {CREDENTIALS} — build the VM first")
-    password = secrets.token_urlsafe(18)
-    CREDENTIALS.parent.mkdir(parents=True, exist_ok=True)
-    CREDENTIALS.write_text(password + "\n")
-    CREDENTIALS.chmod(0o600)
+    # Typed into the guest as keystrokes during the build, so it must not contain a
+    # character whose key moves between the US and Swiss German layouts: -, _, y, z
+    # and their capitals all do.
+    alphabet = "abcdefghijklmnopqrstuvwxABCDEFGHIJKLMNOPQRSTUVWX0123456789"
+    password = "".join(secrets.choice(alphabet) for _ in range(24))
+    CREDENTIALS.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Created 0600 rather than chmod-ed afterwards, so it is never briefly readable.
+    with os.fdopen(os.open(CREDENTIALS, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
+        fh.write(password + "\n")
     return password
 
 
@@ -414,7 +436,13 @@ def cmd_vm_create(tart: str, vm: VmConfig) -> None:
         return
     packer = find_packer()
     password = guest_password(create=True)
+    if not PACKER_TEMPLATE.exists():
+        raise Failure(
+            f"the build template is missing at {PACKER_TEMPLATE} — 'vm create' needs a "
+            "checkout of the repository; the installed command cannot build a VM"
+        )
     print(f"Building {vm.name!r} from a fresh macOS image, unattended.")
+    run(packer, "init", str(PACKER_TEMPLATE))
     print("This takes a while: it installs macOS, drives Setup Assistant and adds Chrome.")
     # Built from a fresh installer on purpose: Apple only grants a VM an Apple
     # Account identity when it was created from a macOS 15+ one.
@@ -430,10 +458,11 @@ def cmd_vm_create(tart: str, vm: VmConfig) -> None:
         "-var",
         f"cpu_count={vm.cpus}",
         "-var",
-        f"memory_gb={int(vm.memory) // 1024}",
+        # Round up: 8000 MB is 8 GB of intent, and truncating would give the guest 7.
+        f"memory_gb={-(-vm.memory // 1024)}",
         "-var",
         f"disk_size_gb={vm.disk}",
-        PACKER_TEMPLATE,
+        str(PACKER_TEMPLATE),
     )
     run(tart, "set", vm.name, "--display", vm.display, check=False)
     print()
@@ -448,6 +477,8 @@ def vm_run_args(vm: VmConfig) -> list[str]:
         return ["run", f"--net-bridged={vm.interface}", vm.name]
     if vm.net == "host":
         return ["run", "--net-host", vm.name]
+    if vm.net != "shared":
+        raise Failure(f"CIB_VM_NET must be bridged, shared or host, got {vm.net!r}")
     return ["run", vm.name]
 
 
@@ -510,8 +541,13 @@ def vm_ip(tart: str, vm: VmConfig, wait: str = "60") -> str:
 
 
 def ssh_command(vm: VmConfig, ip: str, script: str | None = None) -> list[str]:
-    target = [f"{vm.user}@{ip}"]
-    return ["ssh", *SSH_OPTIONS, *target, *([script] if script else [])]
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", vm.user):
+        # A user starting with "-" would be read by ssh as an option.
+        raise Failure(f"CIB_VM_USER is not a usable account name: {vm.user!r}")
+    ssh = shutil.which("ssh")
+    if not ssh:
+        raise Failure("ssh is not on PATH")
+    return [ssh, *SSH_OPTIONS, f"{vm.user}@{ip}", *([script] if script else [])]
 
 
 def guest_ssh(vm: VmConfig, ip: str, script: str | None = None) -> int:
@@ -632,7 +668,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  box: CIB_PORT, CIB_RESOLUTION, CIB_WAIT_SECS, CIB_ENGINE, CIB_IMAGE,\n"
             "       CIB_NAME, CIB_VOLUME, CIB_PASSWORD, CIB_LOG_TAIL,\n"
             "       CIB_FORCE=1 to recreate a running container instead of reusing it\n"
-            "  vm:  CIB_VM_NAME, CIB_VM_CPUS, CIB_VM_MEMORY, CIB_VM_DISK, CIB_VM_DISPLAY"
+            "  vm:  CIB_VM_NAME, CIB_VM_CPUS, CIB_VM_MEMORY, CIB_VM_DISK, CIB_VM_DISPLAY,\n"
+            "       CIB_VM_NET, CIB_VM_INTERFACE, CIB_VM_USER"
         ),
     )
     parser.add_argument("--version", action="version", version=f"cib {__version__}")
@@ -674,6 +711,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         cfg = Config()
         engine = find_engine()
+        if getattr(args, "follow", False) and args.action != "logs":
+            raise Failure(f"-f/--follow only applies to logs, not {args.action}")
         if args.action == "logs":
             cmd_logs(engine, cfg, follow=args.follow)
         else:
@@ -688,7 +727,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             + (f"\n{detail}" if detail else ""),
             file=sys.stderr,
         )
-        return exc.returncode
+        return exc.returncode if exc.returncode > 0 else 1
     except KeyboardInterrupt:
         return 130
     return 0

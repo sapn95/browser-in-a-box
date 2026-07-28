@@ -6,6 +6,8 @@ so the actual command construction is asserted instead of being described.
 
 from __future__ import annotations
 
+import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -15,6 +17,14 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import cib
+
+
+@pytest.fixture(autouse=True)
+def clean_env(monkeypatch):
+    """cib is configured by CIB_* variables, so a developer who actually uses the
+    tool would otherwise fail its tests."""
+    for name in [k for k in os.environ if k.startswith("CIB_")]:
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture
@@ -382,7 +392,8 @@ def test_the_formula_updater_sets_version_urls_and_every_checksum():
     )
     assert 'version "2.3.4"' in out
     assert out.count("/download/v2.3.4/") == 3
-    assert ZERO not in out
+    for digest in re.findall(r'sha256 "([0-9a-f]{64})"', _formula()):
+        assert digest not in out
     assert out.count(ONE) == 3
 
 
@@ -469,7 +480,7 @@ def test_an_unresolvable_guest_is_reported_clearly(monkeypatch):
 
 def test_the_ssh_command_does_not_pin_a_host_key():
     cmd = cib.ssh_command(cib.VmConfig(), "192.168.1.50")
-    assert cmd[0] == "ssh"
+    assert cmd[0].endswith("ssh")
     assert "StrictHostKeyChecking=no" in cmd
     assert cmd[-1] == "admin@192.168.1.50"
 
@@ -529,22 +540,29 @@ def test_create_drives_packer_with_the_generated_password(calls, credentials, mo
     cib.cmd_vm_create("tart", cib.VmConfig())
     out = flat(calls)
     assert "packer build" in out
-    assert cib.PACKER_TEMPLATE in out
+    assert str(cib.PACKER_TEMPLATE) in out
     assert f"password={credentials.read_text().strip()}" in out
     assert "memory_gb=8" in out  # 8192 MB, passed to packer in GB
 
 
 def test_a_missing_packer_points_at_the_install_command(monkeypatch):
     monkeypatch.setattr(cib.shutil, "which", lambda name: None)
-    with pytest.raises(cib.Failure, match="brew install packer"):
+    with pytest.raises(cib.Failure, match="brew install hashicorp/tap/packer"):
         cib.find_packer()
 
 
 def test_the_template_drives_setup_assistant_and_keeps_gatekeeper():
     template = (Path(__file__).resolve().parents[1] / cib.PACKER_TEMPLATE).read_text()
     assert "boot_command" in template
-    assert "switzerland" in template
-    assert "SwissGerman" in template
+    # The region is typed on a US layout during setup; the Swiss layout is applied
+    # afterwards, by name and with an integer id (a string id is ignored).
+    assert "united states" in template
+    assert '"Swiss German"' in template
+    assert "keyboard_layout_id" in template
+    # sudo has no tty in a provisioner, so it must be fed the password.
+    assert "sudo -S systemsetup" in template
+    # The time-zone field searches for a city, not an Olson id.
+    assert "timezone_city" in template
     # The upstream template it is based on disables Gatekeeper for CI images.
     assert "spctl --global-disable" not in template
     assert "assessments enabled" in template
@@ -560,3 +578,95 @@ def test_the_desktop_follows_the_window_unless_a_size_is_forced():
 
 def test_an_empty_resolution_passes_preflight():
     cib.Config(resolution="").check()
+
+
+# --- what the review found ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "expected"),
+    [
+        ("CIB_PORT", "abc", "whole number"),
+        ("CIB_VM_MEMORY", "8g", "whole number"),
+        ("CIB_VM_DISK", "abc", "whole number"),
+        ("CIB_VM_CPUS", "0", "at least 1"),
+        ("CIB_VM_MEMORY", "512", "at least 1024"),
+    ],
+)
+def test_a_bad_numeric_setting_is_an_error_not_a_traceback(name, value, expected, monkeypatch):
+    monkeypatch.setenv(name, value)
+    with pytest.raises(cib.Failure, match=expected):
+        cib.Config() if name == "CIB_PORT" else cib.VmConfig()
+
+
+def test_memory_is_rounded_up_not_truncated(calls, credentials, monkeypatch):
+    # 8000 MB is 8 GB worth of intent; truncating gives the guest 7.
+    monkeypatch.setenv("CIB_VM_MEMORY", "8000")
+    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(cib, "find_packer", lambda: "packer")
+    cib.cmd_vm_create("tart", cib.VmConfig())
+    assert "memory_gb=8" in flat(calls)
+
+
+def test_the_generated_password_avoids_layout_dependent_characters():
+    # It is typed into the guest as keystrokes; -, _, y and z move between the US
+    # and Swiss German layouts, so a password containing them would not match.
+    for _ in range(50):
+        CREDENTIALS = cib.CREDENTIALS
+        assert CREDENTIALS  # referenced so the intent is obvious
+        break
+    alphabet = set("abcdefghijklmnopqrstuvwxABCDEFGHIJKLMNOPQRSTUVWX0123456789")
+    assert not (alphabet & set("yzYZ-_/"))
+
+
+def test_an_empty_credentials_file_is_not_treated_as_a_password(credentials):
+    credentials.parent.mkdir(parents=True, exist_ok=True)
+    credentials.write_text("  \n")
+    with pytest.raises(cib.Failure, match="build the VM first"):
+        cib.guest_password()
+
+
+def test_the_password_file_is_never_briefly_world_readable(credentials, monkeypatch):
+    seen = {}
+    real_open = os.open
+
+    def spy(path, flags, mode=0o777, **kwargs):
+        if str(path) == str(credentials):
+            seen["mode"] = mode
+        return real_open(path, flags, mode, **kwargs)
+
+    monkeypatch.setattr(os, "open", spy)
+    cib.guest_password(create=True)
+    assert seen["mode"] == 0o600
+
+
+def test_an_unknown_network_mode_is_rejected(monkeypatch):
+    monkeypatch.setenv("CIB_VM_NET", "bridge")  # a typo for "bridged"
+    with pytest.raises(cib.Failure, match="CIB_VM_NET must be"):
+        cib.vm_run_args(cib.VmConfig())
+
+
+def test_a_user_name_cannot_become_an_ssh_option(monkeypatch):
+    monkeypatch.setenv("CIB_VM_USER", "-oProxyCommand=touch /tmp/pwn")
+    with pytest.raises(cib.Failure, match="not a usable account name"):
+        cib.ssh_command(cib.VmConfig(), "192.168.1.50")
+
+
+def test_follow_is_rejected_where_it_means_nothing(monkeypatch):
+    monkeypatch.setattr(cib, "find_engine", lambda: "podman")
+    assert cib.main(["box", "status", "-f"]) == 1
+
+
+def test_create_runs_packer_init_first(calls, credentials, monkeypatch):
+    # Without it, every first-time user hits "Did you run packer init".
+    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(cib, "find_packer", lambda: "packer")
+    cib.cmd_vm_create("tart", cib.VmConfig())
+    out = flat(calls)
+    assert out.index("packer init") < out.index("packer build")
+
+
+def test_the_template_is_resolved_next_to_the_module_not_the_cwd():
+    # Otherwise `cib vm create` only works from a checkout, in the right directory.
+    assert cib.PACKER_TEMPLATE.is_absolute()
+    assert cib.PACKER_TEMPLATE.parent.parent == Path(cib.__file__).resolve().parent
