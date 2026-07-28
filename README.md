@@ -139,8 +139,9 @@ binaries are built inside UBI10 so they link against a supported base.
 
 - Python 3.10 or newer (macOS and every Linux ship one)
 - For the container: **podman or docker**
-- For the macOS VM: **Apple silicon** and [tart](https://tart.run)
-  (`brew install cirruslabs/cli/tart`), plus ~40 GB free and 8 GB RAM to spare
+- For the macOS VM: **Apple silicon**, [tart](https://tart.run)
+  (`brew install cirruslabs/cli/tart`) and [Packer](https://packer.io)
+  (`brew install hashicorp/tap/packer`), plus ~40 GB free and 8 GB RAM to spare
 - On Apple Silicon: **Rosetta**, because Google ships Chrome for Linux on amd64 only.
   Without it, emulated Chrome is slow and crash-prone. To enable it for podman:
 
@@ -169,25 +170,30 @@ binaries are built inside UBI10 so they link against a supported base.
 
 The macOS VM variant (Apple silicon):
 
-| Command         | What it does                                    |
-| --------------- | ----------------------------------------------- |
-| `cib vm create` | build the VM from a fresh macOS image (large)   |
-| `cib vm up`     | start it — a window opens                       |
-| `cib vm setup`  | install Chrome in the guest over SSH            |
-| `cib vm ssh`    | open a shell in the guest                       |
-| `cib vm ip`     | print the guest's address                       |
-| `cib vm down`   | stop it                                         |
-| `cib vm status` | list VMs and their state                        |
-| `cib vm delete` | delete the VM and everything in it (asks first) |
+| Command           | What it does                                    |
+| ----------------- | ----------------------------------------------- |
+| `cib vm create`   | build the VM from a fresh macOS image (large)   |
+| `cib vm up`       | start it — a window opens                       |
+| `cib vm setup`    | install Chrome in the guest over SSH            |
+| `cib vm password` | print the generated guest password              |
+| `cib vm ssh`      | open a shell in the guest                       |
+| `cib vm ip`       | print the guest's address                       |
+| `cib vm down`     | stop it                                         |
+| `cib vm status`   | list VMs and their state                        |
+| `cib vm delete`   | delete the VM and everything in it (asks first) |
 
-After `vm create`, three things have to be done by hand in the guest, because Apple
-makes them interactive on purpose: Setup Assistant (choose **Set up as new**), the
-**Apple Account** sign-in, and System Settings → Apple Account → iCloud → turn on
-**Passwords & Keychain**. Then turn on System Settings → General → Sharing →
-**Remote Login** and the rest is `cib vm setup`, which installs Chrome for you.
+`vm create` is **unattended**. Setup Assistant cannot be skipped without MDM, but it
+can be driven, so Packer types through it: language, Switzerland, Swiss keyboard
+layout, an account with a **generated** password, Remote Login on, Chrome installed.
+Nothing to click and nothing to type.
 
-The guest has no Touch ID, so remember the local account password: every passkey
-confirmation asks for it.
+Two things stay manual, because Apple makes them interactive on purpose: the
+**Apple Account sign-in** and turning on **iCloud Keychain** (System Settings →
+Apple Account → iCloud → Passwords & Keychain).
+
+The guest has no Touch ID, so every passkey confirmation asks for the account
+password. You never type it — `cib vm password` prints it and tart shares the
+clipboard, so paste it.
 
 `up` is idempotent: if the container is already serving it just re-applies the
 resolution and revives Chrome, so your tabs survive. `CIB_FORCE=1` recreates it

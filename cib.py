@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import os
 import platform
+import secrets
 import shutil
 import ssl
 import subprocess
@@ -35,6 +36,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import NoReturn
 
 __version__ = "1.3.0"
@@ -349,7 +351,36 @@ class VmConfig:
     net: str = field(default_factory=lambda: _env("CIB_VM_NET", "bridged"))
     interface: str = field(default_factory=lambda: _env("CIB_VM_INTERFACE", "en0"))
     user: str = field(default_factory=lambda: _env("CIB_VM_USER", "admin"))
-    golden: str = field(default_factory=lambda: _env("CIB_VM_GOLDEN", "chrome-vm-golden"))
+
+
+PACKER_TEMPLATE = "packer/chrome-vm.pkr.hcl"
+# Where the generated guest password is kept, so it survives between commands and
+# can be pasted rather than typed.
+CREDENTIALS = Path.home() / ".config" / "chrome-in-a-box" / "vm-credentials"
+
+
+def find_packer() -> str:
+    path = shutil.which("packer")
+    if not path:
+        raise Failure(
+            "packer is not on PATH — install it with: brew install packer\n"
+            "(the guest is built unattended, which is what packer drives)"
+        )
+    return path
+
+
+def guest_password(create: bool = False) -> str:
+    """The guest account password. Generated once, then remembered — you paste it,
+    you never type it."""
+    if CREDENTIALS.exists():
+        return CREDENTIALS.read_text().strip()
+    if not create:
+        raise Failure(f"no saved guest password at {CREDENTIALS} — build the VM first")
+    password = secrets.token_urlsafe(18)
+    CREDENTIALS.parent.mkdir(parents=True, exist_ok=True)
+    CREDENTIALS.write_text(password + "\n")
+    CREDENTIALS.chmod(0o600)
+    return password
 
 
 def find_tart() -> str:
@@ -364,55 +395,44 @@ def find_tart() -> str:
     return path
 
 
-def vm_exists(tart: str, vm: VmConfig, name: str | None = None) -> bool:
+def vm_exists(tart: str, vm: VmConfig) -> bool:
     result = run(tart, "list", "--quiet", check=False, capture=True)
-    return (name or vm.name) in result.stdout.split()
-
-
-def cmd_vm_snapshot(tart: str, vm: VmConfig) -> None:
-    """Keep the configured guest as a golden image, so rebuilding it later does not
-    mean sitting through Setup Assistant again."""
-    if not vm_exists(tart, vm):
-        raise Failure(f"{vm.name!r} does not exist — nothing to snapshot")
-    run(tart, "delete", vm.golden, check=False, capture=True)
-    run(tart, "clone", vm.name, vm.golden)
-    print(f"Saved as {vm.golden!r}. A later 'cib vm create' will start from it.")
+    return vm.name in result.stdout.split()
 
 
 def cmd_vm_create(tart: str, vm: VmConfig) -> None:
     if vm_exists(tart, vm):
         print(f"{vm.name!r} already exists. 'cib vm up' to start it.")
         return
-    if vm_exists(tart, vm, name=vm.golden):
-        # Cloning skips Setup Assistant entirely. Apple re-derives a cloned VM's
-        # identity, so the guest asks to sign in to the Apple Account again — which
-        # is the one step that cannot be automated anyway.
-        print(f"Cloning {vm.golden!r} (no Setup Assistant; sign in to Apple Account again) ...")
-        run(tart, "clone", vm.golden, vm.name)
-        return
-    print(f"Creating {vm.name!r} from the latest macOS image (a large download) ...")
-    # Built from a fresh image on purpose: Apple only grants a VM an Apple Account
-    # identity when it was created from a macOS 15+ installer. Upgrading an older
-    # VM, or cloning one, does not qualify.
-    run(tart, "create", "--from-ipsw=latest", vm.name)
-    # tart defaults to 1024x768, which is unusable for browsing.
+    packer = find_packer()
+    password = guest_password(create=True)
+    print(f"Building {vm.name!r} from a fresh macOS image, unattended.")
+    print("This takes a while: it installs macOS, drives Setup Assistant and adds Chrome.")
+    # Built from a fresh installer on purpose: Apple only grants a VM an Apple
+    # Account identity when it was created from a macOS 15+ one.
     run(
-        tart,
-        "set",
-        vm.name,
-        "--cpu",
-        vm.cpus,
-        "--memory",
-        vm.memory,
-        "--disk-size",
-        vm.disk,
-        "--display",
-        vm.display,
+        packer,
+        "build",
+        "-var",
+        f"vm_name={vm.name}",
+        "-var",
+        f"username={vm.user}",
+        "-var",
+        f"password={password}",
+        "-var",
+        f"cpu_count={vm.cpus}",
+        "-var",
+        f"memory_gb={int(vm.memory) // 1024}",
+        "-var",
+        f"disk_size_gb={vm.disk}",
+        PACKER_TEMPLATE,
     )
-    print("Created. Start it with 'cib vm up', then in the guest:")
-    print("  1. finish Setup Assistant and sign in to your Apple Account")
+    run(tart, "set", vm.name, "--display", vm.display, check=False)
+    print()
+    print(f"Built. The account is {vm.user!r}; 'cib vm password' prints its password.")
+    print("Start it with 'cib vm up', then the two steps Apple keeps interactive:")
+    print("  1. sign in to your Apple Account")
     print("  2. System Settings > Apple Account > iCloud > turn on Passwords & Keychain")
-    print("  3. install Chrome and sign in to Google")
 
 
 def vm_run_args(vm: VmConfig) -> list[str]:
@@ -490,6 +510,10 @@ def guest_ssh(vm: VmConfig, ip: str, script: str | None = None) -> int:
     return subprocess.run(ssh_command(vm, ip, script), check=False).returncode  # noqa: S603
 
 
+def cmd_vm_password(tart: str, vm: VmConfig) -> None:
+    print(guest_password())
+
+
 def cmd_vm_ip(tart: str, vm: VmConfig) -> None:
     print(vm_ip(tart, vm))
 
@@ -542,9 +566,9 @@ VM_ACTIONS = {
     "create": cmd_vm_create,
     "up": cmd_vm_up,
     "setup": cmd_vm_setup,
-    "snapshot": cmd_vm_snapshot,
     "ssh": cmd_vm_ssh,
     "ip": cmd_vm_ip,
+    "password": cmd_vm_password,
     "down": cmd_vm_down,
     "status": cmd_vm_status,
     "delete": cmd_vm_delete,
@@ -576,18 +600,18 @@ VM_HELP = """\
   create   build the VM from a fresh macOS image (large download, one time)
   up       start it; a window opens
   setup    install Chrome in the guest over SSH (needs Remote Login on in it)
-  snapshot keep the configured guest as a golden image, so the next create clones
-           it instead of running Setup Assistant again
   ssh      open a shell in the guest
   ip       print the guest's address
+  password print the generated guest account password (copy it, do not retype it)
   down     stop it
   status   list VMs and their state
   delete   delete the VM and everything in it (asks first)
 
-The Apple Account sign-in and turning on iCloud Keychain stay manual: Apple makes
-them interactive on purpose, and no flag can change that. Setup Assistant does not
-have to be repeated though — run `snapshot` once the guest is configured, and every
-later `create` clones that instead."""
+`create` is unattended: it installs macOS, drives Setup Assistant, sets the Swiss
+keyboard layout and installs Chrome, using a generated account password you never
+have to type. Two things stay manual afterwards, because Apple makes them
+interactive on purpose: signing in to the Apple Account, and turning on iCloud
+Keychain."""
 
 
 def build_parser() -> argparse.ArgumentParser:
