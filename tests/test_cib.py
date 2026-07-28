@@ -950,7 +950,7 @@ def test_create_prepares_the_guest_offline_by_default(calls, credentials, monkey
     )
     cib.cmd_vm_create("tart", cib.VmConfig())
     out = flat(calls)
-    assert "create --from-ipsw=latest chrome-vm" in out
+    assert "create --from-ipsw=latest --disk-size=100 chrome-vm" in out
     assert "packer" not in out
     # Only the patch runs as root, and the password goes in on stdin so it never
     # appears in the process list.
@@ -1104,7 +1104,7 @@ def test_the_home_tree_is_owned_after_every_file_exists(tmp_path, monkeypatch):
     # fails to write any preference the guest sets.
     chowned: list[str] = []
     monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g: chowned.append(str(p)))
+    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g, **kw: chowned.append(str(p)))
     root = tmp_path
     for sub in ("users", "groups"):
         (root / f"private/var/db/dslocal/nodes/Default/{sub}").mkdir(parents=True)
@@ -1267,3 +1267,55 @@ def test_the_image_volume_is_attached_with_ownership():
     source = Path(cibpatch.__file__).read_text()
     assert '"-owners"' in source
     assert "noowners" in source  # and it is checked, not merely requested
+
+
+def test_owning_the_home_never_follows_a_link(tmp_path, monkeypatch):
+    # A symlink stored in the guest resolves against the HOST filesystem, so
+    # following one here would let the guest steer a root chown at any host path.
+    calls_seen: list[tuple] = []
+    monkeypatch.setattr(
+        cibpatch.os,
+        "chown",
+        lambda p, u, g, **kw: calls_seen.append((str(p), kw.get("follow_symlinks"))),
+    )
+    home = tmp_path / "Users/admin"
+    home.mkdir(parents=True)
+    (home / "real").write_text("x")
+    (home / "escape").symlink_to("/etc")
+    cibpatch.own_home(tmp_path, cibpatch.Account("admin", "pw"))
+    assert calls_seen, "nothing was owned"
+    assert all(kw is False for _, kw in calls_seen), "a chown followed links"
+    assert not any(path == "/etc" for path, _ in calls_seen)
+
+
+def test_a_symlinked_home_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(cibpatch.os, "chown", lambda *a, **k: None)
+    (tmp_path / "Users").mkdir()
+    (tmp_path / "Users/admin").symlink_to("/")
+    with pytest.raises(cibpatch.PatchError, match="symlink"):
+        cibpatch.own_home(tmp_path, cibpatch.Account("admin", "pw"))
+
+
+def test_the_disk_is_sized_when_it_is_created(calls, credentials, monkeypatch, tmp_path):
+    # tart create installs macOS onto its default 50 GB disk; growing the image
+    # afterwards leaves the partitions where the installer put them.
+    monkeypatch.setenv("CIB_VM_DISK", "120")
+    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(cib.time, "sleep", lambda s: None)
+    monkeypatch.setattr(cib.subprocess, "Popen", lambda *a, **k: _FakeBoot())
+    _fake_guest_disk(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        cib.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0)
+    )
+    cib.cmd_vm_create("tart", cib.VmConfig())
+    out = flat(calls)
+    assert "--disk-size=120" in out
+    assert "set chrome-vm --cpu" in out and "--disk-size" not in out.split("set chrome-vm")[1]
+
+
+def test_prepare_refuses_a_running_guest(calls, credentials, monkeypatch):
+    # Patching a mounted disk that the guest is also writing means two writers.
+    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: True)
+    monkeypatch.setattr(cib, "vm_running", lambda *a, **k: True)
+    with pytest.raises(cib.Failure, match="cib vm down"):
+        cib.cmd_vm_prepare("tart", cib.VmConfig())

@@ -482,6 +482,11 @@ def cmd_vm_prepare(tart: str, vm: VmConfig) -> None:
     """
     if not vm_exists(tart, vm):
         raise Failure(f"{vm.name!r} does not exist — run 'cib vm create' first")
+    if vm_running(tart, vm):
+        raise Failure(
+            f"{vm.name!r} is running — 'cib vm down' first. Its disk cannot be patched "
+            "while the guest has it open."
+        )
     _prepare_guest(vm, guest_password())
 
 
@@ -491,7 +496,10 @@ def _create_offline(tart: str, vm: VmConfig) -> None:
     password = guest_password(create=True)
     firstboot = _env_int("CIB_VM_FIRSTBOOT_SECS", "180", 0)  # before anything is built
     print(f"Creating {vm.name!r} from a fresh macOS image ...")
-    run(tart, "create", "--from-ipsw=latest", vm.name)
+    # Sized here, not afterwards: tart create installs macOS onto its default 50 GB
+    # disk, and `tart set --disk-size` only grows the image file — the partitions and
+    # the APFS container stay where the installer put them.
+    run(tart, "create", "--from-ipsw=latest", f"--disk-size={vm.disk}", vm.name)
     run(
         tart,
         "set",
@@ -500,8 +508,6 @@ def _create_offline(tart: str, vm: VmConfig) -> None:
         str(vm.cpus),
         "--memory",
         str(vm.memory),
-        "--disk-size",
-        str(vm.disk),
         "--display",
         vm.display,
         check=False,
@@ -587,7 +593,8 @@ def _prepare_guest(vm: VmConfig, password: str) -> None:
     if result.returncode != 0:
         raise Failure(
             "preparing the guest failed (see above).\n"
-            "Set CIB_VM_PACKER=1 to fall back to driving Setup Assistant instead."
+            "'cib vm prepare' retries just this step. To fall back to driving Setup "
+            "Assistant instead, 'cib vm delete' first and re-run with CIB_VM_PACKER=1."
         )
 
 
