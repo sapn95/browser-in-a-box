@@ -203,7 +203,11 @@ instead, which is what you need after changing the image or an environment setti
 Overridable: `CIB_PORT`, `CIB_RESOLUTION`, `CIB_WAIT_SECS`, `CIB_ENGINE`,
 `CIB_IMAGE`, `CIB_NAME`, `CIB_VOLUME`, `CIB_PASSWORD`, `CIB_LOG_TAIL`, `CIB_FORCE`,
 and for the VM `CIB_VM_NAME`, `CIB_VM_CPUS`, `CIB_VM_MEMORY`, `CIB_VM_DISK`,
-`CIB_VM_DISPLAY`, `CIB_VM_NET`, `CIB_VM_INTERFACE`, `CIB_VM_USER`.
+`CIB_VM_DISPLAY`, `CIB_VM_NET`, `CIB_VM_INTERFACE`, `CIB_VM_USER`, `CIB_VM_SHARE`.
+
+Downloads in the guest land in `~/Downloads/chrome-vm` on the host: the folder is
+shared into the VM and the guest's own `~/Downloads` is a symlink to it, so every
+app follows, not just Chrome. Point it elsewhere with `CIB_VM_SHARE`.
 
 ## Passkeys — what does and does not work
 
