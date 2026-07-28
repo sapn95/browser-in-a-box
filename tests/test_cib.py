@@ -837,3 +837,62 @@ def test_the_release_archive_has_a_top_level_directory():
     workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/release.yml").read_text()
     assert "tar -czf dist/cib-macos-arm64.tar.gz -C dist cib-macos-arm64" in workflow
     assert '-C dist "cib-linux-${{ matrix.arch }}"' in workflow
+
+
+# --- the offline guest patcher ------------------------------------------------
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import cibpatch  # noqa: E402
+
+
+def test_the_password_verifier_matches_what_macos_expects():
+    import plistlib
+
+    blob = plistlib.loads(cibpatch.shadow_hash_data("hunter2"))
+    entry = blob["SALTED-SHA512-PBKDF2"]
+    # Wrong parameters do not fail loudly; the account just refuses every password.
+    assert entry["iterations"] == 50_000
+    assert len(entry["salt"]) == 32
+    assert len(entry["entropy"]) == 128
+
+
+def test_the_verifier_is_salted_differently_every_time():
+    import plistlib
+
+    salts = {
+        plistlib.loads(cibpatch.shadow_hash_data("same"))["SALTED-SHA512-PBKDF2"]["salt"]
+        for _ in range(5)
+    }
+    assert len(salts) == 5
+
+
+def test_kcpassword_is_padded_to_the_key_length():
+    # Without the padding macOS reads past the end of the password.
+    for password in ("a", "elevenchars", "exactly-eleven"):
+        assert len(cibpatch.kcpassword(password)) % len(cibpatch.KCPASSWORD_KEY) == 0
+
+
+def test_kcpassword_round_trips():
+    key = cibpatch.KCPASSWORD_KEY
+    encoded = cibpatch.kcpassword("s3cret")
+    decoded = bytes(b ^ key[i % len(key)] for i, b in enumerate(encoded))
+    assert decoded.startswith(b"s3cret\x00")
+
+
+def test_the_user_record_stores_every_value_as_a_list():
+    # DirectoryService silently ignores a plain string here.
+    record = cibpatch.user_record(cibpatch.Account("admin", "pw"))
+    assert all(isinstance(v, list) for v in record.values())
+    assert record["name"] == ["admin"]
+    assert record["uid"] == ["501"]
+
+
+def test_patching_a_directory_that_is_not_a_guest_volume_is_refused(tmp_path):
+    with pytest.raises(cibpatch.PatchError, match="Data volume"):
+        cibpatch.patch(tmp_path, cibpatch.Account("admin", "pw"))
+
+
+def test_patching_without_a_first_boot_state_says_so(tmp_path):
+    (tmp_path / "private/var/db").mkdir(parents=True)
+    with pytest.raises(cibpatch.PatchError, match="booted once"):
+        cibpatch.patch(tmp_path, cibpatch.Account("admin", "pw"))

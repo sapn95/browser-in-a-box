@@ -23,10 +23,10 @@ cib = "cib:main"
 dev = ["pytest>=8", "pytest-cov>=6", "ruff>=0.14", "nuitka>=2.5"]
 
 [tool.hatch.build.targets.wheel]
-only-include = ["cib.py"]
+only-include = ["cib.py", "cibpatch.py"]
 
 [tool.hatch.build.targets.sdist]
-include = ["cib.py", "tests", "README.md", "LICENSE"]
+include = ["cib.py", "cibpatch.py", "packer", "tests", "README.md", "LICENSE"]
 
 [tool.ruff]
 line-length = 100
