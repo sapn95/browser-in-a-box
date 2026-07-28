@@ -62,6 +62,10 @@ jobs:
       - uses: actions/checkout@v7
       - uses: hashicorp/setup-packer@v3
       - name: validate
+        env:
+          # Without a token packer fetches the plugin anonymously and hits the
+          # shared runner's GitHub API rate limit.
+          PACKER_GITHUB_API_TOKEN: ${{ github.token }}
         run: |
           packer fmt -check packer/
           packer init packer/chrome-vm.pkr.hcl
