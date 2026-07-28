@@ -110,7 +110,7 @@ Setup Assistant reports as "not connected to the Internet". Override with
 
 ## Install
 
-Three ways, pick one:
+Four ways, pick one:
 
 ```bash
 # 1. from a checkout — nothing to install
@@ -126,14 +126,16 @@ cib box up                      # `brew install cib` asks you to `brew trust` fi
 uv tool install git+https://github.com/sapn95/chrome-in-a-box    # or: pipx install ...
 cib box up
 
-# 4. a self-contained binary — no Python needed at all
+# 4. a compiled build — no Python needed at all
 #    (download the asset for your platform from the Releases page)
-tar -xzf cib-macos-arm64.tar.gz && ./cib box up
+tar -xzf cib-macos-arm64.tar.gz && ./cib-macos-arm64/cib box up
 ```
 
-The binary is compiled with [Nuitka](https://nuitka.net) — Python translated to C —
-so it needs no interpreter and no dependencies at all. It is about 8 MB. Linux
-binaries are built inside UBI10 so they link against a supported base.
+Compiled with [Nuitka](https://nuitka.net) — Python translated to C — so it needs no
+interpreter and no dependencies at all. It is not a single file: the archive holds
+`cib` next to the shared objects it links against, so keep the folder together.
+Homebrew and the Linux builds handle that for you; the Linux ones are compiled
+inside UBI10 so they link against a supported base.
 
 ## Requirements
 
@@ -184,8 +186,10 @@ The macOS VM variant (Apple silicon):
 | `cib vm delete`   | delete the VM and everything in it (asks first) |
 
 `vm create` is **unattended**. Setup Assistant cannot be skipped without MDM, but it
-can be driven, so Packer types through it: language, Switzerland, Swiss keyboard
-layout, an account with a **generated** password, Remote Login on, Chrome installed.
+can be driven, so Packer types through it: an account with a **generated** password,
+Remote Login on, Chrome and the clipboard agent installed. Setup Assistant itself is
+answered on a US keyboard — deliberately, because the keystrokes it is sent are US
+scancodes — and the Swiss layout and time zone are applied straight afterwards.
 Nothing to click and nothing to type.
 
 Two things stay manual, because Apple makes them interactive on purpose: the

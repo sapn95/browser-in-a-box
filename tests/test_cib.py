@@ -788,3 +788,52 @@ def test_the_template_installs_the_clipboard_agent():
     assert "releases/latest/download" not in template
     assert "guest_agent_version" in template
     assert "test -x /usr/local/bin/tart-guest-agent" in template
+
+
+def test_an_already_running_vm_is_not_a_networking_failure(calls, monkeypatch):
+    # tart exits non-zero for a VM that is already up; blaming the bridge for that
+    # sent the user off to degrade their DNS for no reason.
+    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: True)
+    monkeypatch.setattr(cib, "vm_running", lambda *a, **k: True)
+    cib.cmd_vm_up("tart", cib.VmConfig())
+    assert "run" not in flat(calls)
+
+
+def test_down_says_nothing_was_running_when_there_was_nothing(monkeypatch, capsys):
+    # podman's `rm -f` exits 0 for a container that never existed.
+    monkeypatch.setattr(
+        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="")
+    )
+    cib.cmd_down("podman", cib.Config())
+    assert "Not running." in capsys.readouterr().out
+
+
+def test_the_resolution_is_normalised_before_it_reaches_xrandr(calls, monkeypatch):
+    # xrandr reads anything but lowercase <int>x<int> as a mode index.
+    monkeypatch.setenv("CIB_RESOLUTION", "1280 X 800")
+    cib.ensure_desktop("podman", cib.Config())
+    assert "RES=1280x800" in flat(calls)
+
+
+def test_a_non_zero_remote_shell_is_not_a_connection_failure(monkeypatch):
+    # ssh passes the remote shell's exit status through; only 255 is ssh's own.
+    monkeypatch.setattr(cib, "vm_ip", lambda *a, **k: "192.168.1.50")
+    monkeypatch.setattr(cib, "guest_ssh", lambda *a, **k: 1)
+    cib.cmd_vm_ssh("tart", cib.VmConfig())  # must not raise
+    monkeypatch.setattr(cib, "guest_ssh", lambda *a, **k: 255)
+    with pytest.raises(cib.Failure, match="Remote Login"):
+        cib.cmd_vm_ssh("tart", cib.VmConfig())
+
+
+def test_error_messages_name_commands_that_exist(monkeypatch):
+    # The CLI is variant-scoped now, so "cib logs" would be rejected by argparse.
+    source = Path(cib.__file__).read_text()
+    for stale in ("'cib logs'", "'cib up'", "'cib down'", "'cib status'"):
+        assert stale not in source, stale
+
+
+def test_the_release_archive_has_a_top_level_directory():
+    # Otherwise `tar -xzf` scatters ~44 files into the current directory.
+    workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/release.yml").read_text()
+    assert "tar -czf dist/cib-macos-arm64.tar.gz -C dist cib-macos-arm64" in workflow
+    assert '-C dist "cib-linux-${{ matrix.arch }}"' in workflow

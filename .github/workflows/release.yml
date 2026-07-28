@@ -33,6 +33,9 @@ jobs:
           echo "tag=$tag cib.py=$code pyproject=$meta"
           test "$tag" = "$code" || { echo "cib.py says $code, the tag says $tag"; exit 1; }
           test "$tag" = "$meta" || { echo "pyproject says $meta, the tag says $tag"; exit 1; }
+          # uv.lock carries a third copy of the version and is committed.
+          lock=$(python3 -c "import re,pathlib;print(re.search(r'name = \"chrome-in-a-box\"\nversion = \"([^\"]+)\"', pathlib.Path('uv.lock').read_text()).group(1))")
+          test "$tag" = "$lock" || { echo "uv.lock says $lock, the tag says $tag"; exit 1; }
 
   linux:
     name: binary (linux-${{ matrix.arch }})
@@ -85,9 +88,12 @@ jobs:
           ./dist/cib.dist/cib --version
       - name: package
         run: |
-          cd dist/cib.dist
-          tar -czf "../cib-linux-${{ matrix.arch }}.tar.gz" .
-          cd ..
+          # A top-level directory on purpose: this is a standalone build, ~44 files,
+          # and it must not explode into whatever directory it is unpacked in.
+          mv dist/cib.dist "dist/cib-linux-${{ matrix.arch }}"
+          tar -czf "dist/cib-linux-${{ matrix.arch }}.tar.gz" \
+            -C dist "cib-linux-${{ matrix.arch }}"
+          cd dist
           sha256sum "cib-linux-${{ matrix.arch }}.tar.gz" \
             > "cib-linux-${{ matrix.arch }}.tar.gz.sha256"
       - uses: actions/upload-artifact@v7
@@ -111,9 +117,11 @@ jobs:
           ./dist/cib.dist/cib --version
       - name: package
         run: |
-          cd dist/cib.dist
-          tar -czf ../cib-macos-arm64.tar.gz .
-          cd ..
+          # A top-level directory on purpose: this is a standalone build, ~44 files,
+          # and it must not explode into whatever directory it is unpacked in.
+          mv dist/cib.dist dist/cib-macos-arm64
+          tar -czf dist/cib-macos-arm64.tar.gz -C dist cib-macos-arm64
+          cd dist
           shasum -a 256 cib-macos-arm64.tar.gz > cib-macos-arm64.tar.gz.sha256
       - uses: actions/upload-artifact@v7
         with:
