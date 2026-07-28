@@ -11,13 +11,36 @@ permissions:
 env:
   PYTHON_VERSION: "3.14"
 
+concurrency:
+  # Two tags pushed together would race in the tap job, and the loser publishes a
+  # release whose formula was never updated.
+  group: release
+  cancel-in-progress: false
+
 jobs:
+  guard:
+    name: version matches the tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: the tag, cib.py and pyproject.toml must agree
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          code=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' cib.py)
+          meta=$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml)
+          echo "tag=$tag cib.py=$code pyproject=$meta"
+          test "$tag" = "$code" || { echo "cib.py says $code, the tag says $tag"; exit 1; }
+          test "$tag" = "$meta" || { echo "pyproject says $meta, the tag says $tag"; exit 1; }
+
   linux:
     name: binary (linux-${{ matrix.arch }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     # Compiled inside UBI10, so the resulting ELF links against a base that is
     # actually supported, rather than whatever the runner image happens to ship.
+    needs: guard
     container: registry.access.redhat.com/ubi10/ubi:latest
     strategy:
       fail-fast: false
@@ -74,6 +97,7 @@ jobs:
 
   macos:
     name: binary (macos-arm64)
+    needs: guard
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
