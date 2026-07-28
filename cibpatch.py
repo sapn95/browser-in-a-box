@@ -38,6 +38,7 @@ import os
 import plistlib
 import secrets
 import subprocess
+import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -363,3 +364,31 @@ def prepare(disk: Path, account: Account) -> None:
         if volume:
             unmount(volume)
         detach(device)
+
+
+def main(argv: list[str]) -> int:
+    """Run the patch as root, for just the step that needs it.
+
+    cib invokes this with sudo rather than asking for the whole build to run as
+    root: a multi-gigabyte download and a VM boot have no business being root.
+    The password arrives on stdin, so it is not in the process list.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="cibpatch", description=__doc__)
+    parser.add_argument("--disk", required=True, type=Path)
+    parser.add_argument("--user", required=True)
+    args = parser.parse_args(argv)
+    password = sys.stdin.readline().rstrip("\n")
+    if not password:
+        raise SystemExit("error: no password on stdin")
+    try:
+        prepare(args.disk, Account(name=args.user, password=password))
+    except PatchError as exc:
+        raise SystemExit(f"error: {exc}") from None
+    print("prepared")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

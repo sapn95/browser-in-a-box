@@ -925,12 +925,23 @@ def test_create_prepares_the_guest_offline_by_default(calls, credentials, monkey
         "Popen",
         lambda *a, **k: type("P", (), {"wait": lambda self, timeout=None: 0})(),
     )
-    monkeypatch.setattr(cibpatch, "prepare", lambda disk, account: seen.update(user=account.name))
+    monkeypatch.setattr(
+        cib.subprocess,
+        "run",
+        lambda cmd, **kw: (
+            seen.update(cmd=cmd, stdin=kw.get("input")) or subprocess.CompletedProcess(cmd, 0)
+        ),
+    )
     cib.cmd_vm_create("tart", cib.VmConfig())
     out = flat(calls)
     assert "create --from-ipsw=latest chrome-vm" in out
     assert "packer" not in out
-    assert seen["user"] == "admin"
+    # Only the patch runs as root, and the password goes in on stdin so it never
+    # appears in the process list.
+    assert seen["cmd"][0] == "/usr/bin/sudo"
+    assert "cibpatch.py" in " ".join(seen["cmd"])
+    assert not any("password" in str(a) for a in seen["cmd"])
+    assert seen["stdin"].strip() == credentials.read_text().strip()
 
 
 def test_the_packer_path_is_still_reachable(calls, credentials, monkeypatch):
@@ -951,10 +962,9 @@ def test_a_failed_patch_names_the_fallback(calls, credentials, monkeypatch, tmp_
         lambda *a, **k: type("P", (), {"wait": lambda self, timeout=None: 0})(),
     )
 
-    def boom(disk, account):
-        raise cibpatch.PatchError("no APFS Data volume")
-
-    monkeypatch.setattr(cibpatch, "prepare", boom)
+    monkeypatch.setattr(
+        cib.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1)
+    )
     with pytest.raises(cib.Failure, match="CIB_VM_PACKER=1"):
         cib.cmd_vm_create("tart", cib.VmConfig())
 
