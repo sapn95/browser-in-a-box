@@ -97,6 +97,13 @@ Keychain — and therefore passkeys — sync into it. The guest was never enroll
 any MDM, so its Chrome reads no managed policy. It has no Secure Enclave of its own
 and no Touch ID, so passkey use asks for the account password instead of a finger.
 
+The VM is started with **bridged** networking, so it gets an address from the real
+network and inherits a DNS resolver that works. tart's default shared mode hands
+out the vmnet gateway as the resolver, and on some hosts that gateway does not
+answer DNS at all — the guest then has an address but resolves nothing, which
+Setup Assistant reports as "not connected to the Internet". Override with
+`CIB_VM_NET=shared` or point at another interface with `CIB_VM_INTERFACE`.
+
 > The VM must be **created from** a macOS 15+ installer. Upgrading or cloning an
 > older VM does not get an Apple Account identity — `cib vm create` does it
 > the right way.
@@ -181,7 +188,7 @@ instead, which is what you need after changing the image or an environment setti
 Overridable: `CIB_PORT`, `CIB_RESOLUTION`, `CIB_WAIT_SECS`, `CIB_ENGINE`,
 `CIB_IMAGE`, `CIB_NAME`, `CIB_VOLUME`, `CIB_PASSWORD`, `CIB_LOG_TAIL`, `CIB_FORCE`,
 and for the VM `CIB_VM_NAME`, `CIB_VM_CPUS`, `CIB_VM_MEMORY`, `CIB_VM_DISK`,
-`CIB_VM_DISPLAY`.
+`CIB_VM_DISPLAY`, `CIB_VM_NET`, `CIB_VM_INTERFACE`.
 
 ## Passkeys — what does and does not work
 
