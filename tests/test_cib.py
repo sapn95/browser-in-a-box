@@ -783,4 +783,8 @@ def test_the_template_installs_the_clipboard_agent():
     template = (Path(__file__).resolve().parents[1] / cib.PACKER_TEMPLATE).read_text()
     assert "tart-guest-agent" in template
     assert "--install-daemon=launchd" in template
+    # Pinned, not "latest": a build should produce the same guest twice, and
+    # renovate moves the pin.
+    assert "releases/latest/download" not in template
+    assert "guest_agent_version" in template
     assert "test -x /usr/local/bin/tart-guest-agent" in template
