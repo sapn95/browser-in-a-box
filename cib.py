@@ -466,6 +466,64 @@ def cmd_vm_create(tart: str, vm: VmConfig) -> None:
     if vm_exists(tart, vm):
         print(f"{vm.name!r} already exists. 'cib vm up' to start it.")
         return
+    if env_flag("CIB_VM_PACKER"):
+        return _create_with_packer(tart, vm)
+    return _create_offline(tart, vm)
+
+
+def _create_offline(tart: str, vm: VmConfig) -> None:
+    """Build the guest and prepare it by patching its disk, so Setup Assistant is
+    never shown. Deterministic, unlike typing into it."""
+    import cibpatch
+
+    password = guest_password(create=True)
+    print(f"Creating {vm.name!r} from a fresh macOS image ...")
+    run(tart, "create", "--from-ipsw=latest", vm.name)
+    run(
+        tart,
+        "set",
+        vm.name,
+        "--cpu",
+        str(vm.cpus),
+        "--memory",
+        str(vm.memory),
+        "--disk-size",
+        str(vm.disk),
+        "--display",
+        vm.display,
+        check=False,
+    )
+    # The guest has to boot once for its first-boot state to exist; there is nothing
+    # to patch before that.
+    print("Booting once so the guest lays down its first-boot state ...")
+    boot = subprocess.Popen(  # noqa: S603
+        [tart, "run", "--no-graphics", vm.name],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    time.sleep(int(_env("CIB_VM_FIRSTBOOT_SECS", "180")))
+    run(tart, "stop", vm.name, check=False, capture=True)
+    boot.wait(timeout=120)
+
+    disk = Path.home() / ".tart" / "vms" / vm.name / "disk.img"
+    if not disk.exists():
+        raise Failure(f"the guest's disk is not where it was expected: {disk}")
+    print("Preparing the guest without Setup Assistant ...")
+    try:
+        cibpatch.prepare(disk, cibpatch.Account(name=vm.user, password=password))
+    except cibpatch.PatchError as exc:
+        raise Failure(
+            f"{exc}\nSet CIB_VM_PACKER=1 to fall back to driving Setup Assistant instead."
+        ) from None
+    print()
+    print(f"Built. The account is {vm.user!r}; 'cib vm password' prints its password.")
+    print("Next:")
+    print("  1. cib vm up          — boots straight to the desktop, no Setup Assistant")
+    print("  2. cib vm setup       — installs Chrome, the clipboard agent and downloads")
+    print("  3. sign in to your Apple Account, then turn on iCloud Keychain")
+
+
+def _create_with_packer(tart: str, vm: VmConfig) -> None:
     packer = find_packer()
     password = guest_password(create=True)
     if not PACKER_TEMPLATE.exists():
