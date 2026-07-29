@@ -10,6 +10,8 @@ import os
 import re
 import subprocess
 import sys
+import time
+import urllib.error
 from pathlib import Path
 from typing import ClassVar
 
@@ -482,11 +484,17 @@ def test_a_shared_guest_is_resolved_by_dhcp(resolving, monkeypatch):
 
 
 def test_an_unresolvable_guest_is_reported_clearly(monkeypatch):
+    # Not "past Setup Assistant": the default path never shows one, so naming it
+    # sent people looking for a screen that does not exist.
     monkeypatch.setattr(
-        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        cib,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="no such VM"),
     )
-    with pytest.raises(cib.Failure, match="Setup Assistant"):
+    with pytest.raises(cib.Failure, match="cib vm status") as caught:
         cib.vm_ip("tart", cib.VmConfig())
+    assert "Setup Assistant" not in str(caught.value)
+    assert "no such VM" in str(caught.value), "tart's own reason must reach the user"
 
 
 def test_the_ssh_command_does_not_pin_a_host_key():
@@ -502,9 +510,9 @@ def test_the_ssh_user_is_overridable(monkeypatch):
 
 
 def test_setup_installs_chrome_and_is_idempotent():
-    assert "googlechrome.dmg" in cib.GUEST_INSTALL_CHROME
-    assert "already installed" in cib.GUEST_INSTALL_CHROME
-    assert cib.GUEST_INSTALL_CHROME.startswith("set -eu")
+    assert "googlechrome.dmg" in cib.guest_install_script("pw")
+    assert "already installed" in cib.guest_install_script("pw")
+    assert cib.guest_install_script("pw").startswith("set -eu")
 
 
 def test_setup_names_the_one_switch_the_guest_needs(monkeypatch, capsys):
@@ -514,14 +522,41 @@ def test_setup_names_the_one_switch_the_guest_needs(monkeypatch, capsys):
         cib.cmd_vm_setup("tart", cib.VmConfig())
 
 
-def test_setup_passes_the_install_script_to_the_guest(monkeypatch):
+def test_setup_passes_the_install_script_to_the_guest(credentials, monkeypatch):
     seen = {}
+    password = cib.guest_password(create=True)
     monkeypatch.setattr(cib, "vm_ip", lambda *a, **k: "192.168.1.50")
     monkeypatch.setattr(
         cib, "guest_ssh", lambda vm, ip, script=None: seen.update(script=script) or 0
     )
     cib.cmd_vm_setup("tart", cib.VmConfig())
-    assert seen["script"] == cib.GUEST_INSTALL_CHROME
+    # The generated password has to reach the guest: sshd runs this with no tty and
+    # no cached credential, so sudo there can only be fed one.
+    assert seen["script"] == cib.guest_install_script(password)
+    assert password in seen["script"]
+
+
+def test_the_guest_password_never_reaches_a_process_list(credentials):
+    # `ssh host "<script>"` would put the whole script, password included, in this
+    # host's argv. It is read on stdin instead.
+    password = cib.guest_password(create=True)
+    script = cib.guest_install_script(password)
+    argv = cib.ssh_command(cib.VmConfig(), "192.168.1.50", script)
+    assert password not in " ".join(argv)
+    assert argv[-2:] == ["/bin/sh", "-s"]
+
+
+def test_an_interactive_shell_keeps_this_terminals_stdin(credentials, monkeypatch):
+    # 'cib vm ssh' has no script; feeding it one would close stdin immediately.
+    seen = {}
+    monkeypatch.setattr(
+        cib.subprocess,
+        "run",
+        lambda cmd, **kw: seen.update(cmd=cmd, kw=kw) or subprocess.CompletedProcess(cmd, 0),
+    )
+    cib.guest_ssh(cib.VmConfig(), "192.168.1.50")
+    assert seen["kw"]["input"] is None
+    assert "-s" not in seen["cmd"]
 
 
 # --- the unattended build -----------------------------------------------------
@@ -700,23 +735,59 @@ def test_the_guest_shares_a_host_folder_for_downloads(tmp_path, monkeypatch):
 
 
 def test_setup_points_the_guest_downloads_at_the_share():
-    assert cib.GUEST_SHARE in cib.GUEST_INSTALL_CHROME
-    assert "ln -sfn" in cib.GUEST_INSTALL_CHROME
+    assert cib.GUEST_SHARE in cib.guest_install_script("pw")
+    assert "ln -sfn" in cib.guest_install_script("pw")
     # An existing real folder must not be destroyed.
-    assert "Downloads.local" in cib.GUEST_INSTALL_CHROME
+    assert "Downloads.local" in cib.guest_install_script("pw")
+
+
+# sudo that actually runs what it is given, so the script's own sudo path is
+# exercised rather than stubbed out. A stub returning 0 hid the bug where the
+# clipboard agent was installed by a `sudo -n` that could never succeed.
+_FAKE_SUDO = """#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -S|-n) shift ;;
+    -p) shift 2 ;;
+    *) break ;;
+  esac
+done
+exec "$@"
+"""
+
+# install that creates its destination, so `test -x` at the end of the script
+# observes whether the agent was really installed.
+_FAKE_INSTALL = """#!/bin/sh
+for dst in "$@"; do :; done
+mkdir -p "$(dirname "$dst")"
+printf '#!/bin/sh\\nexit 0\\n' > "$dst"
+chmod 0755 "$dst"
+"""
 
 
 def _run_guest_script(script: str, home, share_exists: bool):
-    """Execute the guest script the way packer/ssh would: /bin/sh -e, with fakes."""
+    """Execute the guest script the way ssh would: /bin/sh -e, with fakes."""
     bin_dir = home / "fakebin"
     bin_dir.mkdir(parents=True, exist_ok=True)
-    for name in ("curl", "hdiutil", "cp", "rm", "tar", "sudo", "install"):
+    for name in ("curl", "hdiutil", "tar"):
         (bin_dir / name).write_text("#!/bin/sh\nexit 0\n")
+        (bin_dir / name).chmod(0o755)
+    # cp creates its destination, so the staged move that follows is real: a cp
+    # that only exits 0 would let a broken install sequence pass.
+    (bin_dir / "cp").write_text(
+        '#!/bin/sh\nfor a in "$@"; do prev="$last"; last="$a"; done\n'
+        'case "$last" in */) mkdir -p "$last$(basename "$prev")" ;; '
+        '*) mkdir -p "$last" ;; esac\n'
+    )
+    (bin_dir / "cp").chmod(0o755)
+    for name, body_text in (("sudo", _FAKE_SUDO), ("install", _FAKE_INSTALL)):
+        (bin_dir / name).write_text(body_text)
         (bin_dir / name).chmod(0o755)
     share = Path(cib.GUEST_SHARE)
     body = script.replace(str(share), str(home / "share"))
     body = body.replace("'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'", "true")
     body = body.replace("'/Applications/Google Chrome.app'", f"'{home / 'chrome.app'}'")
+    body = body.replace("/usr/local/bin/tart-guest-agent", str(home / "agent"))
     if share_exists:
         (home / "share").mkdir(exist_ok=True)
     return subprocess.run(  # noqa: S603
@@ -730,14 +801,14 @@ def _run_guest_script(script: str, home, share_exists: bool):
 def test_the_guest_script_fails_when_the_share_is_missing(tmp_path):
     # It used to warn, install Chrome, exit 0 — and cib then printed "Done".
     (tmp_path / "Downloads").mkdir()
-    result = _run_guest_script(cib.GUEST_INSTALL_CHROME, tmp_path, share_exists=False)
+    result = _run_guest_script(cib.guest_install_script("pw"), tmp_path, share_exists=False)
     assert result.returncode != 0
     assert "not mounted" in result.stderr
 
 
 def test_the_guest_script_links_downloads_to_the_share(tmp_path):
     (tmp_path / "Downloads").mkdir()
-    result = _run_guest_script(cib.GUEST_INSTALL_CHROME, tmp_path, share_exists=True)
+    result = _run_guest_script(cib.guest_install_script("pw"), tmp_path, share_exists=True)
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "Downloads").is_symlink()
     assert (tmp_path / "Downloads").resolve() == (tmp_path / "share").resolve()
@@ -746,7 +817,7 @@ def test_the_guest_script_links_downloads_to_the_share(tmp_path):
 def test_the_guest_script_keeps_a_non_empty_downloads_folder(tmp_path):
     (tmp_path / "Downloads").mkdir()
     (tmp_path / "Downloads" / "keep.txt").write_text("mine")
-    result = _run_guest_script(cib.GUEST_INSTALL_CHROME, tmp_path, share_exists=True)
+    result = _run_guest_script(cib.guest_install_script("pw"), tmp_path, share_exists=True)
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "Downloads.local" / "keep.txt").read_text() == "mine"
 
@@ -858,6 +929,28 @@ def test_the_password_verifier_matches_what_macos_expects():
     assert entry["iterations"] == 50_000
     assert len(entry["salt"]) == 32
     assert len(entry["entropy"]) == 128
+    # The verifier has to reach the record, under the name macOS reads: dropping it
+    # leaves an account that refuses every password, and no other test noticed.
+    record = cibpatch.user_record(cibpatch.Account("admin", "hunter2"), "GUID")
+    assert list(record) == [
+        "name",
+        "realname",
+        "uid",
+        "gid",
+        "home",
+        "shell",
+        "generateduid",
+        "authentication_authority",
+        "passwd",
+        "ShadowHashData",
+        "_writers_passwd",
+    ]
+    assert plistlib.loads(record["ShadowHashData"][0])["SALTED-SHA512-PBKDF2"]
+    assert record["authentication_authority"] == [";ShadowHash;HASHLIST:<SALTED-SHA512-PBKDF2>"]
+    assert record["shell"] == ["/bin/zsh"], "a wrong shell breaks every ssh takeover"
+    assert record["home"] == ["/Users/admin"], "own_home would chown a different tree"
+    # Every value is a list: DirectoryService silently ignores a plain string.
+    assert all(isinstance(v, list) for v in record.values())
 
 
 def test_the_verifier_is_salted_differently_every_time():
@@ -1199,6 +1292,7 @@ def test_a_first_boot_that_never_happened_is_not_called_built(
             return 2
 
     monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(cib, "sudo_is_cached", lambda: True)
     monkeypatch.setattr(cib.time, "sleep", lambda s: None)
     monkeypatch.setattr(cib.subprocess, "Popen", lambda *a, **k: Died())
     _fake_guest_disk(monkeypatch, tmp_path)
@@ -1248,7 +1342,7 @@ def test_mount_failures_report_the_reason(monkeypatch):
 def test_the_guest_script_survives_a_home_with_no_downloads(tmp_path):
     # The offline path creates the home itself, so Downloads may not exist — under
     # `set -e` the old two-state handling killed the script before Chrome.
-    result = _run_guest_script(cib.GUEST_INSTALL_CHROME, tmp_path, share_exists=True)
+    result = _run_guest_script(cib.guest_install_script("pw"), tmp_path, share_exists=True)
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "Downloads").is_symlink()
 
@@ -1256,17 +1350,30 @@ def test_the_guest_script_survives_a_home_with_no_downloads(tmp_path):
 def test_setup_installs_the_clipboard_agent_too():
     # It used to be installed only by the packer path, while cib told the user that
     # `vm setup` had done it.
-    assert "tart-guest-agent" in cib.GUEST_INSTALL_CHROME
-    assert "--install-daemon=launchd" in cib.GUEST_INSTALL_CHROME
-    assert cib.GUEST_AGENT_VERSION in cib.GUEST_INSTALL_CHROME
+    assert "tart-guest-agent" in cib.guest_install_script("pw")
+    assert "--install-daemon=launchd" in cib.guest_install_script("pw")
+    assert cib.GUEST_AGENT_VERSION in cib.guest_install_script("pw")
 
 
-def test_the_image_volume_is_attached_with_ownership():
+def test_the_image_volume_is_attached_with_ownership(monkeypatch):
     # macOS mounts an image volume noowners, where chown returns success and writes
     # nothing — so every file the patcher creates would stay root-owned.
-    source = Path(cibpatch.__file__).read_text()
-    assert '"-owners"' in source
-    assert "noowners" in source  # and it is checked, not merely requested
+    #
+    # Asserted on the argv hdiutil is actually handed. Grepping the source for the
+    # flag name passed even when the value beside it was wrong.
+    seen = {}
+    monkeypatch.setattr(
+        cibpatch.subprocess,
+        "run",
+        lambda cmd, **kw: (
+            seen.update(cmd=cmd)
+            or subprocess.CompletedProcess(cmd, 0, stdout="/dev/disk9\n", stderr="")
+        ),
+    )
+    assert cibpatch.attach(Path("/x/disk.img")) == "/dev/disk9"
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("-owners") + 1] == "on"
+    assert "-nomount" in cmd
 
 
 def test_owning_the_home_never_follows_a_link(tmp_path, monkeypatch):
@@ -1442,6 +1549,34 @@ def test_both_tart_guest_agent_pins_move_together():
     assert pinned.group(1) == cib.GUEST_AGENT_VERSION
 
 
+def test_every_renovate_marker_anywhere_has_a_manager_that_matches_it():
+    # Generalised from cib.py alone: the packer template carries markers too, and a
+    # marker with no manager reads as configured while updating nothing.
+    import json
+
+    root = Path(cib.__file__).resolve().parent
+    config = json.loads((root / "renovate.json").read_text())
+    by_file: dict[str, list[str]] = {}
+    for manager in config["customManagers"]:
+        target = manager["managerFilePatterns"][0].strip("/^$").replace("\\", "")
+        by_file.setdefault(target, []).extend(manager["matchStrings"])
+    marked = {
+        str(path.relative_to(root))
+        for path in (root / "cib.py", root / "packer" / "chrome-vm.pkr.hcl")
+        if "# renovate:" in path.read_text()
+    }
+    assert marked, "no renovate markers found at all — has the layout changed?"
+    for name in marked:
+        source = (root / name).read_text()
+        covered = {
+            match.group(0).splitlines()[0].strip()
+            for pattern in by_file.get(name, [])
+            for match in re.finditer(re.sub(r"\(\?<(?![=!])", "(?P<", pattern), source)
+        }
+        markers = {ln.strip() for ln in re.findall(r"^\s*# renovate:.*$", source, flags=re.M)}
+        assert markers == covered, f"{name}: {markers - covered} matched by no manager"
+
+
 def test_every_renovate_marker_in_cib_has_a_manager_that_matches_it():
     # A marker with no manager reads as configured and updates nothing: the
     # tart-guest-agent pin sat unmanaged behind one for seven review rounds.
@@ -1484,6 +1619,7 @@ def test_a_guest_that_will_not_stop_is_pointed_at_prepare(calls, credentials, mo
             return 0
 
     monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(cib, "sudo_is_cached", lambda: True)
     monkeypatch.setattr(cib.time, "sleep", lambda s: None)
     monkeypatch.setattr(cib.subprocess, "Popen", lambda *a, **k: Stuck())
     with pytest.raises(cib.Failure, match="cib vm prepare"):
@@ -1589,3 +1725,245 @@ def test_the_patcher_refuses_to_run_without_a_password(monkeypatch):
     monkeypatch.setattr(cibpatch.sys, "stdin", io.StringIO("\n"))
     with pytest.raises(SystemExit, match="no password"):
         cibpatch.main(["--disk", "/x/disk.img", "--user", "admin"])
+
+
+# --- the guest cannot redirect a root write onto this host ---------------------
+
+
+def _guest_volume(tmp_path):
+    """A stand-in for a mounted guest Data volume, with the groups patch() needs."""
+    import plistlib
+
+    root = tmp_path / "volume"
+    (root / "private/var/db/dslocal/nodes/Default/users").mkdir(parents=True)
+    groups = root / "private/var/db/dslocal/nodes/Default/groups"
+    groups.mkdir(parents=True)
+    for name in ("admin", "staff"):
+        with (groups / f"{name}.plist").open("wb") as fh:
+            plistlib.dump({"users": [], "groupmembers": []}, fh, fmt=plistlib.FMT_BINARY)
+    return root
+
+
+@pytest.mark.parametrize(
+    "planted",
+    [
+        "private/var/db",  # .AppleSetupDone, dslocal, launchd all hang off this
+        "private/etc",  # kcpassword
+        "Library/Preferences",  # loginwindow and SetupAssistant
+        "Library",  # the User Template marker
+        "Users/admin/Library/Preferences",  # the per-user plists
+        "Users/admin",  # the home itself
+    ],
+)
+def test_a_symlink_planted_in_the_guest_never_redirects_a_root_write(tmp_path, planted):
+    # This runs as root on the host and the guest volume is a host directory, so a
+    # link stored in the guest resolves against the host. Round 7 guarded the home;
+    # four earlier steps still wrote through whatever link they were handed.
+    root = _guest_volume(tmp_path)
+    target = tmp_path / "host"
+    target.mkdir()
+    witness = target / "precious"
+    witness.write_text("host file")
+    link = root / planted
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if link.exists():
+        import shutil as _shutil
+
+        _shutil.rmtree(link)
+    link.symlink_to(target)
+
+    with pytest.raises(cibpatch.PatchError, match="symlink"):
+        cibpatch.guest_path(root, f"{planted}/precious")
+    assert witness.read_text() == "host file", "a host file was written through the link"
+
+
+def test_the_whole_patch_refuses_a_guest_that_planted_a_link(tmp_path, monkeypatch):
+    # End to end: patch() must stop, not write half the guest and then notice.
+    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g, **kw: None)
+    root = _guest_volume(tmp_path)
+    target = tmp_path / "host"
+    target.mkdir()
+    (target / "AppleSetupDone-decoy").write_text("host file")
+    (root / "private/etc").mkdir(parents=True, exist_ok=True)
+    (root / "private/etc").rmdir()
+    (root / "private/etc").symlink_to(target)
+    with pytest.raises(cibpatch.PatchError, match="symlink"):
+        cibpatch.patch(root, cibpatch.Account("admin", "pw"))
+    assert sorted(p.name for p in target.iterdir()) == ["AppleSetupDone-decoy"]
+
+
+def test_a_guest_volume_with_no_links_still_patches(tmp_path, monkeypatch):
+    # The guard must not refuse the ordinary case it was added to protect.
+    import plistlib
+
+    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g, **kw: None)
+    root = _guest_volume(tmp_path)
+    cibpatch.patch(root, cibpatch.Account("admin", "pw"), cibpatch.Keyboard(19, "Swiss German"))
+    assert (root / "private/var/db/.AppleSetupDone").exists()
+    assert (root / "private/etc/kcpassword").exists()
+    record = plistlib.loads((root / "Library/Preferences/com.apple.loginwindow.plist").read_bytes())
+    assert record["autoLoginUser"] == "admin"
+
+
+# --- what the mutation pass showed the suite was not watching -------------------
+
+
+def test_the_kcpassword_key_is_apples_not_merely_self_consistent():
+    # A round-trip test XORs with the key it encoded with, so any typo in the key
+    # round-trips perfectly — while loginwindow deobfuscates the real file with
+    # Apple's real key, gets nonsense, and autologin fails.
+    assert bytes([0x7D, 0x89, 0x52, 0x23, 0xD2, 0xBC, 0xDD, 0xEA, 0xA3, 0xB9, 0x1F]) == (
+        cibpatch.KCPASSWORD_KEY
+    )
+    assert cibpatch.kcpassword("test") == bytes.fromhex("09ec2157d2bcddeaa3b91f")
+
+
+def test_the_padding_is_observable_for_a_password_the_key_length_divides():
+    # The documented failure ("macOS reads past the password") only happens when the
+    # length is a multiple of 11, which is the case the old assertion could not see.
+    encoded = cibpatch.kcpassword("elevenchars")
+    assert len(encoded) == 22, "an 11-character password must still get its terminator"
+    assert encoded[11] == cibpatch.KCPASSWORD_KEY[0], "byte 11 is the NUL, XOR-ed"
+
+
+def test_autologin_writes_the_keys_loginwindow_actually_reads(tmp_path):
+    import plistlib
+
+    account = cibpatch.Account("admin", "pw")
+    cibpatch.enable_autologin(tmp_path, account)
+    record = plistlib.loads(
+        (tmp_path / "Library/Preferences/com.apple.loginwindow.plist").read_bytes()
+    )
+    # Misspell either and loginwindow ignores the setting: the guest stops at a login
+    # window and the generated 24-character password has to be typed by hand.
+    assert record["autoLoginUser"] == "admin"
+    assert record["autoLoginUserUID"] == 501
+    kc = tmp_path / "private/etc/kcpassword"
+    assert kc.read_bytes() == cibpatch.kcpassword("pw")
+    assert kc.stat().st_mode & 0o777 == 0o600, "the guest's password must not be world-readable"
+
+
+def test_remote_login_is_recorded_where_launchd_looks(tmp_path):
+    import plistlib
+
+    cibpatch.enable_remote_login(tmp_path)
+    record = plistlib.loads(
+        (tmp_path / "private/var/db/com.apple.xpc.launchd/disabled.plist").read_bytes()
+    )
+    # False means "not disabled". True, or a missing key, and 'cib vm setup' can
+    # never reach the guest.
+    assert record["com.openssh.sshd"] is False
+
+
+def test_the_two_keyboard_defaults_are_the_same_fact_twice():
+    # cib decides the fallback and cibpatch carries its own; a test that compares
+    # each against itself would not notice them drifting apart.
+    assert cib.DEFAULT_KEYBOARD == (0, "U.S.")
+    assert (cibpatch.Keyboard().layout_id, cibpatch.Keyboard().name) == cib.DEFAULT_KEYBOARD
+
+
+def _run_desktop_script(home, resolution: str, chrome_running: bool):
+    """Execute DESKTOP_SCRIPT the way the engine does, with recording fakes."""
+    bin_dir = home / "fakebin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    (bin_dir / "xrandr").write_text(f'#!/bin/sh\necho "$@" >> {home}/xrandr.log\n')
+    (bin_dir / "pgrep").write_text(f"#!/bin/sh\nexit {0 if chrome_running else 1}\n")
+    (bin_dir / "nohup").write_text(f'#!/bin/sh\necho "$@" >> {home}/launch.log\n')
+    for name in ("xrandr", "pgrep", "nohup"):
+        (bin_dir / name).chmod(0o755)
+    subprocess.run(  # noqa: S603
+        ["/bin/sh", "-c", cib.DESKTOP_SCRIPT],
+        env={"HOME": str(home), "RES": resolution, "PATH": f"{bin_dir}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    # Chrome is launched with `&`, so the shell returns before the child has run.
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not (home / "launch.log").exists():
+        if chrome_running:
+            break  # nothing will ever be launched, so do not wait the full timeout
+        time.sleep(0.02)
+    if chrome_running:
+        time.sleep(0.2)  # long enough for a launch that should not happen to appear
+
+    def read(name: str) -> str:
+        path = home / name
+        return path.read_text() if path.exists() else ""
+
+    return read("xrandr.log"), read("launch.log")
+
+
+def test_the_desktop_script_launches_chrome_on_its_own_profile():
+    # Only ever string-grepped before, so a wrong profile directory (Chrome starts
+    # on a throwaway profile) or a missing display would have passed.
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        mode, launch = _run_desktop_script(Path(tmp), "1920x1200", chrome_running=False)
+    assert "-s 1920x1200" in mode
+    assert cib.CHROME_BIN in launch
+    assert f"--user-data-dir={cib.PROFILE_DIR}" in launch
+    assert "--no-sandbox" in launch
+
+
+def test_the_desktop_script_does_not_start_a_second_chrome():
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _, launch = _run_desktop_script(Path(tmp), "1920x1200", chrome_running=True)
+    assert launch == "", "a second Chrome over a live one loses the first one's tabs"
+
+
+def test_the_desktop_script_skips_xrandr_when_no_mode_was_asked_for():
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        mode, launch = _run_desktop_script(Path(tmp), "", chrome_running=False)
+    assert mode == "", "an empty CIB_RESOLUTION means follow the browser window"
+    assert cib.CHROME_BIN in launch
+
+
+@pytest.mark.parametrize(
+    "returncode,stdout,expected",
+    [
+        (0, "true\n", True),
+        (0, "false\n", False),  # a stopped container: inspect still exits 0
+        (1, "", False),  # no such container
+    ],
+)
+def test_container_running_reads_the_state_not_just_the_exit_code(
+    monkeypatch, returncode, stdout, expected
+):
+    # With `or` instead of `and`, a stopped container reports as running and
+    # `box up` prints "Already running" for something dead.
+    monkeypatch.setattr(
+        cib,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess([], returncode, stdout=stdout, stderr=""),
+    )
+    assert cib.container_running("podman", cib.Config()) is expected
+
+
+def test_ui_status_reports_the_code_and_none_when_nothing_answers(monkeypatch):
+    class _Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(cib.urllib.request, "urlopen", lambda *a, **k: _Response())
+    assert cib.ui_status(cib.Config()) == 200
+    assert cib.ui_is_up(cib.Config()) is True
+
+    def refused(*a, **k):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(cib.urllib.request, "urlopen", refused)
+    assert cib.ui_status(cib.Config()) is None
+    assert cib.ui_is_up(cib.Config()) is False
