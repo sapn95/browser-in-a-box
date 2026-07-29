@@ -263,6 +263,21 @@ def ensure_desktop(engine: str, cfg: Config) -> bool:
     return False
 
 
+def ensure_image(engine: str, cfg: Config) -> None:
+    """Pull the image with the engine's own progress on screen.
+
+    `run -d` is captured so the container id does not land on the terminal — which
+    also swallowed the entire first pull. cib printed one line and then nothing at
+    all for several gigabytes, which reads as a hang.
+    """
+    if run(engine, "image", "inspect", cfg.image, check=False, capture=True).returncode == 0:
+        return
+    print(f"Pulling {cfg.image} — several GB, once ...")
+    result = run(engine, "pull", "--platform", "linux/amd64", cfg.image, check=False)
+    if result.returncode != 0:
+        raise Failure(f"could not pull {cfg.image}")
+
+
 def cmd_up(engine: str, cfg: Config) -> None:
     cfg.check()
     if container_running(engine, cfg) and not env_flag("CIB_FORCE") and ui_is_up(cfg):
@@ -271,6 +286,7 @@ def cmd_up(engine: str, cfg: Config) -> None:
         return
 
     run(engine, "rm", "-f", cfg.name, check=False, capture=True)
+    ensure_image(engine, cfg)
     print("Starting Google Chrome (amd64 image; emulated on Apple Silicon) ...")
     run(
         engine,
@@ -373,6 +389,11 @@ def cmd_logs(engine: str, cfg: Config, follow: bool = False) -> None:
 
 
 def cmd_shell(engine: str, cfg: Config) -> None:
+    # Checked here rather than by reading the engine's exit code: podman and docker
+    # disagree about what "no such container" is worth, and `cib box shell && echo
+    # attached` printed the refusal and then "attached".
+    if not container_running(engine, cfg):
+        raise Failure(f"{cfg.name!r} is not running — 'cib box up' first")
     run(engine, "exec", "-it", cfg.name, "bash", check=False)
 
 
@@ -416,10 +437,15 @@ class VmConfig:
         # into the guest wholesale.
         if not self.share.strip():
             raise Failure("CIB_VM_SHARE is empty; unset it for the default, or give a path")
-        # The box variant validates the same shape; the VM used to drop a typo
-        # silently and open a window at whatever tart chose.
-        if not re.fullmatch(r"\d+x\d+", self.display):
+        # Normalised, not merely rejected: the box variant accepts "1280 X 800" and
+        # lowercases it, and tart takes 1920X1200 without complaint while ignoring
+        # it — so a capital X used to produce a guest silently stuck at 1024x768.
+        if not re.fullmatch(r"\d+x\d+", self.normalised_display):
             raise Failure(f"CIB_VM_DISPLAY must look like 1920x1200, got {self.display!r}")
+
+    @property
+    def normalised_display(self) -> str:
+        return self.display.lower().replace(" ", "")
 
     # "latest" is what Apple is shipping today, which is what a new guest usually
     # wants — but it moves, so a rebuild is not reproducible unless it can be told
@@ -739,7 +765,7 @@ def _create_offline(tart: str, vm: VmConfig) -> None:
             "--memory",
             str(vm.memory),
             "--display",
-            vm.display,
+            vm.normalised_display,
             check=False,
         )
         # The guest has to boot once for its first-boot state to exist; there is nothing
@@ -899,7 +925,7 @@ def _create_with_packer(tart: str, vm: VmConfig) -> None:
         str(PACKER_TEMPLATE),
         env={**os.environ, "PKR_VAR_password": password},
     )
-    run(tart, "set", vm.name, "--display", vm.display, check=False)
+    run(tart, "set", vm.name, "--display", vm.normalised_display, check=False)
     print()
     print(f"Built. The account is {vm.user!r}; 'cib vm password' prints its password.")
     print("Next:")
