@@ -499,9 +499,12 @@ PACKER_TEMPLATE = Path(__file__).resolve().parent / "packer" / "chrome-vm.pkr.hc
 # Per VM name. They used to sit flat in one directory, so a second CIB_VM_NAME
 # reused the first one's password and key — and deleting either took the other's
 # away with it. Read at import because a CLI cannot change its own environment.
+DEFAULT_VM_NAME = "chrome-vm"
+
+
 def secrets_dir() -> Path:
     """Where this VM's password and keys live."""
-    return Path.home() / ".config" / "chrome-in-a-box" / _env("CIB_VM_NAME", "chrome-vm")
+    return Path.home() / ".config" / "chrome-in-a-box" / _env("CIB_VM_NAME", DEFAULT_VM_NAME)
 
 
 SECRETS = secrets_dir()
@@ -683,23 +686,32 @@ def host_time_zone() -> tuple[str, str]:
     return zone, zone.rsplit("/", 1)[-1].replace("_", " ")
 
 
+SECRET_NAMES = (
+    "vm-credentials",
+    "vm-key",
+    "vm-key.pub",
+    "vm-host-key",
+    "vm-host-key.pub",
+    "vm-known-hosts",
+)
+
+
 def migrate_flat_secrets() -> None:
     """Move what an older cib left one directory up.
 
-    It kept the password and keys flat under ~/.config/chrome-in-a-box, shared by
-    every VM name. Moving rather than regenerating: a regenerated key would lock
-    cib out of a guest that is already built and already trusts the old one.
+    It kept them flat under ~/.config/chrome-in-a-box, shared by every VM name, so
+    nothing on disk says which guest they belong to. They go to the *default* name
+    rather than to whichever name happens to run first: moving them into the first
+    name would take them away from the guest that is actually using them, whose
+    disk was patched with that key pair — and with no password fallback left, cib
+    could never reach it again.
+
+    Moved rather than regenerated, for the same reason.
     """
-    for current in (
-        CREDENTIALS,
-        VM_KEY,
-        VM_KEY.with_suffix(".pub"),
-        VM_HOST_KEY,
-        VM_HOST_KEY.with_suffix(".pub"),
-        KNOWN_HOSTS,
-    ):
-        old = SECRETS.parent / current.name
-        if old.exists() and not current.exists():
+    flat = Path.home() / ".config" / "chrome-in-a-box"
+    for name in SECRET_NAMES:
+        old, current = flat / name, flat / DEFAULT_VM_NAME / name
+        if old.is_file() and not current.exists():
             current.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             old.replace(current)
 
@@ -1036,7 +1048,7 @@ def _create_with_packer(tart: str, vm: VmConfig) -> None:
     print("  1. cib vm up")
     print("  2. sign in to your Apple Account            (interactive: 2FA)")
     print("  3. System Settings > Apple Account > iCloud > turn on Passwords & Keychain")
-    print("  4. cib vm setup    — points the guest's Downloads at the shared host folder")
+    print("  4. cib vm setup    — installs Chrome, the clipboard agent and downloads")
 
 
 # Where a tart directory share appears inside a macOS guest.
@@ -1354,6 +1366,10 @@ def cmd_vm_delete(tart: str, vm: VmConfig) -> None:
     if not answer.lower().startswith("y"):
         print("Cancelled.")
         return
+    # Before the delete: on a host still in the flat layout the per-name paths do
+    # not exist yet, so the unlinks below would hit nothing and the very next
+    # command would migrate the originals straight back in.
+    migrate_flat_secrets()
     result = run(tart, "delete", vm.name, check=False, capture=True)
     if result.returncode != 0:
         # Only on success. A delete that failed leaves the guest where it was, and

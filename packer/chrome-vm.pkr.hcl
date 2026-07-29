@@ -237,7 +237,10 @@ build {
       # way the offline path installs them — there is no second copy here to
       # drift out of step.
       "test -s ~/.ssh/authorized_keys",
-      "sudo -n true 2>/dev/null || echo '${var.password}' | sudo -S test -s /etc/ssh/ssh_host_ed25519_key",
+      # Not `sudo -n true || ...`: whenever sudo happened not to need a password
+      # the first half succeeded and the check itself was never run, so a host key
+      # that failed to install still reported a successful build.
+      "echo '${var.password}' | sudo -S test -s /etc/ssh/ssh_host_ed25519_key",
     ]
   }
 }
