@@ -364,7 +364,12 @@ def cmd_status(engine: str, cfg: Config) -> None:
 def cmd_logs(engine: str, cfg: Config, follow: bool = False) -> None:
     # Following by default would hang every non-interactive caller, including CI.
     extra = ["-f"] if follow else ["--tail", str(cfg.log_tail)]
-    run(engine, "logs", *extra, cfg.name, check=False)
+    result = run(engine, "logs", *extra, cfg.name, check=False)
+    # Every other box command reports a failure as one. This used to exit 0 whatever
+    # the engine did, so `cib box logs > out.txt || handle` never fired and out.txt
+    # was silently empty.
+    if result.returncode != 0:
+        raise Failure(f"could not read the logs of {cfg.name!r} — is it there? ('cib box status')")
 
 
 def cmd_shell(engine: str, cfg: Config) -> None:
@@ -412,6 +417,22 @@ PACKER_TEMPLATE = Path(__file__).resolve().parent / "packer" / "chrome-vm.pkr.hc
 # Where the generated guest password is kept, so it survives between commands and
 # can be pasted rather than typed.
 CREDENTIALS = Path.home() / ".config" / "chrome-in-a-box" / "vm-credentials"
+
+
+PATCHER = Path(__file__).resolve().parent / "cibpatch.py"
+
+
+def find_patcher() -> Path:
+    """The offline path spawns cibpatch.py rather than importing it, so nothing
+    but this check knows whether it is there."""
+    if not PATCHER.exists():
+        raise Failure(
+            f"the patcher is missing at {PATCHER} — the offline path needs it beside "
+            "cib. Either run cib.py from the repository, or fall back to driving Setup "
+            "Assistant: 'cib vm delete' first, then re-run with CIB_VM_PACKER=1 "
+            "(without the delete, 'vm create' only reports that the VM exists)."
+        )
+    return PATCHER
 
 
 def find_packer() -> str:
@@ -637,6 +658,10 @@ def _create_offline(tart: str, vm: VmConfig) -> None:
     # Checked before the multi-gigabyte download rather than after it: the patch
     # step is the only part that needs root, but finding that out at the end costs
     # the entire build.
+    # Both checked before the multi-gigabyte download rather than after it: the
+    # patch step is the only part that needs either, but finding out at the end
+    # costs the entire build and there is no way to finish it afterwards.
+    find_patcher()
     if not sudo_is_cached():
         raise Failure(f"{SUDO_MESSAGE}\nNothing has been downloaded yet.")
     # The credential is held open across the build: sudo forgets it after about
@@ -709,14 +734,7 @@ def _prepare_guest(vm: VmConfig, password: str) -> None:
     disk = tart_home / "vms" / vm.name / "disk.img"
     if not disk.exists():
         raise Failure(f"the guest's disk is not where it was expected: {disk}")
-    patcher = Path(__file__).resolve().parent / "cibpatch.py"
-    if not patcher.exists():
-        raise Failure(
-            f"the patcher is missing at {patcher} — the offline path needs a checkout. "
-            "Either run cib.py from the repository, or fall back to driving Setup "
-            "Assistant: 'cib vm delete' first, then re-run with CIB_VM_PACKER=1 "
-            "(without the delete, 'vm create' only reports that the VM exists)."
-        )
+    patcher = find_patcher()
     # sys.executable is the compiled binary itself under Nuitka, not an interpreter,
     # so it cannot be used to run a script. Find a real python instead.
     python = (
@@ -881,6 +899,13 @@ def guest_install_script(password: str) -> str:
     """
     return f"""set -eu
 CIB_SUDO_PW={shlex.quote(password)}
+# Scratch space under the account's own home rather than /tmp, which every user in
+# the guest can write to: a staged Chrome.app sitting there could be swapped
+# between the copy and the move into /Applications.
+CIB_WORK="$HOME/.cache/cib"
+rm -rf "$CIB_WORK"
+mkdir -p "$CIB_WORK"
+trap 'rm -rf "$CIB_WORK"' EXIT
 sudo_pw() {{ printf '%s\\n' "$CIB_SUDO_PW" | sudo -S -p '' "$@"; }}
 # Downloads land on the host: replace the guest's own Downloads folder with the
 # shared one, so every app follows, not just Chrome.
@@ -912,29 +937,27 @@ fi
 if [ -x {shlex.quote(CHROME_EXE)} ]; then
   echo 'Chrome is already installed'
 else
-  rm -rf {shlex.quote(CHROME_APP)} /tmp/chrome-staging
-  curl -fsSL -o /tmp/chrome.dmg \
+  rm -rf {shlex.quote(CHROME_APP)}
+  curl -fsSL -o "$CIB_WORK/chrome.dmg" \
     'https://dl.google.com/chrome/mac/universal/stable/GGRO/googlechrome.dmg'
-  hdiutil attach -nobrowse -quiet /tmp/chrome.dmg -mountpoint /tmp/chrome-mount
+  hdiutil attach -nobrowse -quiet "$CIB_WORK/chrome.dmg" -mountpoint "$CIB_WORK/mount"
   # Copied aside and moved into place as the last step, so an interruption cannot
   # leave half a Chrome at the path everything else looks at.
-  mkdir -p /tmp/chrome-staging
-  cp -R '/tmp/chrome-mount/Google Chrome.app' /tmp/chrome-staging/
-  hdiutil detach -quiet /tmp/chrome-mount
-  mv '/tmp/chrome-staging/Google Chrome.app' {shlex.quote(CHROME_APP)}
-  rm -rf /tmp/chrome.dmg /tmp/chrome-staging
+  mkdir -p "$CIB_WORK/staging"
+  cp -R "$CIB_WORK/mount/Google Chrome.app" "$CIB_WORK/staging/"
+  hdiutil detach -quiet "$CIB_WORK/mount"
+  mv "$CIB_WORK/staging/Google Chrome.app" {shlex.quote(CHROME_APP)}
 fi
 {shlex.quote(CHROME_EXE)} --version
 if [ ! -x /usr/local/bin/tart-guest-agent ]; then
   # Host/guest copy-paste needs an agent inside the guest. Without it the generated
   # password would have to be typed by hand at every passkey prompt, which is the
   # one thing generating it was meant to avoid.
-  curl -fsSL -o /tmp/agent.tar.gz \
+  curl -fsSL -o "$CIB_WORK/agent.tar.gz" \
     "https://github.com/cirruslabs/tart-guest-agent/releases/download/v{GUEST_AGENT_VERSION}/tart-guest-agent-darwin-all.tar.gz"
-  tar -xzf /tmp/agent.tar.gz -C /tmp
-  sudo_pw install -m 0755 /tmp/tart-guest-agent /usr/local/bin/tart-guest-agent
+  tar -xzf "$CIB_WORK/agent.tar.gz" -C "$CIB_WORK"
+  sudo_pw install -m 0755 "$CIB_WORK/tart-guest-agent" /usr/local/bin/tart-guest-agent
   sudo_pw /usr/local/bin/tart-guest-agent --install-daemon=launchd
-  rm -f /tmp/agent.tar.gz /tmp/tart-guest-agent
 fi
 # Failing here rather than reporting success: without the agent there is no
 # copy-paste, and the generated password would have to be typed by hand.
