@@ -2286,3 +2286,85 @@ def test_a_fifo_in_the_middle_of_the_path_is_refused_too(tmp_path):
     os.mkfifo(root / "private/etc")
     with pytest.raises(cibpatch.PatchError, match="neither a directory nor a regular file"):
         cibpatch.guest_path(root, "private/etc/kcpassword")
+
+
+# --- round 13's remainder ------------------------------------------------------
+
+
+def test_shell_refuses_instead_of_reporting_a_session_it_never_opened(monkeypatch):
+    # `cib box shell && echo attached` printed the engine's refusal and then
+    # "attached", because the exec's exit code was ignored.
+    monkeypatch.setattr(cib, "container_running", lambda *a, **k: False)
+    with pytest.raises(cib.Failure, match="cib box up"):
+        cib.cmd_shell("podman", cib.Config())
+
+
+def test_shell_opens_when_the_container_is_there(calls, monkeypatch):
+    monkeypatch.setattr(cib, "container_running", lambda *a, **k: True)
+    cib.cmd_shell("podman", cib.Config())
+    assert "exec" in flat(calls)
+
+
+def test_the_first_pull_is_visible_instead_of_several_silent_gigabytes(calls, monkeypatch):
+    # `run -d` is captured, which also swallowed the whole first pull: one line of
+    # output and then nothing at all for several GB.
+    monkeypatch.setattr(
+        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="")
+    )
+    seen = {}
+
+    def fake(engine, *args, **kwargs):
+        seen.setdefault("cmds", []).append((args, kwargs))
+        return subprocess.CompletedProcess([], 0 if args[0] == "pull" else 1, stdout="", stderr="")
+
+    monkeypatch.setattr(cib, "run", fake)
+    cib.ensure_image("podman", cib.Config())
+    pull = next(a for a, _ in seen["cmds"] if a[0] == "pull")
+    kwargs = next(k for a, k in seen["cmds"] if a[0] == "pull")
+    assert "--platform" in pull
+    assert not kwargs.get("capture"), "capturing the pull is what hid it"
+
+
+def test_an_image_already_present_is_not_pulled_again(monkeypatch):
+    monkeypatch.setattr(
+        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="", stderr="")
+    )
+    pulled = []
+    real = cib.run
+    monkeypatch.setattr(cib, "run", lambda e, *a, **k: pulled.append(a[0]) or real(e, *a, **k))
+    cib.ensure_image("podman", cib.Config())
+    assert "pull" not in pulled
+
+
+def test_a_failed_pull_is_reported(monkeypatch):
+    monkeypatch.setattr(
+        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="")
+    )
+    with pytest.raises(cib.Failure, match="could not pull"):
+        cib.ensure_image("podman", cib.Config())
+
+
+@pytest.mark.parametrize("value,expected", [["1920X1200", "1920x1200"], ["1280 x 800", "1280x800"]])
+def test_the_vm_display_is_normalised_like_the_box_one(monkeypatch, value, expected):
+    # tart takes 1920X1200 without complaint and then ignores it, leaving the guest
+    # at 1024x768 with nothing said.
+    monkeypatch.setenv("CIB_VM_DISPLAY", value)
+    vm = cib.VmConfig()
+    vm.check()
+    assert vm.normalised_display == expected
+
+
+def test_an_account_the_guest_already_has_is_not_overwritten(tmp_path, monkeypatch):
+    # root, daemon and _spotlight all match the name rules. Replacing root's record
+    # with a uid-501 one leaves the guest with no working sudo at all.
+    import plistlib
+
+    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g, **kw: None)
+    root = _guest_volume(tmp_path)
+    users = root / "private/var/db/dslocal/nodes/Default/users"
+    with (users / "root.plist").open("wb") as fh:
+        plistlib.dump({"name": ["root"], "uid": ["0"]}, fh, fmt=plistlib.FMT_BINARY)
+    with pytest.raises(cibpatch.PatchError, match="already has an account called 'root'"):
+        cibpatch.patch(root, cibpatch.Account("root", "pw"))
+    assert plistlib.loads((users / "root.plist").read_bytes())["uid"] == ["0"]

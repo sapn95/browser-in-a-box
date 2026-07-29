@@ -333,6 +333,19 @@ def create_account(root: Path, account: Account) -> None:
     # the same user to the filesystem: logging in as the new one would give full
     # access to the old one's home, Chrome profile and login keychain. Changing
     # CIB_VM_USER and re-running 'cib vm prepare' is a plausible way to reach this.
+    # An account of this name that the guest already has: root, daemon, _spotlight
+    # and a dozen others all match the name rules. Overwriting root's record with a
+    # uid-501 one leaves the guest with no working sudo at all.
+    mine = users / f"{account.name}.plist"
+    if mine.exists() and not mine.is_symlink():
+        existing_uid = read_plist(
+            root, f"private/var/db/dslocal/nodes/Default/users/{account.name}.plist"
+        ).get("uid")
+        if existing_uid and existing_uid != [str(account.uid)]:
+            raise PatchError(
+                f"the guest already has an account called {account.name!r} on uid "
+                f"{existing_uid[0]} — this would overwrite it. Pick another CIB_VM_USER."
+            )
     for existing in sorted(users.glob("*.plist")):
         if existing.stem == account.name or existing.is_symlink():
             continue

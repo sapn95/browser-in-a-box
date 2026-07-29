@@ -36,9 +36,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v9.0.0
       - name: ruff check
-        run: uv run --python "${PYTHON_VERSION}" --group dev ruff check --output-format=github .
+        run: uv run --locked --python "${PYTHON_VERSION}" --group dev ruff check --output-format=github .
       - name: ruff format
-        run: uv run --python "${PYTHON_VERSION}" --group dev ruff format --check --diff .
+        run: uv run --locked --python "${PYTHON_VERSION}" --group dev ruff format --check --diff .
 
   workflows:
     name: lint workflows
@@ -102,8 +102,8 @@ jobs:
       - uses: astral-sh/setup-uv@v9.0.0
       - name: pytest with coverage
         run: >
-          uv run --python ${{ matrix.python }}
-          --with pytest --with pytest-cov
+          uv run --locked --python ${{ matrix.python }}
+          --group dev
           pytest
 
   package:

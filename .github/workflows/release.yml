@@ -81,7 +81,7 @@ jobs:
           fi
       - name: compile with Nuitka
         run: |
-          uv run --python "${PYTHON_VERSION}" --group dev \
+          uv run --locked --python "${PYTHON_VERSION}" --group dev \
             python -m nuitka \
             --standalone --remove-output --assume-yes-for-downloads \
             --include-data-files=cibpatch.py=cibpatch.py \
@@ -118,7 +118,7 @@ jobs:
       - uses: astral-sh/setup-uv@v9.0.0
       - name: compile with Nuitka
         run: |
-          uv run --python "${PYTHON_VERSION}" --group dev python -m nuitka \
+          uv run --locked --python "${PYTHON_VERSION}" --group dev python -m nuitka \
             --standalone --remove-output --assume-yes-for-downloads \
             --include-data-files=cibpatch.py=cibpatch.py \
             --include-data-dir=packer=packer \
