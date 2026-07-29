@@ -266,6 +266,21 @@ def create_account(root: Path, account: Account) -> None:
             f"{users} is missing — is this the guest's Data volume, and has the guest "
             "been booted once so its first-boot state exists?"
         )
+    # The uid is fixed at 501, so a second account under a different name would be
+    # the same user to the filesystem: logging in as the new one would give full
+    # access to the old one's home, Chrome profile and login keychain. Changing
+    # CIB_VM_USER and re-running 'cib vm prepare' is a plausible way to reach this.
+    for existing in sorted(users.glob("*.plist")):
+        if existing.stem == account.name or existing.is_symlink():
+            continue
+        record = read_plist(root, f"private/var/db/dslocal/nodes/Default/users/{existing.name}")
+        if record.get("uid") == [str(account.uid)]:
+            raise PatchError(
+                f"the guest already has an account {existing.stem!r} on uid {account.uid}, "
+                f"so {account.name!r} would share its home and its keychain. Either set "
+                f"CIB_VM_USER={existing.stem} to keep using it, or 'cib vm delete' and "
+                "build again."
+            )
     guid = str(uuid.uuid4()).upper()
     write_plist(
         root,

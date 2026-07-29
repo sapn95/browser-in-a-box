@@ -788,6 +788,8 @@ def _run_guest_script(script: str, home, share_exists: bool):
     body = body.replace("'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'", "true")
     body = body.replace("'/Applications/Google Chrome.app'", f"'{home / 'chrome.app'}'")
     body = body.replace("/usr/local/bin/tart-guest-agent", str(home / "agent"))
+    # No rewriting of scratch paths: the script keeps its own under $HOME/.cache,
+    # and pytest gives every test a different HOME. Two suites can run at once.
     if share_exists:
         (home / "share").mkdir(exist_ok=True)
     return subprocess.run(  # noqa: S603
@@ -1967,3 +1969,90 @@ def test_ui_status_reports_the_code_and_none_when_nothing_answers(monkeypatch):
     monkeypatch.setattr(cib.urllib.request, "urlopen", refused)
     assert cib.ui_status(cib.Config()) is None
     assert cib.ui_is_up(cib.Config()) is False
+
+
+# --- what round 11 confirmed and the last commit did not close -----------------
+
+
+def test_a_missing_patcher_is_named_before_the_download_starts(credentials, monkeypatch, tmp_path):
+    # It used to be found only in the patch step, so a build that could never
+    # finish still downloaded ~15 GB and installed macOS first.
+    calls: list[str] = []
+    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(cib, "sudo_is_cached", lambda: True)
+    monkeypatch.setattr(cib, "PATCHER", tmp_path / "not-shipped" / "cibpatch.py")
+    monkeypatch.setattr(cib, "run", lambda *a, **k: calls.append(a) or None)
+    with pytest.raises(cib.Failure, match="patcher is missing"):
+        cib.cmd_vm_create("tart", cib.VmConfig())
+    assert calls == [], "nothing may be downloaded before the check"
+
+
+def test_a_missing_sudo_credential_is_named_before_the_download_starts(
+    credentials, monkeypatch, tmp_path
+):
+    calls: list[str] = []
+    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(cib, "sudo_is_cached", lambda: False)
+    monkeypatch.setattr(cib, "run", lambda *a, **k: calls.append(a) or None)
+    with pytest.raises(cib.Failure, match="Nothing has been downloaded yet"):
+        cib.cmd_vm_create("tart", cib.VmConfig())
+    assert calls == []
+
+
+def test_a_second_account_on_the_same_uid_is_refused(tmp_path, monkeypatch):
+    # uid is fixed at 501, so 'CIB_VM_USER=bob cib vm prepare' over a guest built as
+    # 'admin' would give bob full access to admin's home, Chrome profile and login
+    # keychain — and nothing said so.
+    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g, **kw: None)
+    root = _guest_volume(tmp_path)
+    cibpatch.patch(root, cibpatch.Account("admin", "pw"))
+    with pytest.raises(cibpatch.PatchError, match="already has an account 'admin'"):
+        cibpatch.patch(root, cibpatch.Account("bob", "pw"))
+
+
+def test_preparing_the_same_account_twice_is_still_allowed(tmp_path, monkeypatch):
+    # 'cib vm prepare' after a failed patch is the documented retry, so the guard
+    # must not turn it into an error.
+    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g, **kw: None)
+    root = _guest_volume(tmp_path)
+    cibpatch.patch(root, cibpatch.Account("admin", "pw"))
+    cibpatch.patch(root, cibpatch.Account("admin", "pw"))  # must not raise
+
+
+def test_logs_reports_an_engine_failure_as_a_failure(monkeypatch):
+    # It used to exit 0 whatever the engine did, so `cib box logs > out.txt || handle`
+    # never fired and out.txt was silently empty.
+    monkeypatch.setattr(
+        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="")
+    )
+    with pytest.raises(cib.Failure, match="cib box status"):
+        cib.cmd_logs("podman", cib.Config())
+
+
+def test_logs_stays_quiet_when_the_engine_is_happy(monkeypatch):
+    monkeypatch.setattr(
+        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="", stderr="")
+    )
+    cib.cmd_logs("podman", cib.Config())  # must not raise
+
+
+def test_the_guest_script_keeps_its_scratch_space_out_of_tmp():
+    # /tmp in the guest is writable by every account there, so a staged Chrome.app
+    # could be swapped between the copy and the move into /Applications. It also
+    # made two concurrent test runs share host paths and delete each other's.
+    script = cib.guest_install_script("pw")
+    body = "\n".join(ln for ln in script.split("\n") if not ln.lstrip().startswith("#"))
+    # Spelled this way so the assertion itself is not a hardcoded temp path.
+    assert not re.search(r"/tm[p]/", body)
+    assert 'CIB_WORK="$HOME/.cache/cib"' in body
+    assert "trap 'rm -rf \"$CIB_WORK\"' EXIT" in body, "the scratch space must be cleaned up"
+
+
+def test_the_guest_script_cleans_up_after_itself_even_when_it_fails(tmp_path):
+    # The trap is the only cleanup: an aborted install must not leave a half-copied
+    # Chrome and a mounted disk image in the account's home for ever.
+    result = _run_guest_script(cib.guest_install_script("pw"), tmp_path, share_exists=False)
+    assert result.returncode != 0, "a missing share is still a failure"
+    assert not (tmp_path / ".cache" / "cib").exists()
