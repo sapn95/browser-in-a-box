@@ -66,7 +66,7 @@ variable "disk_size_gb" {
 variable "keyboard_layout_id" {
   type        = number
   default     = 19
-  description = "HIToolbox KeyboardLayout ID. 19 is Swiss German, 0 is U.S."
+  description = "HIToolbox KeyboardLayout ID. 19 is Swiss German, 0 is U.S. cib always passes the host's."
 }
 
 variable "keyboard_layout_name" {
@@ -80,11 +80,24 @@ variable "timezone" {
   default = "Europe/Zurich"
 }
 
-variable "guest_agent_version" {
-  type = string
-  # renovate: datasource=github-releases depName=cirruslabs/tart-guest-agent
-  default     = "0.11.0"
-  description = "tart-guest-agent, which is what makes host/guest copy-paste work."
+variable "authorized_key" {
+  type        = string
+  default     = ""
+  sensitive   = true
+  description = "The public key cib logs in with. Passed as PKR_VAR_authorized_key."
+}
+
+variable "host_private_key" {
+  type        = string
+  default     = ""
+  sensitive   = true
+  description = "The guest's host key, generated on the host so the first connection can be verified."
+}
+
+variable "host_public_key" {
+  type      = string
+  default   = ""
+  sensitive = true
 }
 
 variable "timezone_city" {
@@ -201,26 +214,18 @@ build {
 
   provisioner "shell" {
     inline = [
-      # Clipboard sharing between host and guest is not a flag: it needs an agent
-      # running inside the guest. Without it, copy and paste silently do nothing —
-      # which matters here, because the account password is meant to be pasted.
-      "curl -fsSL -o /tmp/agent.tar.gz \"https://github.com/cirruslabs/tart-guest-agent/releases/download/v${var.guest_agent_version}/tart-guest-agent-darwin-all.tar.gz\"",
-      "tar -xzf /tmp/agent.tar.gz -C /tmp",
-      "echo '${var.password}' | sudo -S install -m 0755 /tmp/tart-guest-agent /usr/local/bin/tart-guest-agent",
-      "echo '${var.password}' | sudo -S /usr/local/bin/tart-guest-agent --install-daemon=launchd",
-      "rm -f /tmp/agent.tar.gz /tmp/tart-guest-agent",
-    ]
-  }
-
-  provisioner "shell" {
-    inline = [
-      # Chrome, which is the entire point of the VM.
-      "curl -fsSL -o /tmp/chrome.dmg 'https://dl.google.com/chrome/mac/universal/stable/GGRO/googlechrome.dmg'",
-      "hdiutil attach -nobrowse -quiet /tmp/chrome.dmg -mountpoint /tmp/chrome-mount",
-      "cp -R '/tmp/chrome-mount/Google Chrome.app' /Applications/",
-      "hdiutil detach -quiet /tmp/chrome-mount",
-      "rm -f /tmp/chrome.dmg",
-      "'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --version",
+      # cib reaches the guest by key, and checks the guest's host key against one it
+      # generated itself — so both are installed here, exactly as the offline path
+      # installs them. Without this, the `cib vm setup` this build tells you to run
+      # next can never connect.
+      "mkdir -p ~/.ssh && chmod 700 ~/.ssh",
+      "printf '%s\\n' '${var.authorized_key}' > ~/.ssh/authorized_keys",
+      "chmod 600 ~/.ssh/authorized_keys",
+      "printf '%s' '${var.host_private_key}' > /tmp/host_key",
+      "printf '%s\\n' '${var.host_public_key}' > /tmp/host_key.pub",
+      "echo '${var.password}' | sudo -S install -m 0600 -o root -g wheel /tmp/host_key /etc/ssh/ssh_host_ed25519_key",
+      "echo '${var.password}' | sudo -S install -m 0644 -o root -g wheel /tmp/host_key.pub /etc/ssh/ssh_host_ed25519_key.pub",
+      "rm -f /tmp/host_key /tmp/host_key.pub",
     ]
   }
 
@@ -228,9 +233,11 @@ build {
     inline = [
       # Prove the two things the guest is built for.
       "spctl --status | grep -q 'assessments enabled' || { echo 'Gatekeeper is off, it should not be'; exit 1; }",
-      "test -d '/Applications/Google Chrome.app'",
-      # Clipboard sharing depends on this agent being installed and running.
-      "test -x /usr/local/bin/tart-guest-agent",
+      # Chrome and the clipboard agent are installed by 'cib vm setup', the same
+      # way the offline path installs them — there is no second copy here to
+      # drift out of step.
+      "test -s ~/.ssh/authorized_keys",
+      "sudo -n true 2>/dev/null || echo '${var.password}' | sudo -S test -s /etc/ssh/ssh_host_ed25519_key",
     ]
   }
 }

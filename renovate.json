@@ -40,17 +40,6 @@
       "extractVersionTemplate": "^v?(?<version>.*)$"
     },
     {
-      "description": "Keep the pinned tart-guest-agent version in the packer template up to date",
-      "customType": "regex",
-      "managerFilePatterns": [
-        "/^packer/chrome-vm\\.pkr\\.hcl$/"
-      ],
-      "matchStrings": [
-        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\n\\s*default\\s*=\\s*\"(?<currentValue>[^\"]+)\""
-      ],
-      "extractVersionTemplate": "^v?(?<version>.*)$"
-    },
-    {
       "description": "Keep the pinned packer-plugin-tart version up to date. Packer has no built-in Renovate manager, and an open version bound has no lock file behind it.",
       "customType": "regex",
       "managerFilePatterns": [

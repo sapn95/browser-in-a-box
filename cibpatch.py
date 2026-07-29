@@ -44,6 +44,7 @@ import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from xml.parsers.expat import ExpatError
 
 # macOS stores an salted PBKDF2-SHA512 verifier. These are the parameters a real
 # account gets; they are not a security choice of ours, they are what the OS expects.
@@ -192,7 +193,7 @@ def read_plist(root: Path, relative: str) -> dict:
     try:
         with path.open("rb") as handle:
             record = plistlib.load(handle)
-    except (plistlib.InvalidFileException, OSError, ValueError):
+    except (plistlib.InvalidFileException, OSError, ValueError, ExpatError):
         return {}
     # A plist root can be any type. Treating an array as a dict raised a traceback
     # out of a step running as root, rather than a message.
@@ -309,7 +310,7 @@ def enable_autologin(root: Path, account: Account) -> None:
     record = read_plist(root, relative)
     record["autoLoginUser"] = account.name
     record["autoLoginUserUID"] = account.uid
-    # A FirstLogins entry re-launches Setup Assistant at the next graphical login
+    # An AccountInfo entry re-launches Setup Assistant at the next graphical login
     # even with .AppleSetupDone present, so it has to go.
     record.pop("AccountInfo", None)
     write_plist(root, relative, record)
@@ -360,7 +361,13 @@ def create_account(root: Path, account: Account) -> None:
                 f"CIB_VM_USER={existing.stem} to keep using it, or 'cib vm delete' and "
                 "build again."
             )
-    guid = str(uuid.uuid4()).upper()
+    # Reused when the account is already there: group membership records the GUID,
+    # so a fresh one on every 'cib vm prepare' would leave admin and staff pointing
+    # at a user that no longer exists under that id.
+    existing = read_plist(
+        root, f"private/var/db/dslocal/nodes/Default/users/{account.name}.plist"
+    ).get("generateduid")
+    guid = existing[0] if existing else str(uuid.uuid4()).upper()
     write_plist(
         root,
         f"private/var/db/dslocal/nodes/Default/users/{account.name}.plist",
