@@ -50,4 +50,4 @@ select = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --cov=cib --cov-report=term-missing --cov-fail-under=80"
+addopts = "-q --cov=cib --cov=cibpatch --cov-report=term-missing --cov-fail-under=80"

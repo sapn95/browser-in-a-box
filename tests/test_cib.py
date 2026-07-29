@@ -1319,3 +1319,273 @@ def test_prepare_refuses_a_running_guest(calls, credentials, monkeypatch):
     monkeypatch.setattr(cib, "vm_running", lambda *a, **k: True)
     with pytest.raises(cib.Failure, match="cib vm down"):
         cib.cmd_vm_prepare("tart", cib.VmConfig())
+
+
+# --- the guest's keyboard, which the offline path used never to set ------------
+
+
+def _hitoolbox(sources: list[dict]) -> str:
+    import plistlib
+
+    return plistlib.dumps({"AppleSelectedInputSources": sources}, fmt=plistlib.FMT_XML).decode()
+
+
+_SWISS = {
+    "InputSourceKind": "Keyboard Layout",
+    "KeyboardLayout ID": 19,
+    "KeyboardLayout Name": "Swiss German",
+}
+
+
+def test_the_guest_gets_the_hosts_keyboard_layout(monkeypatch):
+    # The generated password is pasted, but everything typed in the guest afterwards
+    # is typed by hand, and a guest left on U.S. moves the punctuation.
+    monkeypatch.setattr(
+        cib.subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout=_hitoolbox([_SWISS])),
+    )
+    assert cib.host_keyboard_layout() == (19, "Swiss German")
+
+
+def test_an_input_method_is_not_mistaken_for_a_keyboard_layout(monkeypatch):
+    # Press-And-Hold sits in the same list and carries no layout at all.
+    sources = [
+        {"InputSourceKind": "Non Keyboard Input Method", "Bundle ID": "com.apple.PressAndHold"},
+        _SWISS,
+    ]
+    monkeypatch.setattr(
+        cib.subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout=_hitoolbox(sources)),
+    )
+    assert cib.host_keyboard_layout() == (19, "Swiss German")
+
+
+@pytest.mark.parametrize(
+    "returncode,stdout",
+    [
+        (1, ""),  # no such preference domain
+        (0, "not a plist"),  # something else answered
+        (0, None),  # nothing captured at all
+        (0, _hitoolbox([{"InputSourceKind": "Keyboard Layout"}])),  # a layout with no id
+    ],
+)
+def test_an_unreadable_keyboard_preference_falls_back_to_us(monkeypatch, returncode, stdout):
+    # Guessing a layout would be worse than the one macOS installs with.
+    monkeypatch.setattr(
+        cib.subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, returncode, stdout=stdout),
+    )
+    assert cib.host_keyboard_layout() == cib.DEFAULT_KEYBOARD
+
+
+def test_the_layout_is_written_where_the_guest_reads_it(tmp_path):
+    # Selecting a layout that is not also enabled leaves the guest on U.S.
+    import plistlib
+
+    cibpatch.set_keyboard_layout(
+        tmp_path, cibpatch.Account("admin", "pw"), cibpatch.Keyboard(19, "Swiss German")
+    )
+    path = tmp_path / "Users/admin/Library/Preferences/com.apple.HIToolbox.plist"
+    record = plistlib.loads(path.read_bytes())
+    assert record["AppleEnabledInputSources"] == [_SWISS]
+    assert record["AppleSelectedInputSources"] == [_SWISS]
+
+
+def test_the_hosts_layout_reaches_the_patcher(credentials, monkeypatch, tmp_path):
+    _fake_guest_disk(monkeypatch, tmp_path)
+    monkeypatch.setattr(cib, "host_keyboard_layout", lambda: (19, "Swiss German"))
+    seen = {}
+    monkeypatch.setattr(
+        cib.subprocess,
+        "run",
+        lambda cmd, **kw: (
+            (None if "-n" in cmd else seen.update(cmd=cmd)) or subprocess.CompletedProcess(cmd, 0)
+        ),
+    )
+    cib._prepare_guest(cib.VmConfig(), "pw")
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("--keyboard-id") + 1] == "19"
+    assert cmd[cmd.index("--keyboard-name") + 1] == "Swiss German"
+
+
+def test_patching_leaves_the_guest_on_the_layout_it_was_told(tmp_path, monkeypatch):
+    import plistlib
+
+    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g, **kw: None)
+    for sub in ("users", "groups"):
+        (tmp_path / f"private/var/db/dslocal/nodes/Default/{sub}").mkdir(parents=True)
+    for name in ("admin", "staff"):
+        path = tmp_path / f"private/var/db/dslocal/nodes/Default/groups/{name}.plist"
+        with path.open("wb") as fh:
+            plistlib.dump({"users": [], "groupmembers": []}, fh, fmt=plistlib.FMT_BINARY)
+    cibpatch.patch(tmp_path, cibpatch.Account("admin", "pw"), cibpatch.Keyboard(19, "Swiss German"))
+    record = plistlib.loads(
+        (tmp_path / "Users/admin/Library/Preferences/com.apple.HIToolbox.plist").read_bytes()
+    )
+    assert record["AppleSelectedInputSources"] == [_SWISS]
+
+
+# --- pins, managers, and messages that pointed the wrong way -------------------
+
+
+def test_both_tart_guest_agent_pins_move_together():
+    # Each pin is updated by its own Renovate manager. If one stops matching, the
+    # two install paths quietly end up on different agents.
+    root = Path(cib.__file__).resolve().parent
+    template = (root / "packer" / "chrome-vm.pkr.hcl").read_text()
+    pinned = re.search(r'variable "guest_agent_version".*?default\s*=\s*"([^"]+)"', template, re.S)
+    assert pinned, "the packer template no longer pins a guest agent version"
+    assert pinned.group(1) == cib.GUEST_AGENT_VERSION
+
+
+def test_every_renovate_marker_in_cib_has_a_manager_that_matches_it():
+    # A marker with no manager reads as configured and updates nothing: the
+    # tart-guest-agent pin sat unmanaged behind one for seven review rounds.
+    import json
+
+    root = Path(cib.__file__).resolve().parent
+    config = json.loads((root / "renovate.json").read_text())
+    source = (root / "cib.py").read_text()
+    patterns = [
+        pattern
+        for manager in config["customManagers"]
+        if manager["managerFilePatterns"] == ["/^cib\\.py$/"]
+        for pattern in manager["matchStrings"]
+    ]
+    # Renovate's regexes are JavaScript, where a named group is (?<name>...);
+    # Python spells the same thing (?P<name>...). Lookbehind is left alone.
+    covered = {
+        match.group(0).splitlines()[0]
+        for pattern in patterns
+        for match in re.finditer(re.sub(r"\(\?<(?![=!])", "(?P<", pattern), source)
+    }
+    assert set(re.findall(r"^# renovate:.*$", source, flags=re.M)) == covered
+
+
+def test_a_half_built_vm_is_pointed_at_prepare_not_only_at_up(capsys, monkeypatch):
+    # 'vm up' on a VM whose preparation failed lands on Setup Assistant, which is
+    # the one thing the offline path exists to avoid.
+    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: True)
+    cib.cmd_vm_create("tart", cib.VmConfig())
+    assert "cib vm prepare" in capsys.readouterr().out
+
+
+def test_a_guest_that_will_not_stop_is_pointed_at_prepare(calls, credentials, monkeypatch):
+    # It has already been killed here, so telling the user to stop it is advice
+    # they cannot act on.
+    class Stuck(_FakeBoot):
+        def wait(self, timeout=None):
+            if timeout:
+                raise subprocess.TimeoutExpired("tart", timeout)
+            return 0
+
+    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(cib.time, "sleep", lambda s: None)
+    monkeypatch.setattr(cib.subprocess, "Popen", lambda *a, **k: Stuck())
+    with pytest.raises(cib.Failure, match="cib vm prepare"):
+        cib.cmd_vm_create("tart", cib.VmConfig())
+
+
+def test_the_packer_fallback_is_offered_with_the_delete_that_makes_it_work(monkeypatch, tmp_path):
+    # 'vm create' on an existing VM only reports that it exists, so suggesting the
+    # fallback without the delete suggests a no-op.
+    _fake_guest_disk(monkeypatch, tmp_path)
+    monkeypatch.setattr(cib.Path, "exists", lambda self: "cibpatch" not in str(self))
+    with pytest.raises(cib.Failure, match="cib vm delete"):
+        cib._prepare_guest(cib.VmConfig(), "pw")
+
+
+# --- the disk layer, where every real failure so far has happened --------------
+
+
+def test_the_disk_is_put_back_even_when_patching_fails(monkeypatch):
+    # A half-finished run must never leave the guest's disk attached to the host.
+    undone: list[tuple[str, str]] = []
+    monkeypatch.setattr(cibpatch, "attach", lambda disk: "/dev/disk9")
+    monkeypatch.setattr(cibpatch, "data_volume", lambda device: "/dev/disk9s1")
+    monkeypatch.setattr(cibpatch, "mount", lambda volume: Path("/Volumes/Data"))
+    monkeypatch.setattr(cibpatch, "unmount", lambda volume: undone.append(("unmount", volume)))
+    monkeypatch.setattr(cibpatch, "detach", lambda device: undone.append(("detach", device)))
+    monkeypatch.setattr(
+        cibpatch, "patch", lambda *a, **k: (_ for _ in ()).throw(cibpatch.PatchError("no"))
+    )
+    with pytest.raises(cibpatch.PatchError):
+        cibpatch.prepare(Path("/x/disk.img"), cibpatch.Account("admin", "pw"))
+    assert undone == [("unmount", "/dev/disk9s1"), ("detach", "/dev/disk9")]
+
+
+def test_a_disk_that_will_not_attach_is_reported_with_its_reason(monkeypatch):
+    monkeypatch.setattr(
+        cibpatch.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="no such file"),
+    )
+    with pytest.raises(cibpatch.PatchError, match="no such file"):
+        cibpatch.attach(Path("/x/disk.img"))
+
+
+def test_a_volume_mounted_without_ownership_is_refused(monkeypatch):
+    # chown returns success and writes nothing on a noowners mount, so the guest's
+    # home would stay root-owned and it could not write its own preferences.
+    import plistlib
+
+    mounted = "/dev/disk9s1 on /Volumes/Data (apfs, noowners)\n"
+    info = plistlib.dumps({"MountPoint": "/Volumes/Data"})
+
+    def fake_run(cmd, *a, **k):
+        if cmd[0] == "/sbin/mount":
+            return subprocess.CompletedProcess(cmd, 0, stdout=mounted)
+        if "info" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout=info)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(cibpatch.subprocess, "run", fake_run)
+    with pytest.raises(cibpatch.PatchError, match="without ownership"):
+        cibpatch.mount("/dev/disk9s1")
+
+
+def test_the_patcher_passes_the_layout_it_was_given(monkeypatch):
+    import io
+
+    seen = {}
+    typed = "on-stdin-not-argv"
+    monkeypatch.setattr(cibpatch, "prepare", lambda d, a, k: seen.update(disk=d, account=a, kb=k))
+    monkeypatch.setattr(cibpatch.sys, "stdin", io.StringIO(typed + "\n"))
+    cibpatch.main(
+        [
+            "--disk",
+            "/x/disk.img",
+            "--user",
+            "admin",
+            "--keyboard-id",
+            "19",
+            "--keyboard-name",
+            "Swiss German",
+        ]
+    )
+    assert seen["kb"] == cibpatch.Keyboard(19, "Swiss German")
+    # Never in argv, so it is never in the process list.
+    assert seen["account"].password == typed
+
+
+def test_the_patcher_defaults_to_us_when_it_is_told_no_layout(monkeypatch):
+    import io
+
+    seen = {}
+    monkeypatch.setattr(cibpatch, "prepare", lambda d, a, k: seen.update(kb=k))
+    monkeypatch.setattr(cibpatch.sys, "stdin", io.StringIO("pw\n"))
+    cibpatch.main(["--disk", "/x/disk.img", "--user", "admin"])
+    assert seen["kb"] == cibpatch.Keyboard()
+
+
+def test_the_patcher_refuses_to_run_without_a_password(monkeypatch):
+    # An empty password would produce an account nothing can log in to.
+    import io
+
+    monkeypatch.setattr(cibpatch.sys, "stdin", io.StringIO("\n"))
+    with pytest.raises(SystemExit, match="no password"):
+        cibpatch.main(["--disk", "/x/disk.img", "--user", "admin"])
