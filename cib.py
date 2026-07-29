@@ -391,8 +391,10 @@ def cmd_engine(engine: str, cfg: Config) -> None:
 @dataclass(frozen=True)
 class VmConfig:
     name: str = field(default_factory=lambda: _env("CIB_VM_NAME", "chrome-vm"))
-    cpus: int = field(default_factory=lambda: _env_int("CIB_VM_CPUS", "4"))
-    memory: int = field(default_factory=lambda: _env_int("CIB_VM_MEMORY", "8192", 1024))
+    # Floors are what macOS itself needs, not what the type allows: a guest given
+    # one core or 1 GB fails somewhere in the middle of a half-hour install.
+    cpus: int = field(default_factory=lambda: _env_int("CIB_VM_CPUS", "4", 2))
+    memory: int = field(default_factory=lambda: _env_int("CIB_VM_MEMORY", "8192", 4096))
     disk: int = field(default_factory=lambda: _env_int("CIB_VM_DISK", "100", 20))
     display: str = field(default_factory=lambda: _env("CIB_VM_DISPLAY", "1920x1200"))
     # "bridged" gives the guest an address from the real network, so it inherits a
@@ -407,6 +409,18 @@ class VmConfig:
     # image. A folder under ~/Downloads rather than ~/Downloads itself: the guest
     # gets what it needs and no more.
     share: str = field(default_factory=lambda: _env("CIB_VM_SHARE", "~/Downloads/chrome-vm"))
+
+    def check(self) -> None:
+        """Reject what would fail later, or quietly do the wrong thing."""
+        # An empty share expands to the current directory, which would be shared
+        # into the guest wholesale.
+        if not self.share.strip():
+            raise Failure("CIB_VM_SHARE is empty; unset it for the default, or give a path")
+        # The box variant validates the same shape; the VM used to drop a typo
+        # silently and open a window at whatever tart chose.
+        if not re.fullmatch(r"\d+x\d+", self.display):
+            raise Failure(f"CIB_VM_DISPLAY must look like 1920x1200, got {self.display!r}")
+
     # "latest" is what Apple is shipping today, which is what a new guest usually
     # wants — but it moves, so a rebuild is not reproducible unless it can be told
     # which installer to use (a URL or a path to an .ipsw).
@@ -417,6 +431,11 @@ PACKER_TEMPLATE = Path(__file__).resolve().parent / "packer" / "chrome-vm.pkr.hc
 # Where the generated guest password is kept, so it survives between commands and
 # can be pasted rather than typed.
 CREDENTIALS = Path.home() / ".config" / "chrome-in-a-box" / "vm-credentials"
+# The key cib logs in with, the host key it plants in the guest so it can recognise
+# it again, and the known_hosts holding that host key.
+VM_KEY = CREDENTIALS.parent / "vm-key"
+VM_HOST_KEY = CREDENTIALS.parent / "vm-host-key"
+KNOWN_HOSTS = CREDENTIALS.parent / "vm-known-hosts"
 
 
 PATCHER = Path(__file__).resolve().parent / "cibpatch.py"
@@ -558,9 +577,47 @@ def host_time_zone() -> tuple[str, str]:
     except OSError:
         return DEFAULT_TIME_ZONE
     _, _, zone = target.partition("zoneinfo/")
+    if not zone:
+        return DEFAULT_TIME_ZONE
     # "Europe/Zurich" and "America/Argentina/Buenos_Aires" both end in the city, and
-    # Setup Assistant's field searches for a city rather than an Olson id.
-    return (zone, zone.rsplit("/", 1)[-1].replace("_", " ")) if "/" in zone else DEFAULT_TIME_ZONE
+    # Setup Assistant's field searches for a city rather than an Olson id. A
+    # single-component zone like "UTC" is its own city, not a reason to fall back.
+    return zone, zone.rsplit("/", 1)[-1].replace("_", " ")
+
+
+def _keygen(path: Path, comment: str) -> None:
+    keygen = shutil.which("ssh-keygen")
+    if not keygen:
+        raise Failure("ssh-keygen is not on PATH, and the guest is reached over ssh")
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for stale in (path, path.with_suffix(".pub")):
+        stale.unlink(missing_ok=True)
+    run(keygen, "-q", "-t", "ed25519", "-N", "", "-C", comment, "-f", str(path), check=False)
+    if not (path.exists() and path.with_suffix(".pub").exists()):
+        raise Failure(f"ssh-keygen did not produce a key pair at {path}")
+
+
+def ensure_vm_keys() -> None:
+    """Create the two key pairs the guest is reached with, once.
+
+    Login is by key rather than by password: sshd runs `vm setup` non-interactively,
+    so a password login would have to be typed at every command — and the script it
+    runs carries the guest's own password for sudo, which should not travel to a
+    peer that has not been identified yet.
+
+    The guest's *host* key is generated here and planted in the guest rather than
+    left for it to make on first boot, because a key that is only learned on first
+    connection cannot be checked on that connection. Planting it means the very
+    first connection is verified.
+    """
+    if not (VM_KEY.exists() and VM_KEY.with_suffix(".pub").exists()):
+        _keygen(VM_KEY, "cib")
+    if not (VM_HOST_KEY.exists() and VM_HOST_KEY.with_suffix(".pub").exists()):
+        _keygen(VM_HOST_KEY, "cib-guest")
+    # A wildcard host pattern on purpose: the guest's address changes with every
+    # lease, and this file is used for nothing but connections to that one guest.
+    KNOWN_HOSTS.write_text("* " + VM_HOST_KEY.with_suffix(".pub").read_text().strip() + "\n")
+    KNOWN_HOSTS.chmod(0o600)
 
 
 def guest_password(create: bool = False) -> str:
@@ -718,7 +775,9 @@ def _create_offline(tart: str, vm: VmConfig) -> None:
     print()
     print(f"Built. The account is {vm.user!r}; 'cib vm password' prints its password.")
     print("Next:")
-    print("  1. cib vm up          — boots straight to the desktop, no Setup Assistant")
+    print("  1. cib vm up          — boots straight to the desktop, no Setup Assistant.")
+    print("                          It stays in the foreground, so run the rest from")
+    print("                          a second terminal; Ctrl-C here stops the guest.")
     print("  2. cib vm setup       — installs Chrome, the clipboard agent and downloads")
     print("  3. sign in to your Apple Account, then turn on iCloud Keychain")
 
@@ -740,12 +799,15 @@ def _prepare_guest(vm: VmConfig, password: str) -> None:
     python = (
         sys.executable
         if Path(sys.executable).name.startswith("python")
-        else (shutil.which("python3") or "/usr/bin/python3")
+        # /usr/bin/python3 first: this is handed to sudo, so a PATH entry that came
+        # from anywhere else would be running as root.
+        else ("/usr/bin/python3" if Path("/usr/bin/python3").exists() else shutil.which("python3"))
     )
     # Only this step needs root — writing the guest's user database and setting
     # ownership inside it. The download and the boot do not, so sudo is asked for
     # here rather than for the whole command. sudo prompts on its own tty, so it
     # cannot ask for anything when cib runs detached; check before trying.
+    ensure_vm_keys()
     layout_id, layout_name = host_keyboard_layout()
     print(
         f"Preparing the guest without Setup Assistant, keyboard {layout_name} "
@@ -759,6 +821,10 @@ def _prepare_guest(vm: VmConfig, password: str) -> None:
     result = subprocess.run(  # noqa: S603
         [
             "/usr/bin/sudo",
+            # -n as well as the probe: without it a credential that lapsed in
+            # between would make sudo read the password off this pipe as its own,
+            # and the patcher would then find nothing on stdin.
+            "-n",
             python,
             str(patcher),
             "--disk",
@@ -769,6 +835,10 @@ def _prepare_guest(vm: VmConfig, password: str) -> None:
             str(layout_id),
             "--keyboard-name",
             layout_name,
+            "--authorized-key",
+            str(VM_KEY.with_suffix(".pub")),
+            "--host-key",
+            str(VM_HOST_KEY),
         ],
         input=password + "\n",
         text=True,
@@ -883,6 +953,31 @@ CHROME_APP = "/Applications/Google Chrome.app"
 CHROME_EXE = f"{CHROME_APP}/Contents/MacOS/Google Chrome"
 
 
+AGENT_BIN = "/usr/local/bin/tart-guest-agent"
+AGENT_LABEL = "org.cirruslabs.tart-guest-agent"
+AGENT_PLIST_PATH = f"/Library/LaunchAgents/{AGENT_LABEL}.plist"
+# What cirruslabs' own image templates ship, pointed at where cib installs the
+# binary. --run-agent, not --run-daemon: only the session agent sees the pasteboard.
+AGENT_PLIST = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" \
+"http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>{AGENT_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>{AGENT_BIN}</string>
+      <string>--run-agent</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+  </dict>
+</plist>"""
+
+
 def guest_install_script(password: str) -> str:
     """Chrome, the clipboard agent and the shared Downloads folder, as a script the
     guest runs.
@@ -917,7 +1012,7 @@ if [ -d "{GUEST_SHARE}" ]; then
     # overwrite whatever the first one saved.
     backup="$HOME/Downloads.local"
     n=1
-    while [ -e "$backup" ]; do
+    while [ -e "$backup" ] || [ -L "$backup" ]; do
       backup="$HOME/Downloads.local.$n"
       n=$((n + 1))
     done
@@ -949,34 +1044,58 @@ else
   mv "$CIB_WORK/staging/Google Chrome.app" {shlex.quote(CHROME_APP)}
 fi
 {shlex.quote(CHROME_EXE)} --version
-if [ ! -x /usr/local/bin/tart-guest-agent ]; then
+if [ ! -x {AGENT_BIN} ]; then
   # Host/guest copy-paste needs an agent inside the guest. Without it the generated
   # password would have to be typed by hand at every passkey prompt, which is the
   # one thing generating it was meant to avoid.
   curl -fsSL -o "$CIB_WORK/agent.tar.gz" \
     "https://github.com/cirruslabs/tart-guest-agent/releases/download/v{GUEST_AGENT_VERSION}/tart-guest-agent-darwin-all.tar.gz"
   tar -xzf "$CIB_WORK/agent.tar.gz" -C "$CIB_WORK"
-  sudo_pw install -m 0755 "$CIB_WORK/tart-guest-agent" /usr/local/bin/tart-guest-agent
-  sudo_pw /usr/local/bin/tart-guest-agent --install-daemon=launchd
+  sudo_pw install -m 0755 "$CIB_WORK/tart-guest-agent" {AGENT_BIN}
 fi
+# The agent has no self-install flag — it is started by launchd, from a plist. It
+# runs as a LaunchAgent rather than a daemon on purpose: the pasteboard belongs to
+# the logged-in session, and a root daemon cannot reach it.
+printf '%s\n' {shlex.quote(AGENT_PLIST)} > "$CIB_WORK/agent.plist"
+sudo_pw install -m 0644 -o root -g wheel "$CIB_WORK/agent.plist" {AGENT_PLIST_PATH}
+# Already loaded from an earlier run, or not yet: neither is an error.
+launchctl bootout "gui/$(id -u)/{AGENT_LABEL}" >/dev/null 2>&1 || true
+launchctl bootstrap "gui/$(id -u)" {AGENT_PLIST_PATH} >/dev/null 2>&1 || true
 # Failing here rather than reporting success: without the agent there is no
 # copy-paste, and the generated password would have to be typed by hand.
-test -x /usr/local/bin/tart-guest-agent
+test -x {AGENT_BIN}
+if ! launchctl print "gui/$(id -u)/{AGENT_LABEL}" >/dev/null 2>&1; then
+  echo "the clipboard agent is installed but not running yet;" \
+       "'cib vm down' then 'cib vm up' starts it at login" >&2
+fi
 """
 
 
-SSH_OPTIONS = [
-    # The guest is recreated freely and reached by a changing address, so a
-    # remembered host key would only ever be in the way.
-    "-o",
-    "StrictHostKeyChecking=no",
-    "-o",
-    "UserKnownHostsFile=/dev/null",
-    "-o",
-    "LogLevel=ERROR",
-    "-o",
-    "ConnectTimeout=10",
-]
+def ssh_options() -> list[str]:
+    """How cib reaches the guest: by key, against a host key it planted itself.
+
+    This used to be StrictHostKeyChecking=no with UserKnownHostsFile=/dev/null,
+    which accepts any peer answering on the guest's address — and the script sent
+    over that connection carries the guest's password.
+    """
+    return [
+        "-i",
+        str(VM_KEY),
+        # Without this ssh offers every key the agent holds before ours, and a guest
+        # that has forgotten our key would prompt for a password instead of failing.
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "PasswordAuthentication=no",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        f"UserKnownHostsFile={KNOWN_HOSTS}",
+        "-o",
+        "LogLevel=ERROR",
+        "-o",
+        "ConnectTimeout=10",
+    ]
 
 
 # How long `tart ip` is given to see the guest on the network. A parameter until
@@ -1028,7 +1147,7 @@ def ssh_command(vm: VmConfig, ip: str, script: str | None = None) -> list[str]:
     # A script is read on stdin, not passed as an argument: `ssh host "<script>"`
     # puts the whole thing in this host's process list, and the guest password has
     # to travel inside it.
-    return [ssh, *SSH_OPTIONS, f"{vm.user}@{ip}", *(["/bin/sh", "-s"] if script else [])]
+    return [ssh, *ssh_options(), f"{vm.user}@{ip}", *(["/bin/sh", "-s"] if script else [])]
 
 
 def guest_ssh(vm: VmConfig, ip: str, script: str | None = None) -> int:
@@ -1052,9 +1171,10 @@ def cmd_vm_ssh(tart: str, vm: VmConfig) -> None:
     # connect". Anything else just means the shell ended non-zero, which is normal.
     if guest_ssh(vm, ip) == 255:
         raise Failure(
-            f"could not open a shell on {vm.user}@{ip} — turn on System Settings > "
-            "General > Sharing > Remote Login in the guest, and set CIB_VM_USER if "
-            "the account is not called 'admin'"
+            f"could not open a shell on {vm.user}@{ip}. The offline build turns Remote "
+            "Login on and installs cib's key, so this usually means the guest was built "
+            "another way, or CIB_VM_USER no longer matches the account it was built "
+            f"with. 'cib vm prepare' re-installs the key ({VM_KEY.with_suffix('.pub')})."
         )
 
 
@@ -1064,9 +1184,9 @@ def cmd_vm_setup(tart: str, vm: VmConfig) -> None:
     print(f"Installing Chrome on {vm.user}@{ip} ...")
     if guest_ssh(vm, ip, guest_install_script(guest_password())) != 0:
         raise Failure(
-            f"the guest at {ip} refused the connection or the install failed — turn on "
-            "System Settings > General > Sharing > Remote Login in the guest, and set "
-            "CIB_VM_USER if the account is not called 'admin'"
+            f"installing Chrome on the guest at {ip} failed (see above). The offline "
+            "build turns Remote Login on and installs cib's key; if the connection "
+            "itself was refused, 'cib vm prepare' re-installs both."
         )
     print("Done. In the guest, sign Chrome into your Google account.")
 
@@ -1089,6 +1209,18 @@ def cmd_vm_delete(tart: str, vm: VmConfig) -> None:
         print("Cancelled.")
         return
     result = run(tart, "delete", vm.name, check=False, capture=True)
+    # The password and the keys belong to the VM that is gone. Left behind, the next
+    # build silently reuses them — and 'cib vm password' keeps printing a password
+    # for a guest that no longer exists.
+    for leftover in (
+        CREDENTIALS,
+        VM_KEY,
+        VM_KEY.with_suffix(".pub"),
+        VM_HOST_KEY,
+        VM_HOST_KEY.with_suffix(".pub"),
+        KNOWN_HOSTS,
+    ):
+        leftover.unlink(missing_ok=True)
     print("Deleted." if result.returncode == 0 else f"Nothing to delete ({vm.name!r} not found).")
 
 
@@ -1131,7 +1263,7 @@ VM_HELP = """\
   create   build the VM from a fresh macOS image (large download, one time)
   prepare  redo just the offline preparation on an already-built VM
   up       start it; a window opens
-  setup    install Chrome in the guest over SSH (needs Remote Login on in it)
+  setup    install Chrome and the clipboard agent in the guest, over SSH
   ssh      open a shell in the guest
   ip       print the guest's address
   password print the generated guest account password (copy it, do not retype it)
@@ -1145,9 +1277,15 @@ real boot: the account, autologin, Remote Login, and this host's keyboard layout
 That one step needs sudo on the host; nothing else does. The account password is
 generated, so you never have to type it.
 
+`cib vm up` stays in the foreground: run the steps after it from a second terminal,
+because Ctrl-C there stops the guest.
+
 Chrome is not part of `create` — 'cib vm setup' installs it and the clipboard
-agent, over SSH. Downloads in the guest then land in ~/Downloads/chrome-vm on the
-host (CIB_VM_SHARE).
+agent, over SSH. That connection is by key, not by password: the build generates
+one and installs it, along with the guest's own host key, so cib can verify the
+guest on the very first connection. Nothing asks you to type anything.
+
+Downloads in the guest land in ~/Downloads/chrome-vm on the host (CIB_VM_SHARE).
 
 Two things stay manual, because Apple makes them interactive on purpose: signing
 in to the Apple Account, and turning on iCloud Keychain."""
@@ -1204,7 +1342,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         if args.variant == "vm":
-            VM_ACTIONS[args.action](find_tart(), VmConfig())
+            vm = VmConfig()
+            vm.check()
+            VM_ACTIONS[args.action](find_tart(), vm)
             return 0
         cfg = Config()
         engine = find_engine()

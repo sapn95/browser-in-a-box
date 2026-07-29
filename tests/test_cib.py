@@ -497,11 +497,47 @@ def test_an_unresolvable_guest_is_reported_clearly(monkeypatch):
     assert "no such VM" in str(caught.value), "tart's own reason must reach the user"
 
 
-def test_the_ssh_command_does_not_pin_a_host_key():
+def test_the_ssh_command_verifies_the_host_key_it_planted(credentials):
+    # It used to be StrictHostKeyChecking=no against /dev/null, which accepts any
+    # peer answering on the guest's address — and the script sent over that
+    # connection carries the guest's password for sudo.
     cmd = cib.ssh_command(cib.VmConfig(), "192.168.1.50")
     assert cmd[0].endswith("ssh")
-    assert "StrictHostKeyChecking=no" in cmd
+    assert "StrictHostKeyChecking=yes" in cmd
+    assert "StrictHostKeyChecking=no" not in cmd
+    assert f"UserKnownHostsFile={cib.KNOWN_HOSTS}" in cmd
+    assert "PasswordAuthentication=no" in cmd
+    assert cmd[cmd.index("-i") + 1] == str(cib.VM_KEY)
     assert cmd[-1] == "admin@192.168.1.50"
+
+
+def test_the_known_hosts_entry_pins_the_guests_key_at_any_address(credentials):
+    # The guest's address changes with every lease, and this file is used for
+    # nothing but connections to that one guest, so a wildcard is the pin.
+    cib.ensure_vm_keys()
+    entry = cib.KNOWN_HOSTS.read_text().strip()
+    assert entry.startswith("* ssh-ed25519 ")
+    assert entry.endswith(cib.VM_HOST_KEY.with_suffix(".pub").read_text().strip())
+
+
+def test_the_keys_are_generated_once_and_kept(tmp_path, monkeypatch):
+    # Regenerating them would lock cib out of the guest it already built.
+    monkeypatch.setattr(cib, "VM_KEY", tmp_path / "vm-key")
+    monkeypatch.setattr(cib, "VM_HOST_KEY", tmp_path / "vm-host-key")
+    monkeypatch.setattr(cib, "KNOWN_HOSTS", tmp_path / "vm-known-hosts")
+    cib.ensure_vm_keys()  # real ssh-keygen
+    assert (tmp_path / "vm-key").exists()
+    first = (tmp_path / "vm-key").read_bytes()
+    assert (tmp_path / "vm-key.pub").read_text().startswith("ssh-ed25519 ")
+    cib.ensure_vm_keys()
+    assert (tmp_path / "vm-key").read_bytes() == first
+
+
+def test_a_keygen_that_produced_nothing_is_reported(tmp_path, monkeypatch):
+    monkeypatch.setattr(cib, "VM_KEY", tmp_path / "vm-key")
+    monkeypatch.setattr(cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0))
+    with pytest.raises(cib.Failure, match="did not produce"):
+        cib.ensure_vm_keys()
 
 
 def test_the_ssh_user_is_overridable(monkeypatch):
@@ -515,11 +551,17 @@ def test_setup_installs_chrome_and_is_idempotent():
     assert cib.guest_install_script("pw").startswith("set -eu")
 
 
-def test_setup_names_the_one_switch_the_guest_needs(monkeypatch, capsys):
+def test_setup_points_at_prepare_not_at_a_switch_it_already_turned_on(
+    credentials, monkeypatch, capsys
+):
+    # The offline build enables Remote Login itself, so telling the user to go and
+    # turn it on sent them looking for a setting that is already set.
+    cib.guest_password(create=True)
     monkeypatch.setattr(cib, "vm_ip", lambda *a, **k: "192.168.1.50")
     monkeypatch.setattr(cib, "guest_ssh", lambda *a, **k: 255)
-    with pytest.raises(cib.Failure, match="Remote Login"):
+    with pytest.raises(cib.Failure, match="cib vm prepare") as caught:
         cib.cmd_vm_setup("tart", cib.VmConfig())
+    assert "turn on" not in str(caught.value)
 
 
 def test_setup_passes_the_install_script_to_the_guest(credentials, monkeypatch):
@@ -564,7 +606,18 @@ def test_an_interactive_shell_keeps_this_terminals_stdin(credentials, monkeypatc
 
 @pytest.fixture
 def credentials(tmp_path, monkeypatch):
+    # All four live together under ~/.config/chrome-in-a-box and are module-level,
+    # so redirecting Path.home() afterwards would not move them.
     monkeypatch.setattr(cib, "CREDENTIALS", tmp_path / "vm-credentials")
+    monkeypatch.setattr(cib, "VM_KEY", tmp_path / "vm-key")
+    monkeypatch.setattr(cib, "VM_HOST_KEY", tmp_path / "vm-host-key")
+    monkeypatch.setattr(cib, "KNOWN_HOSTS", tmp_path / "vm-known-hosts")
+    # Stand-ins rather than real ssh-keygen output: these tests replace `run`, so a
+    # real keygen would never happen. ensure_vm_keys() then only rewrites
+    # known_hosts, which is the part they care about.
+    for key in (cib.VM_KEY, cib.VM_HOST_KEY):
+        key.write_text(f"PRIVATE {key.name}\n")
+        key.with_suffix(".pub").write_text(f"ssh-ed25519 AAAAC3Nz-{key.name} cib\n")
     return cib.CREDENTIALS
 
 
@@ -640,8 +693,8 @@ def test_an_empty_resolution_passes_preflight():
         ("CIB_PORT", "abc", "whole number"),
         ("CIB_VM_MEMORY", "8g", "whole number"),
         ("CIB_VM_DISK", "abc", "whole number"),
-        ("CIB_VM_CPUS", "0", "at least 1"),
-        ("CIB_VM_MEMORY", "512", "at least 1024"),
+        ("CIB_VM_CPUS", "0", "at least 2"),
+        ("CIB_VM_MEMORY", "512", "at least 4096"),
     ],
 )
 def test_a_bad_numeric_setting_is_an_error_not_a_traceback(name, value, expected, monkeypatch):
@@ -787,7 +840,14 @@ def _run_guest_script(script: str, home, share_exists: bool):
     body = script.replace(str(share), str(home / "share"))
     body = body.replace("'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'", "true")
     body = body.replace("'/Applications/Google Chrome.app'", f"'{home / 'chrome.app'}'")
-    body = body.replace("/usr/local/bin/tart-guest-agent", str(home / "agent"))
+    body = body.replace(cib.AGENT_BIN, str(home / "agent"))
+    body = body.replace(cib.AGENT_PLIST_PATH, str(home / "agent.plist"))
+    # launchctl needs a real session to talk to, which an ssh-less test does not
+    # have; record the calls instead so they can be asserted.
+    (bin_dir / "launchctl").write_text(
+        f'#!/bin/sh\necho "$@" >> {home}/launchctl.log\n[ "$1" = print ] && exit 0\nexit 0\n'
+    )
+    (bin_dir / "launchctl").chmod(0o755)
     # No rewriting of scratch paths: the script keeps its own under $HOME/.cache,
     # and pytest gives every test a different HOME. Two suites can run at once.
     if share_exists:
@@ -1077,7 +1137,9 @@ def test_a_failed_patch_names_the_fallback(calls, credentials, monkeypatch, tmp_
     monkeypatch.setattr(
         cib.subprocess,
         "run",
-        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0 if "-n" in cmd else 1),
+        lambda cmd, **kw: subprocess.CompletedProcess(
+            cmd, 1 if any("cibpatch" in str(c) for c in cmd) else 0
+        ),
     )
     with pytest.raises(cib.Failure, match="CIB_VM_PACKER=1"):
         cib.cmd_vm_create("tart", cib.VmConfig())
@@ -1247,11 +1309,14 @@ def test_the_patcher_is_run_with_a_real_interpreter(calls, credentials, monkeypa
         lambda cmd, **kw: seen.update(cmd=cmd) or subprocess.CompletedProcess(cmd, 0),
     )
     cib.cmd_vm_create("tart", cib.VmConfig())
-    assert seen["cmd"][1] == "/usr/bin/python3"
-    assert not seen["cmd"][1].endswith("/cib")
+    assert seen["cmd"][:2] == ["/usr/bin/sudo", "-n"]
+    assert seen["cmd"][2] == "/usr/bin/python3"
+    assert not seen["cmd"][2].endswith("/cib")
 
 
-def test_a_missing_sudo_credential_is_named_before_anything_is_tried(monkeypatch, tmp_path):
+def test_a_missing_sudo_credential_is_named_before_anything_is_tried(
+    credentials, monkeypatch, tmp_path
+):
     # sudo prompts on its own tty and cannot ask for anything when cib runs
     # detached; that used to surface as a bare "preparing the guest failed".
     _fake_guest_disk(monkeypatch, tmp_path)
@@ -1272,7 +1337,8 @@ def test_prepare_can_be_retried_without_rebuilding(calls, credentials, monkeypat
         cib.subprocess,
         "run",
         lambda cmd, **kw: (
-            (None if "-n" in cmd else seen.update(cmd=cmd)) or subprocess.CompletedProcess(cmd, 0)
+            (seen.update(cmd=cmd) if any("cibpatch" in str(c) for c in cmd) else None)
+            or subprocess.CompletedProcess(cmd, 0)
         ),
     )
     cib.cmd_vm_prepare("tart", cib.VmConfig())
@@ -1317,7 +1383,7 @@ def test_the_patcher_refuses_a_dangerous_name_itself(tmp_path, monkeypatch):
         cibpatch.patch(tmp_path, cibpatch.Account("../../etc/x", "pw"))
 
 
-def test_the_disk_is_looked_for_where_tart_actually_puts_it(monkeypatch, tmp_path):
+def test_the_disk_is_looked_for_where_tart_actually_puts_it(credentials, monkeypatch, tmp_path):
     # tart honours TART_HOME; looking under ~/.tart would miss the disk entirely.
     monkeypatch.setenv("TART_HOME", str(tmp_path / "elsewhere"))
     disk = tmp_path / "elsewhere" / "vms" / "chrome-vm" / "disk.img"
@@ -1353,7 +1419,7 @@ def test_setup_installs_the_clipboard_agent_too():
     # It used to be installed only by the packer path, while cib told the user that
     # `vm setup` had done it.
     assert "tart-guest-agent" in cib.guest_install_script("pw")
-    assert "--install-daemon=launchd" in cib.guest_install_script("pw")
+    assert cib.AGENT_PLIST_PATH in cib.guest_install_script("pw")
     assert cib.GUEST_AGENT_VERSION in cib.guest_install_script("pw")
 
 
@@ -1511,7 +1577,8 @@ def test_the_hosts_layout_reaches_the_patcher(credentials, monkeypatch, tmp_path
         cib.subprocess,
         "run",
         lambda cmd, **kw: (
-            (None if "-n" in cmd else seen.update(cmd=cmd)) or subprocess.CompletedProcess(cmd, 0)
+            (seen.update(cmd=cmd) if any("cibpatch" in str(c) for c in cmd) else None)
+            or subprocess.CompletedProcess(cmd, 0)
         ),
     )
     cib._prepare_guest(cib.VmConfig(), "pw")
@@ -1691,7 +1758,9 @@ def test_the_patcher_passes_the_layout_it_was_given(monkeypatch):
 
     seen = {}
     typed = "on-stdin-not-argv"
-    monkeypatch.setattr(cibpatch, "prepare", lambda d, a, k: seen.update(disk=d, account=a, kb=k))
+    monkeypatch.setattr(
+        cibpatch, "prepare", lambda d, a, k, ks: seen.update(disk=d, account=a, kb=k, keys=ks)
+    )
     monkeypatch.setattr(cibpatch.sys, "stdin", io.StringIO(typed + "\n"))
     cibpatch.main(
         [
@@ -1714,7 +1783,7 @@ def test_the_patcher_defaults_to_us_when_it_is_told_no_layout(monkeypatch):
     import io
 
     seen = {}
-    monkeypatch.setattr(cibpatch, "prepare", lambda d, a, k: seen.update(kb=k))
+    monkeypatch.setattr(cibpatch, "prepare", lambda d, a, k, ks: seen.update(kb=k))
     monkeypatch.setattr(cibpatch.sys, "stdin", io.StringIO("pw\n"))
     cibpatch.main(["--disk", "/x/disk.img", "--user", "admin"])
     assert seen["kb"] == cibpatch.Keyboard()
@@ -2056,3 +2125,164 @@ def test_the_guest_script_cleans_up_after_itself_even_when_it_fails(tmp_path):
     result = _run_guest_script(cib.guest_install_script("pw"), tmp_path, share_exists=False)
     assert result.returncode != 0, "a missing share is still a failure"
     assert not (tmp_path / ".cache" / "cib").exists()
+
+
+# --- the clipboard agent, which was started by a flag that does not exist -------
+
+
+def test_the_clipboard_agent_is_started_by_launchd_not_an_invented_flag():
+    # `--install-daemon=launchd` was never a real flag; the agent's own README says
+    # it is started from a launchd plist. So it was downloaded, installed, and never
+    # ran — and copy-paste, which the generated password exists for, never worked.
+    script = cib.guest_install_script("pw")
+    assert "--install-daemon" not in script
+    assert "--run-agent" in script, "the session agent is the one that sees the pasteboard"
+    assert "--run-daemon" not in script, "a root daemon cannot reach the pasteboard"
+    assert cib.AGENT_PLIST_PATH in script
+    assert "launchctl bootstrap" in script
+
+
+def test_the_agent_plist_is_a_plist_launchd_will_accept():
+    import plistlib
+
+    record = plistlib.loads(cib.AGENT_PLIST.encode())
+    assert record["Label"] == cib.AGENT_LABEL
+    assert record["ProgramArguments"] == [cib.AGENT_BIN, "--run-agent"]
+    assert record["RunAtLoad"] is True
+    assert record["KeepAlive"] is True
+
+
+def test_the_agent_plist_survives_the_shell_that_writes_it(tmp_path):
+    # It is written with printf from a single-quoted string; an unescaped quote or a
+    # mangled newline would install a plist launchd silently ignores.
+    import plistlib
+
+    script = cib.guest_install_script("pw")
+    end_marker = '> "$CIB_WORK/agent.plist"'
+    end = script.index(end_marker) + len(end_marker)
+    # The first printf in the script belongs to sudo_pw; this is the last one before
+    # the plist is written.
+    start = script.rindex("printf ", 0, end)
+    out = tmp_path / "agent.plist"
+    statement = script[start:end].replace('"$CIB_WORK/agent.plist"', str(out))
+    subprocess.run(["/bin/sh", "-c", statement], check=True, capture_output=True)  # noqa: S603
+    assert plistlib.loads(out.read_bytes())["Label"] == cib.AGENT_LABEL
+
+
+# --- settings that used to fail late, or quietly do the wrong thing ------------
+
+
+def test_an_empty_share_is_refused_rather_than_sharing_the_current_directory(monkeypatch):
+    # "~/Downloads/chrome-vm" expands to the working directory when empty, and the
+    # guest would get whatever happened to be there.
+    monkeypatch.setenv("CIB_VM_SHARE", "  ")
+    with pytest.raises(cib.Failure, match="CIB_VM_SHARE is empty"):
+        cib.VmConfig().check()
+
+
+@pytest.mark.parametrize("value", ["1920", "1920*1200", "big", "1920x"])
+def test_a_malformed_display_is_refused_like_the_box_variant_does(monkeypatch, value):
+    monkeypatch.setenv("CIB_VM_DISPLAY", value)
+    with pytest.raises(cib.Failure, match="CIB_VM_DISPLAY"):
+        cib.VmConfig().check()
+
+
+def test_a_well_formed_display_and_share_pass(monkeypatch):
+    monkeypatch.setenv("CIB_VM_DISPLAY", "1280x800")
+    cib.VmConfig().check()  # must not raise
+
+
+def test_deleting_the_vm_takes_its_password_and_keys_with_it(credentials, monkeypatch):
+    # Left behind, the next build silently reuses them, and 'cib vm password' keeps
+    # printing a password for a guest that no longer exists.
+    cib.guest_password(create=True)
+    cib.ensure_vm_keys()
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+    monkeypatch.setattr(
+        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="", stderr="")
+    )
+    cib.cmd_vm_delete("tart", cib.VmConfig())
+    for gone in (cib.CREDENTIALS, cib.VM_KEY, cib.VM_HOST_KEY, cib.KNOWN_HOSTS):
+        assert not gone.exists(), f"{gone.name} outlived the VM"
+
+
+def test_a_cancelled_delete_keeps_everything(credentials, monkeypatch):
+    cib.guest_password(create=True)
+    monkeypatch.setattr("builtins.input", lambda *a: "n")
+    cib.cmd_vm_delete("tart", cib.VmConfig())
+    assert cib.CREDENTIALS.exists()
+
+
+@pytest.mark.parametrize(
+    "link,expected",
+    [
+        ("/var/db/timezone/zoneinfo/Europe/Zurich", ("Europe/Zurich", "Zurich")),
+        ("/var/db/timezone/zoneinfo/UTC", ("UTC", "UTC")),
+        ("/var/db/timezone/zoneinfo/America/Argentina/Buenos_Aires", None),
+        ("/somewhere/else", ("Europe/Zurich", "Zurich")),
+    ],
+)
+def test_the_host_time_zone_is_read_from_the_localtime_link(monkeypatch, link, expected):
+    # A single-component zone such as UTC is its own city, not a reason to fall back
+    # to the hardcoded default.
+    monkeypatch.setattr(cib.os, "readlink", lambda p: link)
+    result = cib.host_time_zone()
+    assert result == (expected or ("America/Argentina/Buenos_Aires", "Buenos Aires"))
+
+
+def test_the_backup_slot_search_skips_a_dangling_link(tmp_path):
+    # `[ -e ]` is false for a dangling symlink, so ~/Downloads.local pointing at
+    # nothing was treated as a free slot and the mv failed.
+    (tmp_path / "Downloads").mkdir()
+    (tmp_path / "Downloads" / "keep").write_text("x")
+    (tmp_path / "Downloads.local").symlink_to(tmp_path / "gone")
+    result = _run_guest_script(cib.guest_install_script("pw"), tmp_path, share_exists=True)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "Downloads.local.1" / "keep").read_text() == "x"
+    assert (tmp_path / "Downloads").is_symlink()
+
+
+def test_the_guest_gets_the_key_and_the_host_key_it_will_be_checked_against(tmp_path, monkeypatch):
+    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g, **kw: None)
+    root = _guest_volume(tmp_path)
+    keys = cibpatch.Keys(
+        authorized="ssh-ed25519 AAAAPUB cib",
+        host_private="-----BEGIN OPENSSH PRIVATE KEY-----\nx\n",
+        host_public="ssh-ed25519 AAAAHOST cib-guest",
+    )
+    cibpatch.patch(root, cibpatch.Account("admin", "pw"), None, keys)
+    authorized = root / "Users/admin/.ssh/authorized_keys"
+    assert authorized.read_text().strip() == "ssh-ed25519 AAAAPUB cib"
+    assert authorized.stat().st_mode & 0o777 == 0o600
+    assert (root / "Users/admin/.ssh").stat().st_mode & 0o777 == 0o700
+    host = root / "private/etc/ssh/ssh_host_ed25519_key"
+    assert host.read_text() == keys.host_private
+    assert host.stat().st_mode & 0o777 == 0o600, "sshd refuses a world-readable host key"
+    assert host.with_suffix(".pub").read_text().strip() == keys.host_public
+
+
+def test_a_secret_is_never_briefly_world_readable(tmp_path):
+    # Creating the file and chmod-ing it afterwards leaves a window in between.
+    target = tmp_path / "secret"
+    cibpatch.write_private(target, b"x")
+    assert target.stat().st_mode & 0o777 == 0o600
+
+
+def test_a_planted_fifo_does_not_hang_the_root_patcher(tmp_path):
+    # guest_path only refused symlinks. Opening a FIFO blocks until something opens
+    # the other end, which nothing ever does — so the patch hung for ever, as root.
+    # Sockets and device nodes are refused by the same check.
+    root = tmp_path / "volume"
+    (root / "private/etc").mkdir(parents=True)
+    os.mkfifo(root / "private/etc/kcpassword")
+    with pytest.raises(cibpatch.PatchError, match="neither a directory nor a regular file"):
+        cibpatch.guest_path(root, "private/etc/kcpassword")
+
+
+def test_a_fifo_in_the_middle_of_the_path_is_refused_too(tmp_path):
+    root = tmp_path / "volume"
+    (root / "private").mkdir(parents=True)
+    os.mkfifo(root / "private/etc")
+    with pytest.raises(cibpatch.PatchError, match="neither a directory nor a regular file"):
+        cibpatch.guest_path(root, "private/etc/kcpassword")

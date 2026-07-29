@@ -72,6 +72,16 @@ class Account:
 
 
 @dataclass(frozen=True)
+class Keys:
+    """What the guest needs so cib can reach it by key alone: the public key it
+    should trust, and the host key it should present."""
+
+    authorized: str = ""
+    host_private: str = ""
+    host_public: str = ""
+
+
+@dataclass(frozen=True)
 class Keyboard:
     """The layout the guest should type in. Defaults to what macOS installs with,
     so a caller that cannot read the host's layout still gets a working guest."""
@@ -153,6 +163,15 @@ def guest_path(root: Path, relative: str, make_parents: bool = False) -> Path:
                 f"{relative!r} passes through a symlink inside the guest ({current}); "
                 "refusing to write, because it resolves against this host's filesystem"
             )
+        # A symlink is not the only thing that misbehaves when opened as root: a FIFO
+        # planted in the guest blocks open() until something opens the other end,
+        # which nothing ever will, so the patch would hang for ever. Sockets and
+        # device nodes are refused for the same reason.
+        if current.exists() and not (current.is_dir() or current.is_file()):
+            raise PatchError(
+                f"{relative!r} passes through {current}, which is neither a directory "
+                "nor a regular file; refusing to write through it"
+            )
     if make_parents:
         # Safe now: no component above this one is a link, so nothing can be
         # created somewhere else.
@@ -175,6 +194,51 @@ def read_plist(root: Path, relative: str) -> dict:
             return plistlib.load(handle)
     except (plistlib.InvalidFileException, OSError):
         return {}
+
+
+def write_private(path: Path, data: bytes, mode: int = 0o600) -> None:
+    """Write a secret with its permissions set at creation.
+
+    Creating the file and chmod-ing it afterwards leaves it world-readable for the
+    moment in between, which is long enough on a filesystem anything else can see.
+    """
+    path.unlink(missing_ok=True)
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode), "wb") as handle:
+        handle.write(data)
+
+
+def authorise_key(root: Path, account: Account, public_key: str) -> None:
+    """Let cib log in as the account without a password.
+
+    sshd runs 'cib vm setup' non-interactively, and the script it runs carries the
+    account's password for sudo. Sending that password to authenticate as well
+    would mean sending it before the peer is identified at all.
+    """
+    ssh_dir = guest_path(root, f"Users/{account.name}/.ssh", make_parents=True)
+    ssh_dir.mkdir(parents=True, exist_ok=True)
+    ssh_dir.chmod(0o700)
+    write_private(
+        guest_path(root, f"Users/{account.name}/.ssh/authorized_keys"),
+        public_key.strip().encode() + b"\n",
+    )
+
+
+def plant_host_key(root: Path, private_key: str, public_key: str) -> None:
+    """Give the guest the host key cib already expects.
+
+    A host key the guest generates on first boot cannot be verified on the first
+    connection, which is the one that carries the password. Planting it means there
+    is never an unverified connection.
+    """
+    write_private(
+        guest_path(root, "private/etc/ssh/ssh_host_ed25519_key", make_parents=True),
+        private_key.encode(),
+    )
+    write_private(
+        guest_path(root, "private/etc/ssh/ssh_host_ed25519_key.pub"),
+        public_key.strip().encode() + b"\n",
+        mode=0o644,
+    )
 
 
 def add_to_group(root: Path, group: str, account: Account, guid: str) -> None:
@@ -247,8 +311,7 @@ def enable_autologin(root: Path, account: Account) -> None:
     record.pop("AccountInfo", None)
     write_plist(root, relative, record)
     kc = guest_path(root, "private/etc/kcpassword", make_parents=True)
-    kc.write_bytes(kcpassword(account.password))
-    kc.chmod(0o600)
+    write_private(kc, kcpassword(account.password))
 
 
 def enable_remote_login(root: Path) -> None:
@@ -316,7 +379,12 @@ def mark_setup_done(root: Path) -> None:
     marker.chmod(0o644)
 
 
-def patch(root: Path, account: Account, keyboard: Keyboard | None = None) -> None:
+def patch(
+    root: Path,
+    account: Account,
+    keyboard: Keyboard | None = None,
+    keys: Keys | None = None,
+) -> None:
     """Apply everything to a mounted guest Data volume."""
     # This runs as root and builds paths from the account name, so it validates it
     # rather than trusting whoever invoked it.
@@ -334,6 +402,11 @@ def patch(root: Path, account: Account, keyboard: Keyboard | None = None) -> Non
     mark_setup_done(root)
     suppress_setup_assistant(root, account)
     set_keyboard_layout(root, account, keyboard or Keyboard())
+    keys = keys or Keys()
+    if keys.authorized:
+        authorise_key(root, account, keys.authorized)
+    if keys.host_private and keys.host_public:
+        plant_host_key(root, keys.host_private, keys.host_public)
     enable_autologin(root, account)
     enable_remote_login(root)
     # Last, not inside create_account: suppress_setup_assistant creates
@@ -473,7 +546,12 @@ def unmount(volume: str) -> None:
     )
 
 
-def prepare(disk: Path, account: Account, keyboard: Keyboard | None = None) -> None:
+def prepare(
+    disk: Path,
+    account: Account,
+    keyboard: Keyboard | None = None,
+    keys: Keys | None = None,
+) -> None:
     """Attach the guest's disk, patch its Data volume, and put it all back.
 
     Unwound in reverse even when the patch fails, so a half-finished run never
@@ -483,7 +561,7 @@ def prepare(disk: Path, account: Account, keyboard: Keyboard | None = None) -> N
     volume = None
     try:
         volume = data_volume(device)
-        patch(mount(volume), account, keyboard)
+        patch(mount(volume), account, keyboard, keys)
     finally:
         if volume:
             unmount(volume)
@@ -506,15 +584,25 @@ def main(argv: list[str]) -> int:
     # always passes the host's layout.
     parser.add_argument("--keyboard-id", type=int, default=Keyboard.layout_id)
     parser.add_argument("--keyboard-name", default=Keyboard.name)
+    # Paths rather than key material: an argument list is readable by every local
+    # user for as long as the process runs.
+    parser.add_argument("--authorized-key", type=Path)
+    parser.add_argument("--host-key", type=Path)
     args = parser.parse_args(argv)
     password = sys.stdin.readline().rstrip("\n")
     if not password:
         raise SystemExit("error: no password on stdin")
     try:
+        keys = Keys(
+            authorized=args.authorized_key.read_text() if args.authorized_key else "",
+            host_private=args.host_key.read_text() if args.host_key else "",
+            host_public=(args.host_key.with_suffix(".pub").read_text() if args.host_key else ""),
+        )
         prepare(
             args.disk,
             Account(name=args.user, password=password),
             Keyboard(layout_id=args.keyboard_id, name=args.keyboard_name),
+            keys,
         )
     except PatchError as exc:
         raise SystemExit(f"error: {exc}") from None
