@@ -361,7 +361,9 @@ into Google Password Manager (Chrome ships no importer).
 - The web UI is bound to `127.0.0.1` — never exposed to the network.
 - The browser profile lives in a named volume, not in the repo.
 - Settings that are known to kill the container — a password under 6 characters, a
-  resolution above 1920x1200 — are rejected up front instead of failing obscurely.
+  resolution that is not one of the modes KasmVNC ships — are rejected up front
+  instead of failing obscurely. "In range" is not the same as available: 1600x900
+  is smaller than the largest mode and still not one of them.
 - CI runs ruff (lint + format), yamllint, actionlint, markdownlint, a gitleaks
   secret scan, and the unit tests on Python 3.10 and 3.14 with a coverage floor,
   everything Python inside a UBI10 container, plus a smoke job

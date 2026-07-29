@@ -70,8 +70,8 @@ def test_defaults_are_the_values_the_container_needs():
     ("field", "value", "expected"),
     [
         ("password", "abc", "at least 6 characters"),
-        ("resolution", "2560x1600", "exceeds the modes KasmVNC ships"),
-        ("resolution", "1920x1201", "exceeds the modes KasmVNC ships"),
+        ("resolution", "2560x1600", "not one of the modes KasmVNC"),
+        ("resolution", "1920x1201", "not one of the modes KasmVNC"),
         ("resolution", "huge", "must look like"),
         ("resolution", "1920", "must look like"),
     ],
@@ -2057,16 +2057,46 @@ def test_ui_status_reports_the_code_and_none_when_nothing_answers(monkeypatch):
         def __exit__(self, *exc):
             return False
 
-    monkeypatch.setattr(cib.urllib.request, "urlopen", lambda *a, **k: _Response())
+    class _Opener:
+        def __init__(self, answer):
+            self.answer = answer
+
+        def open(self, *a, **k):
+            if isinstance(self.answer, Exception):
+                raise self.answer
+            return self.answer
+
+    monkeypatch.setattr(cib.urllib.request, "build_opener", lambda *h: _Opener(_Response()))
     assert cib.ui_status(cib.Config()) == 200
     assert cib.ui_is_up(cib.Config()) is True
 
-    def refused(*a, **k):
-        raise urllib.error.URLError("connection refused")
-
-    monkeypatch.setattr(cib.urllib.request, "urlopen", refused)
+    monkeypatch.setattr(
+        cib.urllib.request,
+        "build_opener",
+        lambda *h: _Opener(urllib.error.URLError("connection refused")),
+    )
     assert cib.ui_status(cib.Config()) is None
     assert cib.ui_is_up(cib.Config()) is False
+
+
+def test_the_health_check_never_goes_through_a_proxy(monkeypatch):
+    # urlopen honours HTTPS_PROXY. This only talks to localhost, so a proxy could
+    # only break it: a healthy container was reported dead and then rebuilt.
+    handlers = {}
+
+    class _Opener:
+        def open(self, *a, **k):
+            raise urllib.error.URLError("x")
+
+    def fake_build_opener(*given):
+        handlers["given"] = given
+        return _Opener()
+
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:3128")
+    monkeypatch.setattr(cib.urllib.request, "build_opener", fake_build_opener)
+    cib.ui_status(cib.Config())
+    proxy = next(h for h in handlers["given"] if isinstance(h, cib.urllib.request.ProxyHandler))
+    assert proxy.proxies == {}, "an empty proxy map is what bypasses the environment"
 
 
 # --- what round 11 confirmed and the last commit did not close -----------------
@@ -2361,15 +2391,33 @@ def test_the_first_pull_is_visible_instead_of_several_silent_gigabytes(calls, mo
     assert not kwargs.get("capture"), "capturing the pull is what hid it"
 
 
-def test_an_image_already_present_is_not_pulled_again(monkeypatch):
-    monkeypatch.setattr(
-        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="", stderr="")
-    )
+def test_an_image_already_present_in_the_right_architecture_is_not_pulled_again(monkeypatch):
     pulled = []
-    real = cib.run
-    monkeypatch.setattr(cib, "run", lambda e, *a, **k: pulled.append(a[0]) or real(e, *a, **k))
+    monkeypatch.setattr(
+        cib,
+        "run",
+        lambda e, *a, **k: (
+            pulled.append(a[0]) or subprocess.CompletedProcess([], 0, stdout="amd64\n", stderr="")
+        ),
+    )
     cib.ensure_image("podman", cib.Config())
     assert "pull" not in pulled
+
+
+def test_an_image_of_the_wrong_architecture_is_pulled_again_visibly(monkeypatch):
+    # An arm64 copy of the same tag satisfies `image inspect`, and `run --platform
+    # linux/amd64` then pulls the amd64 one anyway — captured, so silently.
+    seen = []
+    monkeypatch.setattr(
+        cib,
+        "run",
+        lambda e, *a, **k: (
+            seen.append((a[0], k.get("capture")))
+            or subprocess.CompletedProcess([], 0, stdout="arm64\n", stderr="")
+        ),
+    )
+    cib.ensure_image("podman", cib.Config())
+    assert ("pull", None) in seen or ("pull", False) in seen
 
 
 def test_a_failed_pull_is_reported(monkeypatch):
@@ -2598,3 +2646,70 @@ def test_secrets_an_older_cib_left_flat_are_moved_not_regenerated(
     cib.migrate_flat_secrets()
     assert (cib.SECRETS / "vm-credentials").read_text() == "old vm-credentials\n"
     assert not (flat / "vm-credentials").exists()
+
+
+def test_the_shell_reports_an_exec_the_engine_refused(monkeypatch):
+    # Checking the container first was not enough: the exec itself can fail, and
+    # its exit code was still thrown away.
+    monkeypatch.setattr(cib, "container_running", lambda *a, **k: True)
+    monkeypatch.setattr(
+        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 125, stdout="", stderr="")
+    )
+    with pytest.raises(cib.Failure, match="could not start a shell"):
+        cib.cmd_shell("podman", cib.Config())
+
+
+def test_a_shell_that_exits_non_zero_is_not_a_cib_failure(monkeypatch):
+    # The user's own shell exiting 1 is their business, not a cib error.
+    monkeypatch.setattr(cib, "container_running", lambda *a, **k: True)
+    monkeypatch.setattr(
+        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="")
+    )
+    cib.cmd_shell("podman", cib.Config())  # must not raise
+
+
+@pytest.mark.parametrize("tty,expected", [(True, "-it"), (False, "-i")])
+def test_a_pty_is_only_asked_for_when_there_is_a_terminal(monkeypatch, tty, expected):
+    # podman blocks for ever allocating a pty for a stdin that is a pipe, so
+    # `cib box shell` from a script or CI hung instead of failing.
+    monkeypatch.setattr(cib, "container_running", lambda *a, **k: True)
+    monkeypatch.setattr(cib.sys.stdin, "isatty", lambda: tty, raising=False)
+    seen = {}
+    monkeypatch.setattr(
+        cib,
+        "run",
+        lambda e, *a, **k: seen.update(args=a) or subprocess.CompletedProcess([], 0),
+    )
+    cib.cmd_shell("podman", cib.Config())
+    assert seen["args"][1] == expected
+
+
+@pytest.mark.parametrize("mode", ["1600x900", "800x600", "1919x1199"])
+def test_a_resolution_kasmvnc_does_not_ship_is_refused_not_merely_bounded(monkeypatch, mode):
+    # In range is not the same as available: 1600x900 is smaller than the largest
+    # mode and still not there, and xrandr then leaves the desktop at 1024x768
+    # while cib warned three times and reported "Ready."
+    monkeypatch.setenv("CIB_RESOLUTION", mode)
+    with pytest.raises(cib.Failure, match="not one of the modes KasmVNC"):
+        cib.Config().check()
+
+
+@pytest.mark.parametrize("mode", ["1920x1200", "1280x800", "1024x768"])
+def test_the_modes_kasmvnc_does_ship_are_accepted(monkeypatch, mode):
+    monkeypatch.setenv("CIB_RESOLUTION", mode)
+    cib.Config().check()  # must not raise
+
+
+def test_the_sdist_carries_everything_its_tests_read():
+    # Shipping tests/ without the files they open means the tests are there and
+    # cannot run, which is the only reason to ship them.
+    # Read as text, not with tomllib: that is 3.11+, and this project supports 3.10.
+    root = Path(cib.__file__).resolve().parent
+    source = (root / "pyproject.toml").read_text()
+    block = re.search(
+        r"\[tool\.hatch\.build\.targets\.sdist\].*?include\s*=\s*\[(.*?)\]", source, re.S
+    )
+    assert block, "the sdist include list is not where it was"
+    included = re.findall(r'"([^"]+)"', block.group(1))
+    for needed in ("scripts", "Formula", "renovate.json", "uv.lock", ".github", "tests"):
+        assert needed in included, f"the tests read {needed}, so the sdist has to carry it"

@@ -30,7 +30,22 @@ dev = ["pytest>=8", "pytest-cov>=6", "ruff>=0.14", "nuitka>=2.5", "patchelf>=0.1
 only-include = ["cib.py", "cibpatch.py", "packer"]
 
 [tool.hatch.build.targets.sdist]
-include = ["cib.py", "cibpatch.py", "packer", "tests", "README.md", "LICENSE"]
+# Everything the tests read, not just the code. Shipping tests/ without the files
+# they open means the tests are there and cannot run, which is the only reason to
+# ship them at all.
+include = [
+  "cib.py",
+  "cibpatch.py",
+  "packer",
+  "tests",
+  "scripts",
+  "Formula",
+  ".github",
+  "renovate.json",
+  "uv.lock",
+  "README.md",
+  "LICENSE",
+]
 
 [tool.ruff]
 line-length = 100
