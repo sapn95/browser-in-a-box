@@ -202,8 +202,9 @@ a login window. That is deterministic — no timing, no OCR, nothing to re-learn
 Apple moves a button.
 
 What gets written: an account with a **generated** password, autologin, Remote
-Login, and **this host's keyboard layout** (so the guest types where your fingers
-already do). Only that one step needs `sudo`.
+Login, cib's SSH key and the guest's host key, and **this host's keyboard layout**
+(so the guest types where your fingers already do). Only that one step needs
+`sudo`.
 
 `cib` never prompts for a password itself, so **cache the credential first**:
 
@@ -231,12 +232,15 @@ Apple Account → iCloud → Passwords & Keychain).
 not come back until the VM shuts down, and Ctrl-C there kills the guest. Run the
 steps after it from a **second terminal**.
 
-`cib vm ssh` asks for the guest account's password. Do not try to remember it —
-`cib vm password` prints it, and you paste it. (`cib vm setup` does not ask: it
-carries the password to the guest itself.)
+Neither `cib vm setup` nor `cib vm ssh` asks you to type anything. `vm create`
+generates an SSH key pair, installs the public half in the guest, and plants the
+guest's own **host key** as well — so the very first connection is verified rather
+than trusted. Everything lives beside the password in
+`~/.config/chrome-in-a-box/`, and `cib vm delete` removes all of it.
 
-The guest has no Touch ID, so every passkey confirmation asks for the account
-password too.
+The guest has no Touch ID, so passkey confirmations do ask for the account
+password. You never type that either — `cib vm password` prints it, and you paste
+it.
 Clipboard sharing between host and guest is not a flag: it needs
 [tart-guest-agent](https://github.com/cirruslabs/tart-guest-agent) running inside
 the guest, which `vm setup` installs.

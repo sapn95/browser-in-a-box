@@ -25,7 +25,9 @@ cib = "cib:main"
 dev = ["pytest>=8", "pytest-cov>=6", "ruff>=0.14", "nuitka>=2.5", "patchelf>=0.17"]
 
 [tool.hatch.build.targets.wheel]
-only-include = ["cib.py", "cibpatch.py"]
+# packer/ too: cib tells the user CIB_VM_PACKER=1 is available, and a wheel that
+# ships the patcher but not the template makes that advice a dead end.
+only-include = ["cib.py", "cibpatch.py", "packer"]
 
 [tool.hatch.build.targets.sdist]
 include = ["cib.py", "cibpatch.py", "packer", "tests", "README.md", "LICENSE"]
