@@ -53,7 +53,22 @@ DEFAULT_IMAGE = "docker.io/kasmweb/chrome:1.19.0"
 # KasmVNC ships fixed modes only up to this size; anything larger silently falls
 # back to 1024x768, and this image ignores VNC_RESOLUTION entirely, so the mode is
 # applied with xrandr after boot.
-MAX_WIDTH, MAX_HEIGHT = 1920, 1200
+# The modes this image's Xvnc actually offers. "In range" is not the same as
+# available: 1600x900 is smaller than the largest and still not there, and xrandr
+# then leaves the desktop at 1024x768 while cib reported success.
+KASM_MODES = (
+    (1024, 768),
+    (1280, 720),
+    (1280, 800),
+    (1280, 1024),
+    (1366, 768),
+    (1440, 900),
+    (1600, 1200),
+    (1680, 1050),
+    (1920, 1080),
+    (1920, 1200),
+)
+MAX_WIDTH, MAX_HEIGHT = max(w for w, _ in KASM_MODES), max(h for _, h in KASM_MODES)
 # KasmVNC refuses to start with a shorter password, even though the login prompt
 # is disabled with DisableBasicAuth.
 MIN_PASSWORD_LEN = 6
@@ -147,10 +162,13 @@ class Config:
             ) from None
         if width < 1 or height < 1:
             raise Failure(f"CIB_RESOLUTION must be positive, got {self.resolution}")
-        if width > MAX_WIDTH or height > MAX_HEIGHT:
+        if (width, height) not in KASM_MODES:
+            available = ", ".join(f"{w}x{h}" for w, h in KASM_MODES)
             raise Failure(
-                f"CIB_RESOLUTION {self.resolution} exceeds the modes KasmVNC ships "
-                f"(max {MAX_WIDTH}x{MAX_HEIGHT}); larger values silently fall back to 1024x768"
+                f"CIB_RESOLUTION {self.resolution} is not one of the modes KasmVNC "
+                f"ships, so xrandr would refuse it and the desktop would stay at "
+                f"1024x768. Available: {available}. Leave it unset to follow the "
+                "browser window instead, which is what most people want."
             )
 
 
@@ -200,11 +218,15 @@ def ui_status(cfg: Config) -> int | None:
     context = ssl.create_default_context()
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
+    # urlopen honours HTTPS_PROXY. This only ever talks to localhost, so a proxy in
+    # the environment could only ever break it — a healthy container was reported
+    # dead, and `box up` then tore it down and built it again.
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context)
+    )
     try:
         # Fixed https://localhost URL, never user input.
-        with urllib.request.urlopen(
-            f"https://localhost:{cfg.port}/", timeout=5, context=context
-        ) as response:
+        with opener.open(f"https://localhost:{cfg.port}/", timeout=5) as response:
             return int(response.status)
     except urllib.error.HTTPError as exc:
         return int(exc.code)
@@ -270,7 +292,13 @@ def ensure_image(engine: str, cfg: Config) -> None:
     also swallowed the entire first pull. cib printed one line and then nothing at
     all for several gigabytes, which reads as a hang.
     """
-    if run(engine, "image", "inspect", cfg.image, check=False, capture=True).returncode == 0:
+    # The architecture is part of what cib needs: an arm64 copy of the same tag
+    # satisfies `image inspect` and then `run --platform linux/amd64` pulls the
+    # amd64 one anyway — silently, because that pull is captured.
+    local = run(
+        engine, "image", "inspect", "-f", "{{.Architecture}}", cfg.image, check=False, capture=True
+    )
+    if local.returncode == 0 and local.stdout.strip() == "amd64":
         return
     print(f"Pulling {cfg.image} — several GB, once ...")
     result = run(engine, "pull", "--platform", "linux/amd64", cfg.image, check=False)
@@ -394,7 +422,17 @@ def cmd_shell(engine: str, cfg: Config) -> None:
     # attached` printed the refusal and then "attached".
     if not container_running(engine, cfg):
         raise Failure(f"{cfg.name!r} is not running — 'cib box up' first")
-    run(engine, "exec", "-it", cfg.name, "bash", check=False)
+    # -t only when there is a terminal to attach: podman blocks for ever allocating
+    # a pty for a stdin that is a pipe, so `cib box shell` from a script hung.
+    flags = "-it" if sys.stdin.isatty() else "-i"
+    result = run(engine, "exec", flags, cfg.name, "bash", check=False)
+    # 125 and 126 are the engine's own "could not start this at all"; anything else
+    # is the shell's exit status, which is the user's business, not a cib failure.
+    if result.returncode in (125, 126):
+        raise Failure(
+            f"could not start a shell in {cfg.name!r} (engine exit {result.returncode}) — "
+            "the container may have stopped, or the image may have no bash"
+        )
 
 
 def cmd_engine(engine: str, cfg: Config) -> None:
