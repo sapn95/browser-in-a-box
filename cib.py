@@ -454,14 +454,25 @@ class VmConfig:
 
 
 PACKER_TEMPLATE = Path(__file__).resolve().parent / "packer" / "chrome-vm.pkr.hcl"
+
+
 # Where the generated guest password is kept, so it survives between commands and
 # can be pasted rather than typed.
-CREDENTIALS = Path.home() / ".config" / "chrome-in-a-box" / "vm-credentials"
+# Per VM name. They used to sit flat in one directory, so a second CIB_VM_NAME
+# reused the first one's password and key — and deleting either took the other's
+# away with it. Read at import because a CLI cannot change its own environment.
+def secrets_dir() -> Path:
+    """Where this VM's password and keys live."""
+    return Path.home() / ".config" / "chrome-in-a-box" / _env("CIB_VM_NAME", "chrome-vm")
+
+
+SECRETS = secrets_dir()
+CREDENTIALS = SECRETS / "vm-credentials"
 # The key cib logs in with, the host key it plants in the guest so it can recognise
 # it again, and the known_hosts holding that host key.
-VM_KEY = CREDENTIALS.parent / "vm-key"
-VM_HOST_KEY = CREDENTIALS.parent / "vm-host-key"
-KNOWN_HOSTS = CREDENTIALS.parent / "vm-known-hosts"
+VM_KEY = SECRETS / "vm-key"
+VM_HOST_KEY = SECRETS / "vm-host-key"
+KNOWN_HOSTS = SECRETS / "vm-known-hosts"
 
 
 PATCHER = Path(__file__).resolve().parent / "cibpatch.py"
@@ -634,6 +645,27 @@ def host_time_zone() -> tuple[str, str]:
     return zone, zone.rsplit("/", 1)[-1].replace("_", " ")
 
 
+def migrate_flat_secrets() -> None:
+    """Move what an older cib left one directory up.
+
+    It kept the password and keys flat under ~/.config/chrome-in-a-box, shared by
+    every VM name. Moving rather than regenerating: a regenerated key would lock
+    cib out of a guest that is already built and already trusts the old one.
+    """
+    for current in (
+        CREDENTIALS,
+        VM_KEY,
+        VM_KEY.with_suffix(".pub"),
+        VM_HOST_KEY,
+        VM_HOST_KEY.with_suffix(".pub"),
+        KNOWN_HOSTS,
+    ):
+        old = SECRETS.parent / current.name
+        if old.exists() and not current.exists():
+            current.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            old.replace(current)
+
+
 def _keygen(path: Path, comment: str) -> None:
     keygen = shutil.which("ssh-keygen")
     if not keygen:
@@ -659,6 +691,7 @@ def ensure_vm_keys() -> None:
     connection cannot be checked on that connection. Planting it means the very
     first connection is verified.
     """
+    migrate_flat_secrets()
     if not (VM_KEY.exists() and VM_KEY.with_suffix(".pub").exists()):
         _keygen(VM_KEY, "cib")
     if not (VM_HOST_KEY.exists() and VM_HOST_KEY.with_suffix(".pub").exists()):
@@ -672,6 +705,7 @@ def ensure_vm_keys() -> None:
 def guest_password(create: bool = False) -> str:
     """The guest account password. Generated once, then remembered — you paste it,
     you never type it."""
+    migrate_flat_secrets()
     if CREDENTIALS.exists():
         saved = CREDENTIALS.read_text().strip()
         if saved:
@@ -761,13 +795,11 @@ def _create_offline(tart: str, vm: VmConfig) -> None:
     never shown. Deterministic, unlike typing into it."""
     password = guest_password(create=True)
     firstboot = _env_int("CIB_VM_FIRSTBOOT_SECS", "180", 0)  # before anything is built
-    # Checked before the multi-gigabyte download rather than after it: the patch
-    # step is the only part that needs root, but finding that out at the end costs
-    # the entire build.
-    # Both checked before the multi-gigabyte download rather than after it: the
-    # patch step is the only part that needs either, but finding out at the end
-    # costs the entire build and there is no way to finish it afterwards.
+    # All three checked before the multi-gigabyte download rather than after it: the
+    # patch step is the only part that needs any of them, and finding that out at
+    # the end costs the entire build.
     find_patcher()
+    find_guest_python()
     if not sudo_is_cached():
         raise Failure(f"{SUDO_MESSAGE}\nNothing has been downloaded yet.")
     # The credential is held open across the build: sudo forgets it after about
@@ -906,14 +938,23 @@ def _create_with_packer(tart: str, vm: VmConfig) -> None:
     password = guest_password(create=True)
     if not PACKER_TEMPLATE.exists():
         raise Failure(
-            f"the build template is missing at {PACKER_TEMPLATE} — 'vm create' needs a "
-            "checkout of the repository; the installed command cannot build a VM"
+            f"the build template is missing at {PACKER_TEMPLATE}. It ships with every "
+            "install, so this is a broken one — reinstall cib, or run cib.py from a "
+            "checkout. The default path needs no template at all: unset CIB_VM_PACKER."
         )
     print(f"Building {vm.name!r} from a fresh macOS image, unattended.")
     run(packer, "init", str(PACKER_TEMPLATE))
-    print("This takes a while: it installs macOS, drives Setup Assistant and adds Chrome.")
+    print("This takes a while: it installs macOS and drives Setup Assistant.")
+    # The packer path never generated these, so the 'cib vm setup' it tells you to
+    # run next could never connect to what it had just built.
+    ensure_vm_keys()
     layout_id, layout_name = host_keyboard_layout()
     zone, city = host_time_zone()
+    key_env = {
+        "PKR_VAR_authorized_key": VM_KEY.with_suffix(".pub").read_text().strip(),
+        "PKR_VAR_host_private_key": VM_HOST_KEY.read_text(),
+        "PKR_VAR_host_public_key": VM_HOST_KEY.with_suffix(".pub").read_text().strip(),
+    }
     # Built from a fresh installer on purpose: Apple only grants a VM an Apple
     # Account identity when it was created from a macOS 15+ one.
     # The password goes in the environment, not argv: a CalledProcessError prints the
@@ -946,7 +987,9 @@ def _create_with_packer(tart: str, vm: VmConfig) -> None:
         "-var",
         f"from_ipsw={vm.ipsw}",
         str(PACKER_TEMPLATE),
-        env={**os.environ, "PKR_VAR_password": password},
+        # Key material by environment, not argv, for the same reason as the
+        # password: argv is readable by every local user for the whole build.
+        env={**os.environ, "PKR_VAR_password": password, **key_env},
     )
     run(tart, "set", vm.name, "--display", vm.normalised_display, check=False)
     print()
@@ -1146,6 +1189,12 @@ def ssh_options() -> list[str]:
         "IdentitiesOnly=yes",
         "-o",
         "PasswordAuthentication=no",
+        # PasswordAuthentication alone does not stop a prompt: sshd offers the same
+        # password through keyboard-interactive, which is a separate method.
+        "-o",
+        "KbdInteractiveAuthentication=no",
+        "-o",
+        "NumberOfPasswordPrompts=0",
         "-o",
         "StrictHostKeyChecking=yes",
         "-o",
@@ -1268,6 +1317,13 @@ def cmd_vm_delete(tart: str, vm: VmConfig) -> None:
         print("Cancelled.")
         return
     result = run(tart, "delete", vm.name, check=False, capture=True)
+    if result.returncode != 0:
+        # Only on success. A delete that failed leaves the guest where it was, and
+        # taking its key and password away would lock cib out of a live VM.
+        raise Failure(
+            f"could not delete {vm.name!r}: {(result.stderr or result.stdout).strip()}\n"
+            "Its password and keys are kept, so nothing is locked out."
+        )
     # The password and the keys belong to the VM that is gone. Left behind, the next
     # build silently reuses them — and 'cib vm password' keeps printing a password
     # for a guest that no longer exists.
@@ -1280,7 +1336,7 @@ def cmd_vm_delete(tart: str, vm: VmConfig) -> None:
         KNOWN_HOSTS,
     ):
         leftover.unlink(missing_ok=True)
-    print("Deleted." if result.returncode == 0 else f"Nothing to delete ({vm.name!r} not found).")
+    print("Deleted.")
 
 
 VM_ACTIONS = {

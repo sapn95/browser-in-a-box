@@ -608,6 +608,7 @@ def test_an_interactive_shell_keeps_this_terminals_stdin(credentials, monkeypatc
 def credentials(tmp_path, monkeypatch):
     # All four live together under ~/.config/chrome-in-a-box and are module-level,
     # so redirecting Path.home() afterwards would not move them.
+    monkeypatch.setattr(cib, "SECRETS", tmp_path)
     monkeypatch.setattr(cib, "CREDENTIALS", tmp_path / "vm-credentials")
     monkeypatch.setattr(cib, "VM_KEY", tmp_path / "vm-key")
     monkeypatch.setattr(cib, "VM_HOST_KEY", tmp_path / "vm-host-key")
@@ -913,18 +914,44 @@ def test_the_password_never_reaches_the_argument_list(calls, credentials, monkey
     assert credentials.read_text().strip() not in flat(calls)
 
 
-def test_the_template_installs_the_clipboard_agent():
-    # Copy and paste between host and guest is not a tart flag: it needs
-    # tart-guest-agent running inside the guest, and the password is meant to be
-    # pasted rather than typed.
-    template = (Path(__file__).resolve().parents[1] / cib.PACKER_TEMPLATE).read_text()
-    assert "tart-guest-agent" in template
-    assert "--install-daemon=launchd" in template
-    # Pinned, not "latest": a build should produce the same guest twice, and
-    # renovate moves the pin.
-    assert "releases/latest/download" not in template
-    assert "guest_agent_version" in template
-    assert "test -x /usr/local/bin/tart-guest-agent" in template
+def test_the_template_no_longer_carries_a_second_copy_of_the_install():
+    # It kept `--install-daemon=launchd` for three rounds after the guest script's
+    # copy was fixed, because there were two copies. Chrome and the agent are now
+    # installed in one place, by 'cib vm setup', for both build paths.
+    template = (Path(cib.__file__).resolve().parent / "packer" / "chrome-vm.pkr.hcl").read_text()
+    assert "--install-daemon" not in template
+    assert "googlechrome.dmg" not in template
+    assert "tart-guest-agent" not in template
+
+
+def test_the_template_installs_the_key_cib_will_connect_with():
+    template = (Path(cib.__file__).resolve().parent / "packer" / "chrome-vm.pkr.hcl").read_text()
+    assert "authorized_keys" in template
+    assert "ssh_host_ed25519_key" in template
+    for name in ("authorized_key", "host_private_key", "host_public_key"):
+        assert f'variable "{name}"' in template, f"{name} is used but never declared"
+
+
+def test_the_packer_path_generates_and_passes_the_keys(calls, credentials, monkeypatch):
+    # Without them the `cib vm setup` the build recommends could never connect.
+    monkeypatch.setenv("CIB_VM_PACKER", "1")
+    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(cib, "find_packer", lambda: "/usr/bin/packer")
+    seen = {}
+    monkeypatch.setattr(
+        cib,
+        "run",
+        lambda engine, *a, **k: (
+            seen.update(env=k.get("env") or seen.get("env"))
+            or subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        ),
+    )
+    cib.cmd_vm_create("tart", cib.VmConfig())
+    env = seen["env"]
+    assert env["PKR_VAR_authorized_key"].startswith("ssh-ed25519 ")
+    assert env["PKR_VAR_host_private_key"]
+    assert env["PKR_VAR_host_public_key"].startswith("ssh-ed25519 ")
+    assert cib.KNOWN_HOSTS.exists(), "the host key has to be pinned for cib to use it"
 
 
 def test_an_already_running_vm_is_not_a_networking_failure(calls, monkeypatch):
@@ -1361,6 +1388,7 @@ def test_a_first_boot_that_never_happened_is_not_called_built(
 
     monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
     monkeypatch.setattr(cib, "sudo_is_cached", lambda: True)
+    monkeypatch.setattr(cib, "find_guest_python", lambda: "/usr/bin/python3")
     monkeypatch.setattr(cib.time, "sleep", lambda s: None)
     monkeypatch.setattr(cib.subprocess, "Popen", lambda *a, **k: Died())
     _fake_guest_disk(monkeypatch, tmp_path)
@@ -1608,14 +1636,14 @@ def test_patching_leaves_the_guest_on_the_layout_it_was_told(tmp_path, monkeypat
 # --- pins, managers, and messages that pointed the wrong way -------------------
 
 
-def test_both_tart_guest_agent_pins_move_together():
-    # Each pin is updated by its own Renovate manager. If one stops matching, the
-    # two install paths quietly end up on different agents.
+def test_the_guest_agent_is_pinned_in_exactly_one_place():
+    # It used to be pinned twice, in cib.py and in the packer template, with a test
+    # asserting the two agreed. The template no longer installs the agent at all,
+    # so the twin — and the way it could drift — is gone.
     root = Path(cib.__file__).resolve().parent
     template = (root / "packer" / "chrome-vm.pkr.hcl").read_text()
-    pinned = re.search(r'variable "guest_agent_version".*?default\s*=\s*"([^"]+)"', template, re.S)
-    assert pinned, "the packer template no longer pins a guest agent version"
-    assert pinned.group(1) == cib.GUEST_AGENT_VERSION
+    assert "guest_agent_version" not in template
+    assert re.search(r'^GUEST_AGENT_VERSION = "[\d.]+"$', (root / "cib.py").read_text(), re.M)
 
 
 def test_every_renovate_marker_anywhere_has_a_manager_that_matches_it():
@@ -1689,6 +1717,7 @@ def test_a_guest_that_will_not_stop_is_pointed_at_prepare(calls, credentials, mo
 
     monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
     monkeypatch.setattr(cib, "sudo_is_cached", lambda: True)
+    monkeypatch.setattr(cib, "find_guest_python", lambda: "/usr/bin/python3")
     monkeypatch.setattr(cib.time, "sleep", lambda s: None)
     monkeypatch.setattr(cib.subprocess, "Popen", lambda *a, **k: Stuck())
     with pytest.raises(cib.Failure, match="cib vm prepare"):
@@ -2049,6 +2078,7 @@ def test_a_missing_patcher_is_named_before_the_download_starts(credentials, monk
     calls: list[str] = []
     monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
     monkeypatch.setattr(cib, "sudo_is_cached", lambda: True)
+    monkeypatch.setattr(cib, "find_guest_python", lambda: "/usr/bin/python3")
     monkeypatch.setattr(cib, "PATCHER", tmp_path / "not-shipped" / "cibpatch.py")
     monkeypatch.setattr(cib, "run", lambda *a, **k: calls.append(a) or None)
     with pytest.raises(cib.Failure, match="patcher is missing"):
@@ -2454,3 +2484,117 @@ def test_a_python3_that_cannot_run_is_not_treated_as_an_interpreter(monkeypatch)
 def test_a_working_python3_is_used_as_it_is(monkeypatch):
     monkeypatch.setattr(cib.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess([], 0))
     assert cib.find_guest_python() == "/usr/bin/python3"
+
+
+# --- round 14 and 15 -----------------------------------------------------------
+
+
+def test_a_delete_that_failed_keeps_the_password_and_keys(credentials, monkeypatch):
+    # Wiping them on a failed delete locks cib out of a guest that is still there.
+    cib.guest_password(create=True)
+    cib.ensure_vm_keys()
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+    monkeypatch.setattr(
+        cib,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="VM is running"),
+    )
+    with pytest.raises(cib.Failure, match="nothing is locked out"):
+        cib.cmd_vm_delete("tart", cib.VmConfig())
+    for kept in (cib.CREDENTIALS, cib.VM_KEY, cib.VM_HOST_KEY, cib.KNOWN_HOSTS):
+        assert kept.exists(), f"{kept.name} was destroyed by a delete that did not happen"
+
+
+def test_ssh_refuses_every_way_of_being_asked_for_a_password(credentials):
+    # PasswordAuthentication=no alone leaves keyboard-interactive, which sshd offers
+    # the same password through.
+    cmd = cib.ssh_command(cib.VmConfig(), "192.168.1.50")
+    assert "PasswordAuthentication=no" in cmd
+    assert "KbdInteractiveAuthentication=no" in cmd
+    assert "NumberOfPasswordPrompts=0" in cmd
+
+
+def test_the_interpreter_is_checked_before_the_download_too(credentials, monkeypatch, tmp_path):
+    # The README promises the preflight catches this; it used to run after the build.
+    calls: list = []
+    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(cib, "sudo_is_cached", lambda: True)
+    monkeypatch.setattr(cib, "find_patcher", lambda: tmp_path / "cibpatch.py")
+    monkeypatch.setattr(cib.shutil, "which", lambda name: None)
+    monkeypatch.setattr(cib.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess([], 1))
+    monkeypatch.setattr(cib, "run", lambda *a, **k: calls.append(a) or None)
+    with pytest.raises(cib.Failure, match="xcode-select --install"):
+        cib.cmd_vm_create("tart", cib.VmConfig())
+    assert calls == [], "nothing may be downloaded before the check"
+
+
+def test_preparing_twice_keeps_the_accounts_generated_uid(tmp_path, monkeypatch):
+    # Group membership records the GUID: a fresh one on every prepare leaves admin
+    # and staff pointing at a user that no longer exists under that id.
+    import plistlib
+
+    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g, **kw: None)
+    root = _guest_volume(tmp_path)
+    users = root / "private/var/db/dslocal/nodes/Default/users"
+    groups = root / "private/var/db/dslocal/nodes/Default/groups"
+    cibpatch.patch(root, cibpatch.Account("admin", "pw"))
+    first = plistlib.loads((users / "admin.plist").read_bytes())["generateduid"][0]
+    cibpatch.patch(root, cibpatch.Account("admin", "pw"))
+    assert plistlib.loads((users / "admin.plist").read_bytes())["generateduid"][0] == first
+    members = plistlib.loads((groups / "admin.plist").read_bytes())["groupmembers"]
+    assert members == [first], "the group must still name the account that exists"
+
+
+def test_a_malformed_xml_plist_is_not_a_traceback(tmp_path):
+    # Well-formed-looking XML that is not valid raises ExpatError, which is none of
+    # the exceptions already caught — out of a step running as root.
+    target = tmp_path / "Library" / "Preferences" / "com.apple.loginwindow.plist"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b'<?xml version="1.0"?>\n<plist version="1.0"><dict><key>x')
+    assert cibpatch.read_plist(tmp_path, "Library/Preferences/com.apple.loginwindow.plist") == {}
+
+
+def test_each_vm_name_keeps_its_own_password_and_keys(monkeypatch, tmp_path):
+    # They used to sit flat in one directory, so a second CIB_VM_NAME reused the
+    # first one's key — and deleting either took the other's away.
+    monkeypatch.setattr(cib.Path, "home", classmethod(lambda c: tmp_path))
+    first = cib.secrets_dir()
+    assert first.name == "chrome-vm"
+    monkeypatch.setenv("CIB_VM_NAME", "other")
+    assert cib.secrets_dir() != first
+    assert cib.secrets_dir().name == "other"
+    assert cib.secrets_dir().parent == first.parent
+
+
+def test_secrets_an_older_cib_left_flat_are_moved_not_regenerated(
+    credentials, monkeypatch, tmp_path
+):
+    # Regenerating would lock cib out of a guest that is already built and already
+    # trusts the old key.
+    flat = tmp_path / "flat"
+    flat.mkdir()
+    monkeypatch.setattr(cib, "SECRETS", flat / "chrome-vm")
+    for name in (
+        "vm-credentials",
+        "vm-key",
+        "vm-key.pub",
+        "vm-host-key",
+        "vm-host-key.pub",
+        "vm-known-hosts",
+    ):
+        monkeypatch.setattr(
+            cib,
+            {
+                "vm-credentials": "CREDENTIALS",
+                "vm-key": "VM_KEY",
+                "vm-host-key": "VM_HOST_KEY",
+                "vm-known-hosts": "KNOWN_HOSTS",
+            }.get(name, "_ignored"),
+            cib.SECRETS / name,
+            raising=False,
+        )
+        (flat / name).write_text(f"old {name}\n")
+    cib.migrate_flat_secrets()
+    assert (cib.SECRETS / "vm-credentials").read_text() == "old vm-credentials\n"
+    assert not (flat / "vm-credentials").exists()

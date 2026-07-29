@@ -109,6 +109,29 @@ Setup Assistant reports as "not connected to the Internet". Override with
 > older VM does not get an Apple Account identity — `cib vm create` does it
 > the right way.
 
+## Requirements
+
+- Python 3.10 or newer. Note that macOS ships 3.9, so install one (`brew install
+  python@3.14`) or use the Homebrew/binary install below, which needs no Python to run
+- For the container: **podman or docker**
+- For the macOS VM: **Apple silicon**, [tart](https://tart.run)
+  (`brew install cirruslabs/cli/tart`), ~40 GB free and 8 GB RAM to spare. The
+  build patches the guest's disk, which needs `sudo` once — nothing else does.
+  [Packer](https://packer.io) (`brew install hashicorp/tap/packer`) is **only**
+  needed for the `CIB_VM_PACKER=1` fallback described below
+- On Apple Silicon: **Rosetta**, because Google ships Chrome for Linux on amd64 only.
+  Without it, emulated Chrome is slow and crash-prone. To enable it for podman:
+
+  ```bash
+  mkdir -p ~/.config/containers
+  printf '[machine]\nprovider = "applehv"\nrosetta = true\n' >> ~/.config/containers/containers.conf
+  podman machine stop && podman machine rm -f podman-machine-default
+  podman machine init --cpus 4 --memory 5722 --now
+  ```
+
+  ⚠️ Recreating the machine deletes all its images, containers and volumes. Only do
+  this if it is not shared with other work.
+
 ## Install
 
 Four ways, pick one:
@@ -148,29 +171,6 @@ nothing. It is not a single file: the archive holds
 `cib` next to the shared objects it links against, so keep the folder together.
 Homebrew and the Linux builds handle that for you; the Linux ones are compiled
 inside UBI10 so they link against a supported base.
-
-## Requirements
-
-- Python 3.10 or newer. Note that macOS ships 3.9, so install one (`brew install
-  python@3.14`) or use the Homebrew/binary install below, which need no Python
-- For the container: **podman or docker**
-- For the macOS VM: **Apple silicon**, [tart](https://tart.run)
-  (`brew install cirruslabs/cli/tart`), ~40 GB free and 8 GB RAM to spare. The
-  build patches the guest's disk, which needs `sudo` once — nothing else does.
-  [Packer](https://packer.io) (`brew install hashicorp/tap/packer`) is **only**
-  needed for the `CIB_VM_PACKER=1` fallback described below
-- On Apple Silicon: **Rosetta**, because Google ships Chrome for Linux on amd64 only.
-  Without it, emulated Chrome is slow and crash-prone. To enable it for podman:
-
-  ```bash
-  mkdir -p ~/.config/containers
-  printf '[machine]\nprovider = "applehv"\nrosetta = true\n' >> ~/.config/containers/containers.conf
-  podman machine stop && podman machine rm -f podman-machine-default
-  podman machine init --cpus 4 --memory 5722 --now
-  ```
-
-  ⚠️ Recreating the machine deletes all its images, containers and volumes. Only do
-  this if it is not shared with other work.
 
 ## Commands
 
