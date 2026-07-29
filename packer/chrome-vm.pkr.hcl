@@ -17,7 +17,10 @@
 packer {
   required_plugins {
     tart = {
-      version = ">= 1.16.0"
+      # Pinned, not ">= 1.16.0": packer resolves an open bound to whatever is newest
+      # at build time, and there is no lock file here to record what that was.
+      # renovate: datasource=github-releases depName=cirruslabs/packer-plugin-tart
+      version = "1.21.0"
       source  = "github.com/cirruslabs/tart"
     }
   }

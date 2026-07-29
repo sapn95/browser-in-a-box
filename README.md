@@ -14,7 +14,8 @@ One file, standard library only. Run it straight from a checkout with `./cib.py 
 install it as a `cib` command, or download a self-contained binary — see
 [Install](#install).
 
-No login prompt. Accept the self-signed certificate once and you are in.
+No login prompt. Accept the self-signed certificate the browser warns about and
+you are in.
 
 ## Why
 
@@ -131,6 +132,10 @@ cib box up
 tar -xzf cib-macos-arm64.tar.gz && ./cib-macos-arm64/cib box up
 ```
 
+All four can build the macOS VM: the compiled builds carry `cibpatch.py` and the
+packer template beside the binary, because `cib` spawns them rather than importing
+them and Nuitka would otherwise leave them behind.
+
 Compiled with [Nuitka](https://nuitka.net) — Python translated to C — so it needs no
 interpreter and no dependencies at all. It is not a single file: the archive holds
 `cib` next to the shared objects it links against, so keep the folder together.
@@ -179,7 +184,7 @@ The macOS VM variant (Apple silicon):
 | ----------------- | ----------------------------------------------- |
 | `cib vm create`   | build the VM from a fresh macOS image (large)   |
 | `cib vm prepare`  | redo just the offline preparation of a built VM |
-| `cib vm up`       | start it — a window opens                       |
+| `cib vm up`       | start it — a window opens, and this shell blocks |
 | `cib vm setup`    | install Chrome in the guest over SSH            |
 | `cib vm password` | print the generated guest password              |
 | `cib vm ssh`      | open a shell in the guest                       |
@@ -198,9 +203,18 @@ Apple moves a button.
 
 What gets written: an account with a **generated** password, autologin, Remote
 Login, and **this host's keyboard layout** (so the guest types where your fingers
-already do). Only that one step needs `sudo`, and it is asked for on its own —
-downloading macOS and booting the guest run as you. If it fails, `cib vm prepare`
-redoes just it, without rebuilding the VM.
+already do). Only that one step needs `sudo`.
+
+`cib` never prompts for a password itself, so **cache the credential first**:
+
+```bash
+sudo -v && cib vm create
+```
+
+It is checked before the download starts, not after — and held open across the
+build, because sudo forgets a credential in about five minutes and the build takes
+thirty to sixty. If the patch step still fails, `cib vm prepare` redoes just it,
+without rebuilding the VM.
 
 Chrome is **not** part of `vm create`. `cib vm setup` installs it and the clipboard
 agent over SSH, once the guest is up.
@@ -213,8 +227,16 @@ Two things stay manual, because Apple makes them interactive on purpose: the
 **Apple Account sign-in** and turning on **iCloud Keychain** (System Settings →
 Apple Account → iCloud → Passwords & Keychain).
 
+`cib vm up` runs the guest in the foreground: the window opens and the shell does
+not come back until the VM shuts down, and Ctrl-C there kills the guest. Run the
+steps after it from a **second terminal**.
+
+`cib vm ssh` asks for the guest account's password. Do not try to remember it —
+`cib vm password` prints it, and you paste it. (`cib vm setup` does not ask: it
+carries the password to the guest itself.)
+
 The guest has no Touch ID, so every passkey confirmation asks for the account
-password. You never type it — `cib vm password` prints it and you paste it.
+password too.
 Clipboard sharing between host and guest is not a flag: it needs
 [tart-guest-agent](https://github.com/cirruslabs/tart-guest-agent) running inside
 the guest, which `vm setup` installs.
@@ -226,7 +248,11 @@ instead, which is what you need after changing the image or an environment setti
 Overridable: `CIB_PORT`, `CIB_RESOLUTION`, `CIB_WAIT_SECS`, `CIB_ENGINE`,
 `CIB_IMAGE`, `CIB_NAME`, `CIB_VOLUME`, `CIB_PASSWORD`, `CIB_LOG_TAIL`, `CIB_FORCE`,
 and for the VM `CIB_VM_NAME`, `CIB_VM_CPUS`, `CIB_VM_MEMORY`, `CIB_VM_DISK`,
-`CIB_VM_DISPLAY`, `CIB_VM_NET`, `CIB_VM_INTERFACE`, `CIB_VM_USER`, `CIB_VM_SHARE`.
+`CIB_VM_DISPLAY`, `CIB_VM_NET`, `CIB_VM_INTERFACE`, `CIB_VM_USER`, `CIB_VM_SHARE`,
+`CIB_VM_FIRSTBOOT_SECS` (how long the guest is given to lay down its first-boot
+state before the disk is patched — 180 s, raise it on a slow disk) and
+`CIB_VM_IPSW` (the macOS installer: `latest` by default, or a URL or `.ipsw` path
+to pin the guest to one version).
 
 Downloads in the guest land in `~/Downloads/chrome-vm` on the host: the folder is
 shared into the VM and the guest's own `~/Downloads` is a symlink to it, so every
@@ -312,7 +338,8 @@ into Google Password Manager (Chrome ships no importer).
   the network anyway.
 - **Why HTTPS with a self-signed certificate.** The image generates its own
   certificate at boot and forcing plain HTTP breaks that setup, so the server exits.
-  One certificate accept is the smaller cost.
+  It generates a *new* one on every boot, so the browser asks again after a
+  `CIB_FORCE=1` recreate; accepting it is still the smaller cost.
 - **Why `--network bridge` is passed explicitly.** The image's startup script waits
   for a `veth` interface before it starts the desktop. Rootless podman's default
   network namespace (pasta/slirp4netns) has none, so the container boots forever and

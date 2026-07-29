@@ -129,13 +129,45 @@ def kcpassword(password: str) -> bytes:
     return bytes(b ^ KCPASSWORD_KEY[i % len(KCPASSWORD_KEY)] for i, b in enumerate(data))
 
 
-def write_plist(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def guest_path(root: Path, relative: str, make_parents: bool = False) -> Path:
+    """A path inside the guest volume, with every component proved not to be a link.
+
+    This runs as root on the *host*, and the guest volume is just a directory on the
+    host filesystem: a symlink stored inside the guest resolves against the host. So
+    `ln -s /private/etc "$HOME/Library"` in the guest would redirect a root-owned
+    write here onto the host's /etc.
+
+    Round 7 put a guard on the home directory, but it ran last — four earlier steps
+    had already written through whatever link they were given. This is the guard for
+    all of them, so the class is closed rather than one instance of it.
+
+    Checked once rather than by opening every component with O_NOFOLLOW: the guest is
+    powered off and its disk is attached to this host alone, so no component can be
+    swapped while this runs.
+    """
+    current = root
+    for part in relative.strip("/").split("/"):
+        current = current / part
+        if current.is_symlink():
+            raise PatchError(
+                f"{relative!r} passes through a symlink inside the guest ({current}); "
+                "refusing to write, because it resolves against this host's filesystem"
+            )
+    if make_parents:
+        # Safe now: no component above this one is a link, so nothing can be
+        # created somewhere else.
+        current.parent.mkdir(parents=True, exist_ok=True)
+    return current
+
+
+def write_plist(root: Path, relative: str, data: dict) -> None:
+    path = guest_path(root, relative, make_parents=True)
     with path.open("wb") as handle:
         plistlib.dump(data, handle, fmt=plistlib.FMT_BINARY)
 
 
-def read_plist(path: Path) -> dict:
+def read_plist(root: Path, relative: str) -> dict:
+    path = guest_path(root, relative)
     if not path.exists():
         return {}
     try:
@@ -152,16 +184,16 @@ def add_to_group(root: Path, group: str, account: Account, guid: str) -> None:
     the *user's* GUID. Writing only one leaves the membership half-recorded, and
     macOS believes whichever it consults first.
     """
-    path = root / f"private/var/db/dslocal/nodes/Default/groups/{group}.plist"
-    record = read_plist(path)
+    relative = f"private/var/db/dslocal/nodes/Default/groups/{group}.plist"
+    record = read_plist(root, relative)
     if not record:
-        raise PatchError(f"the guest has no {group} group at {path}")
+        raise PatchError(f"the guest has no {group} group at {root / relative}")
     for key, member in (("users", account.name), ("groupmembers", guid)):
         members = list(record.get(key, []))
         if member not in members:
             members.append(member)
         record[key] = members
-    write_plist(path, record)
+    write_plist(root, relative, record)
 
 
 def suppress_setup_assistant(root: Path, account: Account) -> None:
@@ -178,14 +210,12 @@ def suppress_setup_assistant(root: Path, account: Account) -> None:
         "LastSeenBuddyBuildVersion": "99Z999",
         "LastSeenCloudProductVersion": "99.9",
     }
-    write_plist(root / "Library/Preferences/com.apple.SetupAssistant.plist", seen)
+    write_plist(root, "Library/Preferences/com.apple.SetupAssistant.plist", seen)
     write_plist(
-        root / f"Users/{account.name}/Library/Preferences/com.apple.SetupAssistant.plist", seen
+        root, f"Users/{account.name}/Library/Preferences/com.apple.SetupAssistant.plist", seen
     )
     # Accounts created later inherit the template, and would otherwise see it again.
-    template = root / "Library/User Template/.skipbuddy"
-    template.parent.mkdir(parents=True, exist_ok=True)
-    template.touch()
+    guest_path(root, "Library/User Template/.skipbuddy", make_parents=True).touch()
 
 
 def set_keyboard_layout(root: Path, account: Account, keyboard: Keyboard) -> None:
@@ -201,48 +231,52 @@ def set_keyboard_layout(root: Path, account: Account, keyboard: Keyboard) -> Non
         "KeyboardLayout Name": keyboard.name,
     }
     write_plist(
-        root / f"Users/{account.name}/Library/Preferences/com.apple.HIToolbox.plist",
+        root,
+        f"Users/{account.name}/Library/Preferences/com.apple.HIToolbox.plist",
         {"AppleEnabledInputSources": [source], "AppleSelectedInputSources": [source]},
     )
 
 
 def enable_autologin(root: Path, account: Account) -> None:
-    path = root / "Library/Preferences/com.apple.loginwindow.plist"
-    record = read_plist(path)
+    relative = "Library/Preferences/com.apple.loginwindow.plist"
+    record = read_plist(root, relative)
     record["autoLoginUser"] = account.name
     record["autoLoginUserUID"] = account.uid
     # A FirstLogins entry re-launches Setup Assistant at the next graphical login
     # even with .AppleSetupDone present, so it has to go.
     record.pop("AccountInfo", None)
-    write_plist(path, record)
-    kc = root / "private/etc/kcpassword"
-    kc.parent.mkdir(parents=True, exist_ok=True)
+    write_plist(root, relative, record)
+    kc = guest_path(root, "private/etc/kcpassword", make_parents=True)
     kc.write_bytes(kcpassword(account.password))
     kc.chmod(0o600)
 
 
 def enable_remote_login(root: Path) -> None:
     """Turn on sshd the way launchd records it, so cib can take over by SSH."""
-    path = root / "private/var/db/com.apple.xpc.launchd/disabled.plist"
-    record = read_plist(path)
+    relative = "private/var/db/com.apple.xpc.launchd/disabled.plist"
+    record = read_plist(root, relative)
     record["com.openssh.sshd"] = False
-    write_plist(path, record)
+    write_plist(root, relative, record)
 
 
 def create_account(root: Path, account: Account) -> None:
-    users = root / "private/var/db/dslocal/nodes/Default/users"
+    users = guest_path(root, "private/var/db/dslocal/nodes/Default/users")
     if not users.is_dir():
         raise PatchError(
             f"{users} is missing — is this the guest's Data volume, and has the guest "
             "been booted once so its first-boot state exists?"
         )
     guid = str(uuid.uuid4()).upper()
-    write_plist(users / f"{account.name}.plist", user_record(account, guid))
+    write_plist(
+        root,
+        f"private/var/db/dslocal/nodes/Default/users/{account.name}.plist",
+        user_record(account, guid),
+    )
     for group in ("admin", "staff"):
         add_to_group(root, group, account, guid)
-    home = root / f"Users/{account.name}"
+    home = guest_path(root, f"Users/{account.name}")
     home.mkdir(parents=True, exist_ok=True)
-    (home / ".CFUserTextEncoding").write_text("0:0")
+    guest_path(root, f"Users/{account.name}/.CFUserTextEncoding").write_text("0:0")
 
 
 def own_home(root: Path, account: Account) -> None:
@@ -253,9 +287,7 @@ def own_home(root: Path, account: Account) -> None:
     following one here would hand host paths to the guest: `ln -s / ~` inside the
     guest would otherwise chown the host's root filesystem on the next prepare.
     """
-    home = root / f"Users/{account.name}"
-    if home.is_symlink():
-        raise PatchError(f"{home} is a symlink; refusing to own a link's target")
+    home = guest_path(root, f"Users/{account.name}")
     os.chown(home, account.uid, account.gid, follow_symlinks=False)
     for parent, dirs, files in os.walk(home, followlinks=False):
         for name in dirs + files:
@@ -263,8 +295,7 @@ def own_home(root: Path, account: Account) -> None:
 
 
 def mark_setup_done(root: Path) -> None:
-    marker = root / "private/var/db/.AppleSetupDone"
-    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker = guest_path(root, "private/var/db/.AppleSetupDone", make_parents=True)
     marker.touch()
     os.chown(marker, 0, 0)
     marker.chmod(0o644)
@@ -282,7 +313,7 @@ def patch(root: Path, account: Account, keyboard: Keyboard | None = None) -> Non
             "ownership, so this needs root — re-run with sudo"
         )
     root = Path(root)
-    if not (root / "private/var/db").is_dir():
+    if not guest_path(root, "private/var/db").is_dir():
         raise PatchError(f"{root} does not look like a macOS Data volume")
     create_account(root, account)
     mark_setup_done(root)

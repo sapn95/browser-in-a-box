@@ -30,10 +30,12 @@ import platform
 import plistlib
 import re
 import secrets
+import shlex
 import shutil
 import ssl
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -41,6 +43,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NoReturn
+from xml.parsers.expat import ExpatError
 
 __version__ = "1.4.0"
 
@@ -115,8 +118,12 @@ class Config:
     # fight it, so a fixed size is opt-in via CIB_RESOLUTION.
     resolution: str = field(default_factory=lambda: _env("CIB_RESOLUTION", ""))
     password: str = field(default_factory=lambda: _env("CIB_PASSWORD", "chromeinabox"))
-    wait_secs: int = field(default_factory=lambda: _env_int("CIB_WAIT_SECS", "120", 0))
-    log_tail: str = field(default_factory=lambda: _env("CIB_LOG_TAIL", "200"))
+    # At least 1: the deadline is checked before the first probe, so 0 gives the UI
+    # no chance at all and every `box up` reports a timeout.
+    wait_secs: int = field(default_factory=lambda: _env_int("CIB_WAIT_SECS", "120"))
+    # A number, not a string: it is handed to the engine, which rejects anything
+    # else with its own error rather than ours.
+    log_tail: int = field(default_factory=lambda: _env_int("CIB_LOG_TAIL", "200", 0))
 
     @property
     def url(self) -> str:
@@ -301,7 +308,7 @@ def cmd_up(engine: str, cfg: Config) -> None:
             time.sleep(3)
     print()
     print(f"Ready. Open {cfg.url}")
-    print("No login needed — accept the self-signed certificate once.")
+    print("No login needed — accept the self-signed certificate the browser warns about.")
 
 
 def cmd_down(engine: str, cfg: Config) -> None:
@@ -356,7 +363,7 @@ def cmd_status(engine: str, cfg: Config) -> None:
 
 def cmd_logs(engine: str, cfg: Config, follow: bool = False) -> None:
     # Following by default would hang every non-interactive caller, including CI.
-    extra = ["-f"] if follow else ["--tail", cfg.log_tail]
+    extra = ["-f"] if follow else ["--tail", str(cfg.log_tail)]
     run(engine, "logs", *extra, cfg.name, check=False)
 
 
@@ -395,6 +402,10 @@ class VmConfig:
     # image. A folder under ~/Downloads rather than ~/Downloads itself: the guest
     # gets what it needs and no more.
     share: str = field(default_factory=lambda: _env("CIB_VM_SHARE", "~/Downloads/chrome-vm"))
+    # "latest" is what Apple is shipping today, which is what a new guest usually
+    # wants — but it moves, so a rebuild is not reproducible unless it can be told
+    # which installer to use (a URL or a path to an .ipsw).
+    ipsw: str = field(default_factory=lambda: _env("CIB_VM_IPSW", "latest"))
 
 
 PACKER_TEMPLATE = Path(__file__).resolve().parent / "packer" / "chrome-vm.pkr.hcl"
@@ -417,6 +428,9 @@ def find_packer() -> str:
 # read. 0 is the U.S. layout; HIToolbox identifies layouts by this number.
 DEFAULT_KEYBOARD = (0, "U.S.")
 
+# What the packer template carried before it was told to follow the host.
+DEFAULT_TIME_ZONE = ("Europe/Zurich", "Zurich")
+
 
 def host_keyboard_layout() -> tuple[int, str]:
     """The layout this host types in, to give the guest the same one.
@@ -428,14 +442,26 @@ def host_keyboard_layout() -> tuple[int, str]:
     caches preferences and flushes them on its own schedule, so the file on disk
     can be stale or missing while the setting is live.
     """
+    # Under sudo the euid is root, whose HIToolbox domain is empty; asking as the
+    # invoking user is the difference between the host's layout and a silent U.S.
+    owner = os.environ.get("SUDO_USER")
+    prefix = ["/usr/bin/sudo", "-n", "-u", owner] if os.geteuid() == 0 and owner else []
     result = run(
-        "/usr/bin/defaults", "export", "com.apple.HIToolbox", "-", check=False, capture=True
+        *prefix,
+        "/usr/bin/defaults",
+        "export",
+        "com.apple.HIToolbox",
+        "-",
+        check=False,
+        capture=True,
     )
     if result.returncode != 0:
         return DEFAULT_KEYBOARD
     try:
         prefs = plistlib.loads((result.stdout or "").encode())
-    except (plistlib.InvalidFileException, ValueError):
+    # Well-formed-looking but broken XML raises ExpatError, which is neither of the
+    # other two: a guest layout is not worth crashing a 40-minute build over.
+    except (plistlib.InvalidFileException, ValueError, ExpatError):
         return DEFAULT_KEYBOARD
     # Selected first: enabled can hold several, and only one of them is in use.
     for key in ("AppleSelectedInputSources", "AppleEnabledInputSources"):
@@ -448,6 +474,72 @@ def host_keyboard_layout() -> tuple[int, str]:
             if isinstance(layout_id, int) and isinstance(name, str) and name:
                 return layout_id, name
     return DEFAULT_KEYBOARD
+
+
+SUDO_MESSAGE = (
+    "this step needs sudo and there is no cached credential to use.\n"
+    "Run 'sudo -v', then re-run — cib never prompts for a password itself, so\n"
+    "a credential cached beforehand is the only way in, whatever it is run from."
+)
+
+
+def sudo_is_cached() -> bool:
+    """Whether sudo would run without prompting.
+
+    sudo prompts on its own tty, so it can ask for nothing when cib runs detached;
+    -n turns that into an exit code instead of a hang.
+    """
+    probe = subprocess.run(["/usr/bin/sudo", "-n", "true"], check=False, capture_output=True)
+    return probe.returncode == 0
+
+
+class SudoKeepalive:
+    """Holds the sudo credential open across a build longer than sudo's timeout.
+
+    The patch step is the last thing `vm create` does and the only thing needing
+    root, but sudo forgets a credential after about five minutes and the build
+    before it takes thirty to sixty. So a credential cached at the start had always
+    expired by the time it was used, and every unattended build ended by refusing
+    to do its final step.
+    """
+
+    def __init__(self, interval: int = 60) -> None:
+        self.interval = interval
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> SudoKeepalive:
+        self._thread = threading.Thread(target=self._refresh, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=5)
+
+    def _refresh(self) -> None:
+        while not self._stop.wait(self.interval):
+            # -n, so a lapsed credential is reported by the step that needs it
+            # rather than by a background thread nobody is watching.
+            subprocess.run(["/usr/bin/sudo", "-n", "-v"], check=False, capture_output=True)
+
+
+def host_time_zone() -> tuple[str, str]:
+    """The host's Olson time zone and its city, for the guest to match.
+
+    Read from the /etc/localtime link rather than `systemsetup -gettimezone`, which
+    needs root. Returns the default the packer template already carried when the
+    link says nothing usable.
+    """
+    try:
+        target = os.readlink("/etc/localtime")
+    except OSError:
+        return DEFAULT_TIME_ZONE
+    _, _, zone = target.partition("zoneinfo/")
+    # "Europe/Zurich" and "America/Argentina/Buenos_Aires" both end in the city, and
+    # Setup Assistant's field searches for a city rather than an Olson id.
+    return (zone, zone.rsplit("/", 1)[-1].replace("_", " ")) if "/" in zone else DEFAULT_TIME_ZONE
 
 
 def guest_password(create: bool = False) -> str:
@@ -504,6 +596,9 @@ def vm_exists(tart: str, vm: VmConfig) -> bool:
 
 
 def cmd_vm_create(tart: str, vm: VmConfig) -> None:
+    # Checked here rather than in the patch step at the end: a typo in CIB_VM_USER
+    # used to cost the whole build before anyone mentioned it.
+    validate_vm_user(vm.user)
     if vm_exists(tart, vm):
         # Not necessarily a finished VM: if preparation failed, this exists but still
         # has no account, and 'vm up' would land on Setup Assistant rather than a
@@ -539,53 +634,62 @@ def _create_offline(tart: str, vm: VmConfig) -> None:
     never shown. Deterministic, unlike typing into it."""
     password = guest_password(create=True)
     firstboot = _env_int("CIB_VM_FIRSTBOOT_SECS", "180", 0)  # before anything is built
-    print(f"Creating {vm.name!r} from a fresh macOS image ...")
-    # Sized here, not afterwards: tart create installs macOS onto its default 50 GB
-    # disk, and `tart set --disk-size` only grows the image file — the partitions and
-    # the APFS container stay where the installer put them.
-    run(tart, "create", "--from-ipsw=latest", f"--disk-size={vm.disk}", vm.name)
-    run(
-        tart,
-        "set",
-        vm.name,
-        "--cpu",
-        str(vm.cpus),
-        "--memory",
-        str(vm.memory),
-        "--display",
-        vm.display,
-        check=False,
-    )
-    # The guest has to boot once for its first-boot state to exist; there is nothing
-    # to patch before that.
-    print("Booting once so the guest lays down its first-boot state ...")
-    boot = subprocess.Popen(  # noqa: S603
-        [tart, "run", "--no-graphics", vm.name],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    time.sleep(firstboot)
-    # A boot that never happened would otherwise be patched and called "Built".
-    if boot.poll() is not None:
-        raise Failure(
-            f"the guest's first boot exited immediately (tart exit {boot.returncode})"
-            + (f": {(boot.stderr.read() or '').strip()}" if boot.stderr else "")
+    # Checked before the multi-gigabyte download rather than after it: the patch
+    # step is the only part that needs root, but finding that out at the end costs
+    # the entire build.
+    if not sudo_is_cached():
+        raise Failure(f"{SUDO_MESSAGE}\nNothing has been downloaded yet.")
+    # The credential is held open across the build: sudo forgets it after about
+    # five minutes and the build takes thirty to sixty, so one cached at the start
+    # was always gone by the time the patch step asked for it.
+    with SudoKeepalive():
+        print(f"Creating {vm.name!r} from a fresh macOS image ...")
+        # Sized here, not afterwards: tart create installs macOS onto its default 50 GB
+        # disk, and `tart set --disk-size` only grows the image file — the partitions and
+        # the APFS container stay where the installer put them.
+        run(tart, "create", f"--from-ipsw={vm.ipsw}", f"--disk-size={vm.disk}", vm.name)
+        run(
+            tart,
+            "set",
+            vm.name,
+            "--cpu",
+            str(vm.cpus),
+            "--memory",
+            str(vm.memory),
+            "--display",
+            vm.display,
+            check=False,
         )
-    run(tart, "stop", vm.name, check=False, capture=True)
-    try:
-        boot.wait(timeout=120)
-    except subprocess.TimeoutExpired:
-        # Otherwise the orphan keeps disk.img open, which is what we need next.
-        boot.kill()
-        boot.wait()
-        raise Failure(
-            f"{vm.name!r} did not shut down in time and was killed, so its disk was "
-            "never patched. Check 'cib vm status' shows it stopped, then 'cib vm "
-            "prepare' finishes it without building it again."
-        ) from None
+        # The guest has to boot once for its first-boot state to exist; there is nothing
+        # to patch before that.
+        print("Booting once so the guest lays down its first-boot state ...")
+        boot = subprocess.Popen(  # noqa: S603
+            [tart, "run", "--no-graphics", vm.name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        time.sleep(firstboot)
+        # A boot that never happened would otherwise be patched and called "Built".
+        if boot.poll() is not None:
+            raise Failure(
+                f"the guest's first boot exited immediately (tart exit {boot.returncode})"
+                + (f": {(boot.stderr.read() or '').strip()}" if boot.stderr else "")
+            )
+        run(tart, "stop", vm.name, check=False, capture=True)
+        try:
+            boot.wait(timeout=120)
+        except subprocess.TimeoutExpired:
+            # Otherwise the orphan keeps disk.img open, which is what we need next.
+            boot.kill()
+            boot.wait()
+            raise Failure(
+                f"{vm.name!r} did not shut down in time and was killed, so its disk was "
+                "never patched. Check 'cib vm status' shows it stopped, then 'cib vm "
+                "prepare' finishes it without building it again."
+            ) from None
 
-    _prepare_guest(vm, password)
+        _prepare_guest(vm, password)
     print()
     print(f"Built. The account is {vm.user!r}; 'cib vm password' prints its password.")
     print("Next:")
@@ -629,12 +733,9 @@ def _prepare_guest(vm: VmConfig, password: str) -> None:
         f"Preparing the guest without Setup Assistant, keyboard {layout_name} "
         "(this step needs sudo) ..."
     )
-    probe = subprocess.run(["/usr/bin/sudo", "-n", "true"], check=False, capture_output=True)
-    if probe.returncode != 0:
+    if not sudo_is_cached():
         raise Failure(
-            "this step needs sudo and there is no cached credential to use.\n"
-            "Run 'sudo -v', then re-run — cib never prompts for a password itself, so\n"
-            "a credential cached beforehand is the only way in, whatever it is run from.\n"
+            f"{SUDO_MESSAGE}\n"
             f"The VM {vm.name!r} is kept, so 'cib vm prepare' redoes only this step."
         )
     result = subprocess.run(  # noqa: S603
@@ -674,6 +775,8 @@ def _create_with_packer(tart: str, vm: VmConfig) -> None:
     print(f"Building {vm.name!r} from a fresh macOS image, unattended.")
     run(packer, "init", str(PACKER_TEMPLATE))
     print("This takes a while: it installs macOS, drives Setup Assistant and adds Chrome.")
+    layout_id, layout_name = host_keyboard_layout()
+    zone, city = host_time_zone()
     # Built from a fresh installer on purpose: Apple only grants a VM an Apple
     # Account identity when it was created from a macOS 15+ one.
     # The password goes in the environment, not argv: a CalledProcessError prints the
@@ -692,6 +795,19 @@ def _create_with_packer(tart: str, vm: VmConfig) -> None:
         f"memory_gb={-(-vm.memory // 1024)}",
         "-var",
         f"disk_size_gb={vm.disk}",
+        # Same layout as the offline path: the fallback used to hardcode Swiss
+        # German, so anyone else taking it got a guest typing someone else's
+        # punctuation.
+        "-var",
+        f"keyboard_layout_id={layout_id}",
+        "-var",
+        f"keyboard_layout_name={layout_name}",
+        "-var",
+        f"timezone={zone}",
+        "-var",
+        f"timezone_city={city}",
+        "-var",
+        f"from_ipsw={vm.ipsw}",
         str(PACKER_TEMPLATE),
         env={**os.environ, "PKR_VAR_password": password},
     )
@@ -745,32 +861,70 @@ def cmd_vm_up(tart: str, vm: VmConfig) -> None:
         )
 
 
-# Installs Chrome in the guest. Runs there, not here, so it is a shell script.
-GUEST_INSTALL_CHROME = f"""set -eu
+CHROME_APP = "/Applications/Google Chrome.app"
+CHROME_EXE = f"{CHROME_APP}/Contents/MacOS/Google Chrome"
+
+
+def guest_install_script(password: str) -> str:
+    """Chrome, the clipboard agent and the shared Downloads folder, as a script the
+    guest runs.
+
+    The password is embedded in the script rather than passed as an argument,
+    because the script is fed to ssh on stdin: nothing here reaches either host's
+    process list. sudo is then handed it on a pipe — `sudo -S` reading from the
+    script's own stdin would swallow the rest of the script.
+
+    It is needed at all because sshd runs this non-interactively, so there is no
+    tty for sudo to prompt on and no cached credential to fall back to. `sudo -n`
+    used to be used here and could never succeed, which left the clipboard agent
+    uninstalled on every guest built the default way.
+    """
+    return f"""set -eu
+CIB_SUDO_PW={shlex.quote(password)}
+sudo_pw() {{ printf '%s\\n' "$CIB_SUDO_PW" | sudo -S -p '' "$@"; }}
 # Downloads land on the host: replace the guest's own Downloads folder with the
 # shared one, so every app follows, not just Chrome.
 if [ -d "{GUEST_SHARE}" ]; then
   # Three states, not two: the offline path creates the home itself, so Downloads
   # may not exist at all. -e is false for a dangling link, so a stale one is replaced.
   if [ -e "$HOME/Downloads" ] && [ ! -L "$HOME/Downloads" ]; then
-    rmdir "$HOME/Downloads" 2>/dev/null || mv "$HOME/Downloads" "$HOME/Downloads.local"
+    # A second run must not nest the backup inside the first one, and must not
+    # overwrite whatever the first one saved.
+    backup="$HOME/Downloads.local"
+    n=1
+    while [ -e "$backup" ]; do
+      backup="$HOME/Downloads.local.$n"
+      n=$((n + 1))
+    done
+    rmdir "$HOME/Downloads" 2>/dev/null || {{
+      mv "$HOME/Downloads" "$backup"
+      echo "kept the guest's own Downloads at $backup" >&2
+    }}
   fi
   ln -sfn "{GUEST_SHARE}" "$HOME/Downloads"
 else
   echo "the shared downloads folder is not mounted; start the VM with 'cib vm up'" >&2
   exit 1
 fi
-if [ -d '/Applications/Google Chrome.app' ]; then
+# Tested on the binary, not the bundle: an interrupted `cp -R` leaves a directory
+# that exists but cannot run, and a directory test would call that "installed"
+# for ever.
+if [ -x {shlex.quote(CHROME_EXE)} ]; then
   echo 'Chrome is already installed'
 else
+  rm -rf {shlex.quote(CHROME_APP)} /tmp/chrome-staging
   curl -fsSL -o /tmp/chrome.dmg \
     'https://dl.google.com/chrome/mac/universal/stable/GGRO/googlechrome.dmg'
   hdiutil attach -nobrowse -quiet /tmp/chrome.dmg -mountpoint /tmp/chrome-mount
-  cp -R '/tmp/chrome-mount/Google Chrome.app' /Applications/
+  # Copied aside and moved into place as the last step, so an interruption cannot
+  # leave half a Chrome at the path everything else looks at.
+  mkdir -p /tmp/chrome-staging
+  cp -R '/tmp/chrome-mount/Google Chrome.app' /tmp/chrome-staging/
   hdiutil detach -quiet /tmp/chrome-mount
-  rm -f /tmp/chrome.dmg
+  mv '/tmp/chrome-staging/Google Chrome.app' {shlex.quote(CHROME_APP)}
+  rm -rf /tmp/chrome.dmg /tmp/chrome-staging
 fi
-'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' --version
+{shlex.quote(CHROME_EXE)} --version
 if [ ! -x /usr/local/bin/tart-guest-agent ]; then
   # Host/guest copy-paste needs an agent inside the guest. Without it the generated
   # password would have to be typed by hand at every passkey prompt, which is the
@@ -778,12 +932,15 @@ if [ ! -x /usr/local/bin/tart-guest-agent ]; then
   curl -fsSL -o /tmp/agent.tar.gz \
     "https://github.com/cirruslabs/tart-guest-agent/releases/download/v{GUEST_AGENT_VERSION}/tart-guest-agent-darwin-all.tar.gz"
   tar -xzf /tmp/agent.tar.gz -C /tmp
-  sudo -n install -m 0755 /tmp/tart-guest-agent /usr/local/bin/tart-guest-agent ||
-    echo "could not install the clipboard agent; copy-paste will not work" >&2
-  sudo -n /usr/local/bin/tart-guest-agent --install-daemon=launchd || true
+  sudo_pw install -m 0755 /tmp/tart-guest-agent /usr/local/bin/tart-guest-agent
+  sudo_pw /usr/local/bin/tart-guest-agent --install-daemon=launchd
   rm -f /tmp/agent.tar.gz /tmp/tart-guest-agent
 fi
+# Failing here rather than reporting success: without the agent there is no
+# copy-paste, and the generated password would have to be typed by hand.
+test -x /usr/local/bin/tart-guest-agent
 """
+
 
 SSH_OPTIONS = [
     # The guest is recreated freely and reached by a changing address, so a
@@ -799,18 +956,34 @@ SSH_OPTIONS = [
 ]
 
 
-def vm_ip(tart: str, vm: VmConfig, wait: str = "60") -> str:
+# How long `tart ip` is given to see the guest on the network. A parameter until
+# nothing ever passed one.
+IP_WAIT_SECS = "60"
+
+
+def vm_ip(tart: str, vm: VmConfig) -> str:
     """Resolve the guest's address. Bridged guests get theirs from the real
     network, so the DHCP lease file the default resolver reads is empty."""
     resolver = "arp" if vm.net == "bridged" else "dhcp"
     result = run(
-        tart, "ip", "--resolver", resolver, "--wait", wait, vm.name, check=False, capture=True
+        tart,
+        "ip",
+        "--resolver",
+        resolver,
+        "--wait",
+        IP_WAIT_SECS,
+        vm.name,
+        check=False,
+        capture=True,
     )
     ip = result.stdout.strip()
     if result.returncode != 0 or not ip:
+        # Not "past Setup Assistant": the offline path never shows one, so naming it
+        # here sent people looking for a screen that does not exist.
+        detail = (result.stderr or "").strip()
         raise Failure(
-            f"could not work out the address of {vm.name!r} — is it running and past "
-            "Setup Assistant? ('cib vm up')"
+            f"could not work out the address of {vm.name!r} after {IP_WAIT_SECS}s — is "
+            f"it running? ('cib vm status', then 'cib vm up')" + (f"\n{detail}" if detail else "")
         )
     return ip
 
@@ -829,11 +1002,17 @@ def ssh_command(vm: VmConfig, ip: str, script: str | None = None) -> list[str]:
     ssh = shutil.which("ssh")
     if not ssh:
         raise Failure("ssh is not on PATH")
-    return [ssh, *SSH_OPTIONS, f"{vm.user}@{ip}", *([script] if script else [])]
+    # A script is read on stdin, not passed as an argument: `ssh host "<script>"`
+    # puts the whole thing in this host's process list, and the guest password has
+    # to travel inside it.
+    return [ssh, *SSH_OPTIONS, f"{vm.user}@{ip}", *(["/bin/sh", "-s"] if script else [])]
 
 
 def guest_ssh(vm: VmConfig, ip: str, script: str | None = None) -> int:
-    return subprocess.run(ssh_command(vm, ip, script), check=False).returncode  # noqa: S603
+    # No script means an interactive shell, which needs this terminal's stdin.
+    return subprocess.run(  # noqa: S603
+        ssh_command(vm, ip, script), input=script, text=True, check=False
+    ).returncode
 
 
 def cmd_vm_password(tart: str, vm: VmConfig) -> None:
@@ -860,7 +1039,7 @@ def cmd_vm_setup(tart: str, vm: VmConfig) -> None:
     """Finish the guest from here: everything after Setup Assistant."""
     ip = vm_ip(tart, vm)
     print(f"Installing Chrome on {vm.user}@{ip} ...")
-    if guest_ssh(vm, ip, GUEST_INSTALL_CHROME) != 0:
+    if guest_ssh(vm, ip, guest_install_script(guest_password())) != 0:
         raise Failure(
             f"the guest at {ip} refused the connection or the install failed — turn on "
             "System Settings > General > Sharing > Remote Login in the guest, and set "
@@ -963,7 +1142,8 @@ def build_parser() -> argparse.ArgumentParser:
             "       CIB_FORCE=1 to recreate a running container instead of reusing it\n"
             "  vm:  CIB_VM_NAME, CIB_VM_CPUS, CIB_VM_MEMORY, CIB_VM_DISK, CIB_VM_DISPLAY,\n"
             "       CIB_VM_NET, CIB_VM_INTERFACE, CIB_VM_USER, CIB_VM_SHARE,\n"
-            "       CIB_VM_FIRSTBOOT_SECS, CIB_VM_PACKER=1 to drive Setup Assistant"
+            "       CIB_VM_FIRSTBOOT_SECS, CIB_VM_IPSW to pin the macOS installer,\n"
+            "       CIB_VM_PACKER=1 to drive Setup Assistant instead of patching the disk"
         ),
     )
     parser.add_argument("--version", action="version", version=f"cib {__version__}")

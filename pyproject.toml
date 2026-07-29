@@ -20,7 +20,9 @@ Homepage = "https://github.com/sapn95/chrome-in-a-box"
 cib = "cib:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-cov>=6", "ruff>=0.14", "nuitka>=2.5"]
+# patchelf is here rather than passed to `uv run --with` in CI: it is a build
+# input like the others, and only the lock file records which one was used.
+dev = ["pytest>=8", "pytest-cov>=6", "ruff>=0.14", "nuitka>=2.5", "patchelf>=0.17"]
 
 [tool.hatch.build.targets.wheel]
 only-include = ["cib.py", "cibpatch.py"]

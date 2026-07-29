@@ -44,7 +44,7 @@ jobs:
     # Compiled inside UBI10, so the resulting ELF links against a base that is
     # actually supported, rather than whatever the runner image happens to ship.
     needs: guard
-    container: registry.access.redhat.com/ubi10/ubi:latest
+    container: registry.access.redhat.com/ubi10/ubi:10.1
     strategy:
       fail-fast: false
       matrix:
@@ -81,11 +81,18 @@ jobs:
           fi
       - name: compile with Nuitka
         run: |
-          uv run --python "${PYTHON_VERSION}" --with nuitka --with patchelf \
+          uv run --python "${PYTHON_VERSION}" --group dev \
             python -m nuitka \
             --standalone --remove-output --assume-yes-for-downloads \
+            --include-data-files=cibpatch.py=cibpatch.py \
+            --include-data-dir=packer=packer \
             --output-filename=cib --output-dir=dist cib.py
           ./dist/cib.dist/cib --version
+          # cibpatch.py is spawned as a script, never imported, so Nuitka has no
+          # way to know it is needed. Without it 'cib vm create' builds a whole
+          # guest and only then reports the patcher missing.
+          test -f ./dist/cib.dist/cibpatch.py
+          test -f ./dist/cib.dist/packer/chrome-vm.pkr.hcl
       - name: package
         run: |
           # A top-level directory on purpose: this is a standalone build, ~44 files,
@@ -111,10 +118,16 @@ jobs:
       - uses: astral-sh/setup-uv@v9.0.0
       - name: compile with Nuitka
         run: |
-          uv run --python "${PYTHON_VERSION}" --with nuitka python -m nuitka \
+          uv run --python "${PYTHON_VERSION}" --group dev python -m nuitka \
             --standalone --remove-output --assume-yes-for-downloads \
+            --include-data-files=cibpatch.py=cibpatch.py \
+            --include-data-dir=packer=packer \
             --output-filename=cib --output-dir=dist cib.py
           ./dist/cib.dist/cib --version
+          # This is the build that can actually run 'cib vm', so the two files the
+          # VM path spawns rather than imports have to be verified present.
+          test -f ./dist/cib.dist/cibpatch.py
+          test -f ./dist/cib.dist/packer/chrome-vm.pkr.hcl
       - name: package
         run: |
           # A top-level directory on purpose: this is a standalone build, ~44 files,
