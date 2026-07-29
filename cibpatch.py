@@ -157,7 +157,9 @@ def guest_path(root: Path, relative: str, make_parents: bool = False) -> Path:
     swapped while this runs.
     """
     current = root
-    for part in relative.strip("/").split("/"):
+    parts = relative.strip("/").split("/")
+    leaf = root.joinpath(*parts)
+    for part in parts:
         current = current / part
         if current.is_symlink():
             raise PatchError(
@@ -173,7 +175,20 @@ def guest_path(root: Path, relative: str, make_parents: bool = False) -> Path:
                 f"{relative!r} passes through {current}, which is neither a directory "
                 "nor a regular file; refusing to write through it"
             )
+        # A regular file where a directory has to be — the guest making ~/.ssh a
+        # file, say — otherwise came out as a NotADirectoryError traceback from a
+        # step running as root.
+        if current.is_file() and current != leaf:
+            raise PatchError(
+                f"{relative!r} passes through {current}, which is a file where a "
+                "directory has to be; refusing to write through it"
+            )
     if make_parents:
+        if current.is_dir():
+            raise PatchError(
+                f"{relative!r} is a directory in the guest where a file has to be; "
+                "refusing to write through it"
+            )
         # Safe now: no component above this one is a link, so nothing can be
         # created somewhere else.
         current.parent.mkdir(parents=True, exist_ok=True)

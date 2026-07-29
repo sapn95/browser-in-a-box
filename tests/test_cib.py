@@ -6,6 +6,7 @@ so the actual command construction is asserted instead of being described.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
@@ -798,14 +799,21 @@ def test_setup_points_the_guest_downloads_at_the_share():
 # sudo that actually runs what it is given, so the script's own sudo path is
 # exercised rather than stubbed out. A stub returning 0 hid the bug where the
 # clipboard agent was installed by a `sudo -n` that could never succeed.
+# sudo as sshd actually presents it: no tty, no cached credential. -S reads a
+# password from stdin and works; -n refuses, exactly as the real one does. A fake
+# that stripped -n could not notice a regression to the flag that never worked.
 _FAKE_SUDO = """#!/bin/sh
+got_stdin=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    -S|-n) shift ;;
+    -S) got_stdin=1; shift ;;
+    -n) echo "sudo: a password is required" >&2; exit 1 ;;
     -p) shift 2 ;;
     *) break ;;
   esac
 done
+[ -n "$got_stdin" ] || { echo "sudo: no tty present" >&2; exit 1; }
+read -r _pw || { echo "sudo: no password on stdin" >&2; exit 1; }
 exec "$@"
 """
 
@@ -2792,3 +2800,129 @@ def test_the_share_the_guest_looks_for_is_the_one_tart_mounts(calls, credentials
     assert f"/Volumes/My Shared Files/{name}" == cib.GUEST_SHARE, (
         "the guest looks for the share under the name tart was told to use"
     )
+
+
+# --- what the mutation pass found the suite still did not watch ----------------
+
+
+def test_a_complete_patch_writes_every_marker_it_documents(tmp_path, monkeypatch):
+    # Each of these had a test calling the function directly, so deleting the CALL
+    # from patch() left the suite green — and the guest boots into the very Setup
+    # Assistant the offline path exists to avoid, or with sshd still disabled.
+    import plistlib
+
+    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g, **kw: None)
+    root = _guest_volume(tmp_path)
+    keys = cibpatch.Keys(
+        authorized="ssh-ed25519 AAAAPUB cib",
+        host_private="KEY\n",
+        host_public="ssh-ed25519 AAAAHOST g",
+    )
+    cibpatch.patch(
+        root, cibpatch.Account("admin", "pw"), cibpatch.Keyboard(19, "Swiss German"), keys
+    )
+
+    assert (root / "private/var/db/.AppleSetupDone").exists(), "the system assistant returns"
+    assert (root / "Library/User Template/.skipbuddy").exists(), "later accounts see it again"
+    for scope in ("Library/Preferences", "Users/admin/Library/Preferences"):
+        seen = plistlib.loads((root / scope / "com.apple.SetupAssistant.plist").read_bytes())
+        assert seen["DidSeeCloudSetup"] is True, f"{scope}: the per-user assistant returns"
+        assert seen["DidSeePrivacy"] is True
+    launchd = plistlib.loads(
+        (root / "private/var/db/com.apple.xpc.launchd/disabled.plist").read_bytes()
+    )
+    assert launchd["com.openssh.sshd"] is False, "without this cib can never reach the guest"
+    login = plistlib.loads((root / "Library/Preferences/com.apple.loginwindow.plist").read_bytes())
+    assert login["autoLoginUser"] == "admin"
+    assert (root / "private/etc/kcpassword").read_bytes() == cibpatch.kcpassword("pw")
+    layout = plistlib.loads(
+        (root / "Users/admin/Library/Preferences/com.apple.HIToolbox.plist").read_bytes()
+    )
+    assert layout["AppleSelectedInputSources"][0]["KeyboardLayout ID"] == 19
+    assert (root / "Users/admin/.ssh/authorized_keys").read_text().strip() == keys.authorized
+    assert (root / "private/etc/ssh/ssh_host_ed25519_key").read_text() == keys.host_private
+    assert plistlib.loads(
+        (root / "private/var/db/dslocal/nodes/Default/users/admin.plist").read_bytes()
+    )["uid"] == ["501"]
+
+
+def test_up_pulls_the_image_before_it_runs_the_container(monkeypatch):
+    # Deleting the ensure_image call puts the pull back inside the captured
+    # `run -d`, which is the several silent gigabytes round 13 reported as a hang.
+    order: list[str] = []
+    monkeypatch.setattr(cib, "container_running", lambda *a, **k: False)
+    monkeypatch.setattr(cib, "ensure_image", lambda e, c: order.append("pull"))
+    monkeypatch.setattr(cib, "wait_for_ui", lambda e, c: None)
+    monkeypatch.setattr(cib, "ensure_desktop", lambda e, c: True)
+    monkeypatch.setattr(
+        cib,
+        "run",
+        lambda e, *a, **k: order.append(a[0]) or subprocess.CompletedProcess([], 0, stdout=""),
+    )
+    cib.cmd_up("podman", cib.Config())
+    assert order.index("pull") < order.index("run"), "the pull has to happen outside `run -d`"
+
+
+def test_the_password_verifier_matches_a_known_answer(monkeypatch):
+    # Swapping the password and the salt, or reordering the PBKDF2 arguments, still
+    # produces a plausible-looking verifier — one macOS will never match, so the
+    # account exists and refuses its own password for ever.
+    monkeypatch.setattr(cibpatch.secrets, "token_bytes", lambda n: bytes(range(n)))
+    import plistlib
+
+    entry = plistlib.loads(cibpatch.shadow_hash_data("hunter2"))["SALTED-SHA512-PBKDF2"]
+    expected = hashlib.pbkdf2_hmac("sha512", b"hunter2", bytes(range(32)), 50_000, 128)
+    assert entry["entropy"] == expected
+    assert entry["salt"] == bytes(range(32))
+
+
+def test_the_sudo_probe_can_never_block_on_a_prompt(monkeypatch):
+    # Without -n the probe whose docstring promises an exit code instead of a hang
+    # waits for a password cib says it will never ask for.
+    seen = {}
+    monkeypatch.setattr(
+        cib.subprocess,
+        "run",
+        lambda cmd, **kw: seen.update(cmd=cmd) or subprocess.CompletedProcess(cmd, 0),
+    )
+    assert cib.sudo_is_cached() is True
+    assert "-n" in seen["cmd"]
+
+
+def test_the_keepalive_refreshes_without_prompting(monkeypatch):
+    # sudo forgets a credential in about five minutes and the build takes thirty to
+    # sixty; without this the last step of every unattended build was refused.
+    seen: list[list[str]] = []
+    monkeypatch.setattr(
+        cib.subprocess,
+        "run",
+        lambda cmd, **kw: seen.append(cmd) or subprocess.CompletedProcess(cmd, 0),
+    )
+    keepalive = cib.SudoKeepalive(interval=0.01)
+    with keepalive:
+        time.sleep(0.15)
+    assert seen, "the credential was never refreshed"
+    assert all(cmd[:3] == ["/usr/bin/sudo", "-n", "-v"] for cmd in seen)
+
+
+@pytest.mark.parametrize(
+    "planted,relative",
+    [
+        ("Users/admin/.ssh", "Users/admin/.ssh/authorized_keys"),
+        ("private/etc", "private/etc/kcpassword"),
+    ],
+)
+def test_a_file_where_a_directory_belongs_is_a_message_not_a_traceback(tmp_path, planted, relative):
+    root = tmp_path / "volume"
+    (root / planted).parent.mkdir(parents=True)
+    (root / planted).write_text("not a directory")
+    with pytest.raises(cibpatch.PatchError, match="file where a directory has to be"):
+        cibpatch.guest_path(root, relative, make_parents=True)
+
+
+def test_a_directory_where_a_file_belongs_is_a_message_too(tmp_path):
+    root = tmp_path / "volume"
+    (root / "private/etc/kcpassword").mkdir(parents=True)
+    with pytest.raises(cibpatch.PatchError, match="directory in the guest where a file"):
+        cibpatch.guest_path(root, "private/etc/kcpassword", make_parents=True)
