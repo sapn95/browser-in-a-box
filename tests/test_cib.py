@@ -2116,7 +2116,13 @@ def test_the_guest_script_keeps_its_scratch_space_out_of_tmp():
     # Spelled this way so the assertion itself is not a hardcoded temp path.
     assert not re.search(r"/tm[p]/", body)
     assert 'CIB_WORK="$HOME/.cache/cib"' in body
-    assert "trap 'rm -rf \"$CIB_WORK\"' EXIT" in body, "the scratch space must be cleaned up"
+    assert "trap cleanup EXIT" in body, "the scratch space must be cleaned up"
+    # The detach has to come before the rm: rm -rf over a mounted DMG recurses into
+    # a read-only volume, fails, and leaves the image attached — so the next run
+    # aborts here instead of installing anything.
+    opened = body.index("cleanup() {")
+    cleanup = body[opened : body.index("}", opened)]
+    assert cleanup.index("hdiutil detach") < cleanup.index("rm -rf")
 
 
 def test_the_guest_script_cleans_up_after_itself_even_when_it_fails(tmp_path):
@@ -2368,3 +2374,83 @@ def test_an_account_the_guest_already_has_is_not_overwritten(tmp_path, monkeypat
     with pytest.raises(cibpatch.PatchError, match="already has an account called 'root'"):
         cibpatch.patch(root, cibpatch.Account("root", "pw"))
     assert plistlib.loads((users / "root.plist").read_bytes())["uid"] == ["0"]
+
+
+# --- round 12's remainder ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "mount_output,expected",
+    [
+        ("/dev/disk9s1 on /Volumes/Data (apfs, local, journaled)\n", True),
+        ("/dev/disk9s1 on /Volumes/Data (apfs, local, noowners)\n", False),
+        # The line that used to answer for a different volume entirely.
+        ("/dev/disk3s1 on /Volumes/Data Backup (apfs, local, journaled)\n", False),
+        (
+            "/dev/disk3s1 on /Volumes/Data Backup (apfs, journaled)\n"
+            "/dev/disk9s1 on /Volumes/Data (apfs, noowners)\n",
+            False,
+        ),
+        ("", False),
+    ],
+)
+def test_ownership_is_read_from_this_volumes_line_only(monkeypatch, mount_output, expected):
+    # A substring match on " on /Volumes/Data " also matched "/Volumes/Data Backup",
+    # so another disk on the host could vouch for this one — and every chown
+    # afterwards would be a silent no-op.
+    monkeypatch.setattr(
+        cibpatch.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=mount_output, stderr=""),
+    )
+    assert cibpatch.ownership_is_honoured(Path("/Volumes/Data")) is expected
+
+
+@pytest.mark.parametrize("content", [[1, 2, 3], "a string", 42])
+def test_a_plist_that_is_not_a_dictionary_is_not_a_traceback(tmp_path, content):
+    # A plist root can be any type, and this runs as root: an array where a dict was
+    # expected used to come out as a traceback rather than a message.
+    import plistlib
+
+    target = tmp_path / "Library" / "Preferences" / "com.apple.loginwindow.plist"
+    target.parent.mkdir(parents=True)
+    with target.open("wb") as fh:
+        plistlib.dump(content, fh, fmt=plistlib.FMT_BINARY)
+    assert cibpatch.read_plist(tmp_path, "Library/Preferences/com.apple.loginwindow.plist") == {}
+
+
+def test_a_diskutil_that_will_not_describe_the_volume_is_reported(monkeypatch):
+    def fake(cmd, *a, **k):
+        if "info" in cmd:
+            return subprocess.CompletedProcess(cmd, 1, stdout=b"", stderr=b"could not find disk")
+        if cmd[0] == "/sbin/mount":
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(cibpatch.subprocess, "run", fake)
+    with pytest.raises(cibpatch.PatchError, match="could not find disk"):
+        cibpatch.mount("/dev/disk9s1")
+
+
+def test_the_agent_directory_is_created_before_the_agent_is_installed():
+    # BSD install does not create its target directory, and a fresh guest can have
+    # /usr/local with no bin in it.
+    script = cib.guest_install_script("pw")
+    assert f'sudo_pw install -d -m 0755 "$(dirname {cib.AGENT_BIN})"' in script
+    assert script.index("install -d") < script.index(
+        f'"$CIB_WORK/tart-guest-agent" {cib.AGENT_BIN}'
+    )
+
+
+def test_a_python3_that_cannot_run_is_not_treated_as_an_interpreter(monkeypatch):
+    # /usr/bin/python3 exists on every Mac and is a stub without the Command Line
+    # Tools: it is executable, and exits non-zero the moment it runs.
+    monkeypatch.setattr(cib.shutil, "which", lambda name: None)
+    monkeypatch.setattr(cib.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess([], 1))
+    with pytest.raises(cib.Failure, match="xcode-select --install"):
+        cib.find_guest_python()
+
+
+def test_a_working_python3_is_used_as_it_is(monkeypatch):
+    monkeypatch.setattr(cib.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess([], 0))
+    assert cib.find_guest_python() == "/usr/bin/python3"
