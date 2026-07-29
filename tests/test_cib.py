@@ -2615,37 +2615,54 @@ def test_each_vm_name_keeps_its_own_password_and_keys(monkeypatch, tmp_path):
     assert cib.secrets_dir().parent == first.parent
 
 
-def test_secrets_an_older_cib_left_flat_are_moved_not_regenerated(
-    credentials, monkeypatch, tmp_path
-):
-    # Regenerating would lock cib out of a guest that is already built and already
-    # trusts the old key.
-    flat = tmp_path / "flat"
-    flat.mkdir()
-    monkeypatch.setattr(cib, "SECRETS", flat / "chrome-vm")
-    for name in (
-        "vm-credentials",
-        "vm-key",
-        "vm-key.pub",
-        "vm-host-key",
-        "vm-host-key.pub",
-        "vm-known-hosts",
-    ):
-        monkeypatch.setattr(
-            cib,
-            {
-                "vm-credentials": "CREDENTIALS",
-                "vm-key": "VM_KEY",
-                "vm-host-key": "VM_HOST_KEY",
-                "vm-known-hosts": "KNOWN_HOSTS",
-            }.get(name, "_ignored"),
-            cib.SECRETS / name,
-            raising=False,
-        )
+def test_secrets_an_older_cib_left_flat_go_to_the_default_vm(monkeypatch, tmp_path):
+    # Nothing on disk says which guest they belong to. Moving them into whichever
+    # name runs first takes them away from the guest actually using them — whose
+    # disk was patched with that key pair, and which has no password fallback left.
+    monkeypatch.setattr(cib.Path, "home", classmethod(lambda c: tmp_path))
+    flat = tmp_path / ".config" / "chrome-in-a-box"
+    flat.mkdir(parents=True)
+    for name in cib.SECRET_NAMES:
         (flat / name).write_text(f"old {name}\n")
+    monkeypatch.setenv("CIB_VM_NAME", "work")  # a second name runs first
     cib.migrate_flat_secrets()
-    assert (cib.SECRETS / "vm-credentials").read_text() == "old vm-credentials\n"
-    assert not (flat / "vm-credentials").exists()
+    for name in cib.SECRET_NAMES:
+        assert (flat / cib.DEFAULT_VM_NAME / name).read_text() == f"old {name}\n"
+        assert not (flat / name).exists(), "moved, not copied"
+        assert not (flat / "work" / name).exists(), "they are not the second VM's"
+
+
+def test_the_migration_does_not_overwrite_what_is_already_there(monkeypatch, tmp_path):
+    monkeypatch.setattr(cib.Path, "home", classmethod(lambda c: tmp_path))
+    flat = tmp_path / ".config" / "chrome-in-a-box"
+    (flat / cib.DEFAULT_VM_NAME).mkdir(parents=True)
+    (flat / "vm-credentials").write_text("old\n")
+    (flat / cib.DEFAULT_VM_NAME / "vm-credentials").write_text("current\n")
+    cib.migrate_flat_secrets()
+    assert (flat / cib.DEFAULT_VM_NAME / "vm-credentials").read_text() == "current\n"
+
+
+def test_delete_removes_what_an_older_cib_left_flat_too(credentials, monkeypatch, tmp_path):
+    # It used to unlink per-name paths that did not exist yet, print "Deleted.",
+    # and the next command migrated the flat originals back in.
+    monkeypatch.setattr(cib.Path, "home", classmethod(lambda c: tmp_path))
+    flat = tmp_path / ".config" / "chrome-in-a-box"
+    flat.mkdir(parents=True)
+    for name in cib.SECRET_NAMES:
+        (flat / name).write_text("old\n")
+    monkeypatch.setattr(cib, "SECRETS", flat / cib.DEFAULT_VM_NAME)
+    monkeypatch.setattr(cib, "CREDENTIALS", cib.SECRETS / "vm-credentials")
+    monkeypatch.setattr(cib, "VM_KEY", cib.SECRETS / "vm-key")
+    monkeypatch.setattr(cib, "VM_HOST_KEY", cib.SECRETS / "vm-host-key")
+    monkeypatch.setattr(cib, "KNOWN_HOSTS", cib.SECRETS / "vm-known-hosts")
+    monkeypatch.setattr("builtins.input", lambda *a: "y")
+    monkeypatch.setattr(
+        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="", stderr="")
+    )
+    cib.cmd_vm_delete("tart", cib.VmConfig())
+    for name in cib.SECRET_NAMES:
+        assert not (flat / name).exists(), f"{name} survived a delete that said Deleted."
+        assert not (flat / cib.DEFAULT_VM_NAME / name).exists()
 
 
 def test_the_shell_reports_an_exec_the_engine_refused(monkeypatch):
@@ -2713,3 +2730,65 @@ def test_the_sdist_carries_everything_its_tests_read():
     included = re.findall(r'"([^"]+)"', block.group(1))
     for needed in ("scripts", "Formula", "renovate.json", "uv.lock", ".github", "tests"):
         assert needed in included, f"the tests read {needed}, so the sdist has to carry it"
+
+
+def test_the_default_build_installs_the_key_it_will_connect_with(
+    credentials, monkeypatch, tmp_path
+):
+    # The packer path had a test for this and the default path had none, so both
+    # `ensure_vm_keys()` and the four argv entries could be deleted with the suite
+    # green — producing exactly the "a VM cib could never connect to" the packer
+    # fix was written for.
+    _fake_guest_disk(monkeypatch, tmp_path)
+    seen = {}
+    monkeypatch.setattr(
+        cib.subprocess,
+        "run",
+        lambda cmd, **kw: (
+            (seen.update(cmd=cmd) if any("cibpatch" in str(c) for c in cmd) else None)
+            or subprocess.CompletedProcess(cmd, 0)
+        ),
+    )
+    cib._prepare_guest(cib.VmConfig(), "pw")
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("--authorized-key") + 1] == str(cib.VM_KEY.with_suffix(".pub"))
+    assert cmd[cmd.index("--host-key") + 1] == str(cib.VM_HOST_KEY)
+    assert cib.KNOWN_HOSTS.exists(), "the host key has to be pinned for cib to use it"
+
+
+def test_the_default_build_generates_the_keys_if_they_are_missing(
+    credentials, monkeypatch, tmp_path
+):
+    for stale in (
+        cib.VM_KEY,
+        cib.VM_KEY.with_suffix(".pub"),
+        cib.VM_HOST_KEY,
+        cib.VM_HOST_KEY.with_suffix(".pub"),
+    ):
+        stale.unlink(missing_ok=True)
+    _fake_guest_disk(monkeypatch, tmp_path)
+    real = cib.subprocess.run
+    monkeypatch.setattr(
+        cib.subprocess,
+        "run",
+        lambda cmd, **kw: (
+            real(cmd, **kw) if "ssh-keygen" in str(cmd[0]) else subprocess.CompletedProcess(cmd, 0)
+        ),
+    )
+    cib._prepare_guest(cib.VmConfig(), "pw")
+    assert cib.VM_KEY.with_suffix(".pub").read_text().startswith("ssh-ed25519 ")
+    assert cib.VM_HOST_KEY.with_suffix(".pub").read_text().startswith("ssh-ed25519 ")
+
+
+def test_the_share_the_guest_looks_for_is_the_one_tart_mounts(calls, credentials, monkeypatch):
+    # The old assertion compared GUEST_SHARE with itself. Change either side alone
+    # and `cib vm setup` aborts before installing anything, because the script's
+    # `[ -d "$GUEST_SHARE" ]` fails.
+    monkeypatch.setattr(cib, "vm_running", lambda *a, **k: False)
+    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: True)
+    cib.cmd_vm_up("tart", cib.VmConfig())
+    shared = next(a for a in flat(calls).split() if a.startswith("--dir="))
+    name = shared.removeprefix("--dir=").split(":", 1)[0]
+    assert f"/Volumes/My Shared Files/{name}" == cib.GUEST_SHARE, (
+        "the guest looks for the share under the name tart was told to use"
+    )
