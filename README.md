@@ -127,7 +127,7 @@ cib box up                      # `brew install cib` asks you to `brew trust` fi
 uv tool install git+https://github.com/sapn95/chrome-in-a-box    # or: pipx install ...
 cib box up
 
-# 4. a compiled build — no Python needed at all
+# 4. a compiled build — no Python needed to run it
 #    (download the asset for your platform from the Releases page)
 tar -xzf cib-macos-arm64.tar.gz && ./cib-macos-arm64/cib box up
 ```
@@ -137,7 +137,14 @@ packer template beside the binary, because `cib` spawns them rather than importi
 them and Nuitka would otherwise leave them behind.
 
 Compiled with [Nuitka](https://nuitka.net) — Python translated to C — so it needs no
-interpreter and no dependencies at all. It is not a single file: the archive holds
+interpreter and no dependencies to run.
+
+One exception, and only for the VM: the patch step is a separate script that `cib`
+spawns rather than imports, so it needs a working `python3` on the machine. Every
+Mac has `/usr/bin/python3`, but without the Command Line Tools that is a stub that
+exits the moment it runs — `cib` checks and says so, rather than failing halfway
+through a build. `xcode-select --install` is enough. The container variant needs
+nothing. It is not a single file: the archive holds
 `cib` next to the shared objects it links against, so keep the folder together.
 Homebrew and the Linux builds handle that for you; the Linux ones are compiled
 inside UBI10 so they link against a supported base.

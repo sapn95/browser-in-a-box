@@ -467,6 +467,29 @@ KNOWN_HOSTS = CREDENTIALS.parent / "vm-known-hosts"
 PATCHER = Path(__file__).resolve().parent / "cibpatch.py"
 
 
+def find_guest_python() -> str:
+    """A python that can actually run the patcher.
+
+    /usr/bin/python3 on macOS is a shim: without the Command Line Tools it exists,
+    is executable, and exits non-zero the moment it is run. The compiled build has
+    no interpreter of its own — it spawns one — so this is checked rather than
+    assumed, and named rather than surfacing as a patch that failed for no reason.
+    """
+    for candidate in ("/usr/bin/python3", shutil.which("python3")):
+        if not candidate:
+            continue
+        probe = subprocess.run(  # noqa: S603
+            [candidate, "-c", ""], check=False, capture_output=True
+        )
+        if probe.returncode == 0:
+            return candidate
+    raise Failure(
+        "no working python3 was found, and the patcher is a script that needs one.\n"
+        "On a Mac without the Command Line Tools, /usr/bin/python3 is only a stub: "
+        "run 'xcode-select --install', or 'brew install python@3.14'."
+    )
+
+
 def find_patcher() -> Path:
     """The offline path spawns cibpatch.py rather than importing it, so nothing
     but this check knows whether it is there."""
@@ -827,7 +850,7 @@ def _prepare_guest(vm: VmConfig, password: str) -> None:
         if Path(sys.executable).name.startswith("python")
         # /usr/bin/python3 first: this is handed to sudo, so a PATH entry that came
         # from anywhere else would be running as root.
-        else ("/usr/bin/python3" if Path("/usr/bin/python3").exists() else shutil.which("python3"))
+        else find_guest_python()
     )
     # Only this step needs root — writing the guest's user database and setting
     # ownership inside it. The download and the boot do not, so sudo is asked for
@@ -1024,9 +1047,16 @@ CIB_SUDO_PW={shlex.quote(password)}
 # the guest can write to: a staged Chrome.app sitting there could be swapped
 # between the copy and the move into /Applications.
 CIB_WORK="$HOME/.cache/cib"
-rm -rf "$CIB_WORK"
+# Detached before the directory is touched, in both places: rm -rf over a mounted
+# DMG recurses into a read-only volume, fails, and leaves the image attached — and
+# the next run then aborts here instead of installing anything.
+cleanup() {{
+  hdiutil detach -quiet -force "$CIB_WORK/mount" >/dev/null 2>&1 || true
+  rm -rf "$CIB_WORK"
+}}
+cleanup
 mkdir -p "$CIB_WORK"
-trap 'rm -rf "$CIB_WORK"' EXIT
+trap cleanup EXIT
 sudo_pw() {{ printf '%s\\n' "$CIB_SUDO_PW" | sudo -S -p '' "$@"; }}
 # Downloads land on the host: replace the guest's own Downloads folder with the
 # shared one, so every app follows, not just Chrome.
@@ -1077,6 +1107,9 @@ if [ ! -x {AGENT_BIN} ]; then
   curl -fsSL -o "$CIB_WORK/agent.tar.gz" \
     "https://github.com/cirruslabs/tart-guest-agent/releases/download/v{GUEST_AGENT_VERSION}/tart-guest-agent-darwin-all.tar.gz"
   tar -xzf "$CIB_WORK/agent.tar.gz" -C "$CIB_WORK"
+  # BSD install does not create the target directory, and a fresh guest may have
+  # /usr/local without a bin in it.
+  sudo_pw install -d -m 0755 "$(dirname {AGENT_BIN})"
   sudo_pw install -m 0755 "$CIB_WORK/tart-guest-agent" {AGENT_BIN}
 fi
 # The agent has no self-install flag — it is started by launchd, from a plist. It

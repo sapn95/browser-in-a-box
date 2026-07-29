@@ -191,9 +191,12 @@ def read_plist(root: Path, relative: str) -> dict:
         return {}
     try:
         with path.open("rb") as handle:
-            return plistlib.load(handle)
-    except (plistlib.InvalidFileException, OSError):
+            record = plistlib.load(handle)
+    except (plistlib.InvalidFileException, OSError, ValueError):
         return {}
+    # A plist root can be any type. Treating an array as a dict raised a traceback
+    # out of a step running as root, rather than a message.
+    return record if isinstance(record, dict) else {}
 
 
 def write_private(path: Path, data: bytes, mode: int = 0o600) -> None:
@@ -512,8 +515,15 @@ def ownership_is_honoured(mountpoint: Path) -> bool:
     no-op, so a home directory would stay root-owned however carefully it is set."""
     result = subprocess.run(["/sbin/mount"], capture_output=True, text=True, check=False)
     for line in result.stdout.splitlines():
-        if f" on {mountpoint} " in line:
-            return "noowners" not in line
+        # "/dev/disk9s1 on /Volumes/Data (apfs, local, noowners)". A substring test
+        # for " on /Volumes/Data " also matched "/Volumes/Data Backup" lines, so a
+        # second volume on the host could answer for this one — and every chown
+        # afterwards would be a silent no-op.
+        device, _, rest = line.partition(" on ")
+        path, _, options = rest.partition(" (")
+        if not device or path != str(mountpoint):
+            continue
+        return "noowners" not in options.rstrip(")").split(", ")
     return False
 
 
@@ -531,7 +541,16 @@ def mount(volume: str) -> Path:
         capture_output=True,
         check=False,
     )
-    point = plistlib.loads(info.stdout).get("MountPoint")
+    if info.returncode != 0:
+        raise PatchError(
+            f"{volume} mounted but diskutil would not describe it: "
+            f"{(info.stderr or b'').decode(errors='replace').strip()}"
+        )
+    try:
+        described = plistlib.loads(info.stdout)
+    except (plistlib.InvalidFileException, ValueError) as exc:
+        raise PatchError(f"could not read diskutil's description of {volume}: {exc}") from None
+    point = described.get("MountPoint") if isinstance(described, dict) else None
     if not point:
         raise PatchError(f"{volume} mounted but reported no mount point")
     mountpoint = Path(point)
