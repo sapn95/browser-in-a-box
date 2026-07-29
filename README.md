@@ -143,8 +143,10 @@ inside UBI10 so they link against a supported base.
   python@3.14`) or use the Homebrew/binary install below, which need no Python
 - For the container: **podman or docker**
 - For the macOS VM: **Apple silicon**, [tart](https://tart.run)
-  (`brew install cirruslabs/cli/tart`) and [Packer](https://packer.io)
-  (`brew install hashicorp/tap/packer`), plus ~40 GB free and 8 GB RAM to spare
+  (`brew install cirruslabs/cli/tart`), ~40 GB free and 8 GB RAM to spare. The
+  build patches the guest's disk, which needs `sudo` once — nothing else does.
+  [Packer](https://packer.io) (`brew install hashicorp/tap/packer`) is **only**
+  needed for the `CIB_VM_PACKER=1` fallback described below
 - On Apple Silicon: **Rosetta**, because Google ships Chrome for Linux on amd64 only.
   Without it, emulated Chrome is slow and crash-prone. To enable it for podman:
 
@@ -176,6 +178,7 @@ The macOS VM variant (Apple silicon):
 | Command           | What it does                                    |
 | ----------------- | ----------------------------------------------- |
 | `cib vm create`   | build the VM from a fresh macOS image (large)   |
+| `cib vm prepare`  | redo just the offline preparation of a built VM |
 | `cib vm up`       | start it — a window opens                       |
 | `cib vm setup`    | install Chrome in the guest over SSH            |
 | `cib vm password` | print the generated guest password              |
@@ -185,12 +188,26 @@ The macOS VM variant (Apple silicon):
 | `cib vm status`   | list VMs and their state                        |
 | `cib vm delete`   | delete the VM and everything in it (asks first) |
 
-`vm create` is **unattended**. Setup Assistant cannot be skipped without MDM, but it
-can be driven, so Packer types through it: an account with a **generated** password,
-Remote Login on, Chrome and the clipboard agent installed. Setup Assistant itself is
-answered on a US keyboard — deliberately, because the keystrokes it is sent are US
-scancodes — and the Swiss layout and time zone are applied straight afterwards.
-Nothing to click and nothing to type.
+`vm create` is **unattended**, and it never shows Setup Assistant at all. Setup
+Assistant cannot be skipped without MDM, and driving it with synthetic keystrokes is
+brittle — one changed pane and the sequence types into the wrong field. So `cib`
+does the other thing: it boots the fresh guest once, then writes the state Setup
+Assistant would have produced straight onto its disk, before the guest ever reaches
+a login window. That is deterministic — no timing, no OCR, nothing to re-learn when
+Apple moves a button.
+
+What gets written: an account with a **generated** password, autologin, Remote
+Login, and **this host's keyboard layout** (so the guest types where your fingers
+already do). Only that one step needs `sudo`, and it is asked for on its own —
+downloading macOS and booting the guest run as you. If it fails, `cib vm prepare`
+redoes just it, without rebuilding the VM.
+
+Chrome is **not** part of `vm create`. `cib vm setup` installs it and the clipboard
+agent over SSH, once the guest is up.
+
+Every write onto the guest's disk is one Apple could change, so `CIB_VM_PACKER=1`
+keeps the old path available: it drives Setup Assistant with Packer instead. It
+needs Packer installed, and a VM that does not exist yet (`cib vm delete` first).
 
 Two things stay manual, because Apple makes them interactive on purpose: the
 **Apple Account sign-in** and turning on **iCloud Keychain** (System Settings →
@@ -200,7 +217,7 @@ The guest has no Touch ID, so every passkey confirmation asks for the account
 password. You never type it — `cib vm password` prints it and you paste it.
 Clipboard sharing between host and guest is not a flag: it needs
 [tart-guest-agent](https://github.com/cirruslabs/tart-guest-agent) running inside
-the guest, which `vm create` installs.
+the guest, which `vm setup` installs.
 
 `up` is idempotent: if the container is already serving it just re-applies the
 resolution and revives Chrome, so your tabs survive. `CIB_FORCE=1` recreates it

@@ -27,6 +27,7 @@ import argparse
 import json
 import os
 import platform
+import plistlib
 import re
 import secrets
 import shutil
@@ -412,6 +413,43 @@ def find_packer() -> str:
     return path
 
 
+# What macOS installs with, and the fallback when the host's own layout cannot be
+# read. 0 is the U.S. layout; HIToolbox identifies layouts by this number.
+DEFAULT_KEYBOARD = (0, "U.S.")
+
+
+def host_keyboard_layout() -> tuple[int, str]:
+    """The layout this host types in, to give the guest the same one.
+
+    The generated password is pasted, but everything typed in the guest afterwards
+    is typed by hand, and a guest on a different layout moves the punctuation.
+
+    Read through `defaults export` rather than straight from the plist: cfprefsd
+    caches preferences and flushes them on its own schedule, so the file on disk
+    can be stale or missing while the setting is live.
+    """
+    result = run(
+        "/usr/bin/defaults", "export", "com.apple.HIToolbox", "-", check=False, capture=True
+    )
+    if result.returncode != 0:
+        return DEFAULT_KEYBOARD
+    try:
+        prefs = plistlib.loads((result.stdout or "").encode())
+    except (plistlib.InvalidFileException, ValueError):
+        return DEFAULT_KEYBOARD
+    # Selected first: enabled can hold several, and only one of them is in use.
+    for key in ("AppleSelectedInputSources", "AppleEnabledInputSources"):
+        for source in prefs.get(key) or []:
+            # Input *methods* (Press-And-Hold, handwriting) sit in the same lists
+            # and carry no layout, so they are skipped rather than misread.
+            if not isinstance(source, dict):
+                continue
+            layout_id, name = source.get("KeyboardLayout ID"), source.get("KeyboardLayout Name")
+            if isinstance(layout_id, int) and isinstance(name, str) and name:
+                return layout_id, name
+    return DEFAULT_KEYBOARD
+
+
 def guest_password(create: bool = False) -> str:
     """The guest account password. Generated once, then remembered — you paste it,
     you never type it."""
@@ -467,7 +505,13 @@ def vm_exists(tart: str, vm: VmConfig) -> bool:
 
 def cmd_vm_create(tart: str, vm: VmConfig) -> None:
     if vm_exists(tart, vm):
-        print(f"{vm.name!r} already exists. 'cib vm up' to start it.")
+        # Not necessarily a finished VM: if preparation failed, this exists but still
+        # has no account, and 'vm up' would land on Setup Assistant rather than a
+        # desktop. Both ways out are named, because from here they look identical.
+        print(
+            f"{vm.name!r} already exists. 'cib vm up' to start it, or 'cib vm prepare' "
+            "if its preparation did not finish ('cib vm delete' removes it)."
+        )
         return
     if env_flag("CIB_VM_PACKER"):
         return _create_with_packer(tart, vm)
@@ -536,7 +580,9 @@ def _create_offline(tart: str, vm: VmConfig) -> None:
         boot.kill()
         boot.wait()
         raise Failure(
-            f"{vm.name!r} did not shut down; stop it with 'tart stop {vm.name}' and retry"
+            f"{vm.name!r} did not shut down in time and was killed, so its disk was "
+            "never patched. Check 'cib vm status' shows it stopped, then 'cib vm "
+            "prepare' finishes it without building it again."
         ) from None
 
     _prepare_guest(vm, password)
@@ -562,8 +608,10 @@ def _prepare_guest(vm: VmConfig, password: str) -> None:
     patcher = Path(__file__).resolve().parent / "cibpatch.py"
     if not patcher.exists():
         raise Failure(
-            f"the patcher is missing at {patcher} — the offline path needs a checkout; "
-            "set CIB_VM_PACKER=1 or run cib.py from the repository"
+            f"the patcher is missing at {patcher} — the offline path needs a checkout. "
+            "Either run cib.py from the repository, or fall back to driving Setup "
+            "Assistant: 'cib vm delete' first, then re-run with CIB_VM_PACKER=1 "
+            "(without the delete, 'vm create' only reports that the VM exists)."
         )
     # sys.executable is the compiled binary itself under Nuitka, not an interpreter,
     # so it cannot be used to run a script. Find a real python instead.
@@ -576,16 +624,33 @@ def _prepare_guest(vm: VmConfig, password: str) -> None:
     # ownership inside it. The download and the boot do not, so sudo is asked for
     # here rather than for the whole command. sudo prompts on its own tty, so it
     # cannot ask for anything when cib runs detached; check before trying.
-    print("Preparing the guest without Setup Assistant (this step needs sudo) ...")
+    layout_id, layout_name = host_keyboard_layout()
+    print(
+        f"Preparing the guest without Setup Assistant, keyboard {layout_name} "
+        "(this step needs sudo) ..."
+    )
     probe = subprocess.run(["/usr/bin/sudo", "-n", "true"], check=False, capture_output=True)
     if probe.returncode != 0:
         raise Failure(
             "this step needs sudo and there is no cached credential to use.\n"
-            "Run 'sudo -v' first, or run cib in a terminal where sudo can prompt.\n"
+            "Run 'sudo -v', then re-run — cib never prompts for a password itself, so\n"
+            "a credential cached beforehand is the only way in, whatever it is run from.\n"
             f"The VM {vm.name!r} is kept, so 'cib vm prepare' redoes only this step."
         )
     result = subprocess.run(  # noqa: S603
-        ["/usr/bin/sudo", python, str(patcher), "--disk", str(disk), "--user", vm.user],
+        [
+            "/usr/bin/sudo",
+            python,
+            str(patcher),
+            "--disk",
+            str(disk),
+            "--user",
+            vm.user,
+            "--keyboard-id",
+            str(layout_id),
+            "--keyboard-name",
+            layout_name,
+        ],
         input=password + "\n",
         text=True,
         check=False,
@@ -862,23 +927,28 @@ BOX_HELP = """\
 
 VM_HELP = """\
   create   build the VM from a fresh macOS image (large download, one time)
-  up       start it; a window opens
   prepare  redo just the offline preparation on an already-built VM
+  up       start it; a window opens
   setup    install Chrome in the guest over SSH (needs Remote Login on in it)
   ssh      open a shell in the guest
   ip       print the guest's address
   password print the generated guest account password (copy it, do not retype it)
-
-Downloads in the guest land in ~/Downloads/chrome-vm on the host (CIB_VM_SHARE).
   down     stop it
   status   list VMs and their state
   delete   delete the VM and everything in it (asks first)
 
-`create` is unattended: it installs macOS, drives Setup Assistant, sets the Swiss
-keyboard layout and installs Chrome, using a generated account password you never
-have to type. Two things stay manual afterwards, because Apple makes them
-interactive on purpose: signing in to the Apple Account, and turning on iCloud
-Keychain."""
+`create` never shows Setup Assistant. Instead of typing into it, it writes the
+state Setup Assistant would have produced onto the guest's disk before its first
+real boot: the account, autologin, Remote Login, and this host's keyboard layout.
+That one step needs sudo on the host; nothing else does. The account password is
+generated, so you never have to type it.
+
+Chrome is not part of `create` — 'cib vm setup' installs it and the clipboard
+agent, over SSH. Downloads in the guest then land in ~/Downloads/chrome-vm on the
+host (CIB_VM_SHARE).
+
+Two things stay manual, because Apple makes them interactive on purpose: signing
+in to the Apple Account, and turning on iCloud Keychain."""
 
 
 def build_parser() -> argparse.ArgumentParser:

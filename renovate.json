@@ -29,6 +29,17 @@
       ]
     },
     {
+      "description": "Keep the pinned tart-guest-agent version in cib.py up to date. This pin and the packer template's must move together; a test asserts they match.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^cib\\.py$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\nGUEST_AGENT_VERSION = \"(?<currentValue>[^\"]+)\""
+      ],
+      "extractVersionTemplate": "^v?(?<version>.*)$"
+    },
+    {
       "description": "Keep the pinned tart-guest-agent version in the packer template up to date",
       "customType": "regex",
       "managerFilePatterns": [

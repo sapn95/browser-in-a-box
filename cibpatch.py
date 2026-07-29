@@ -22,6 +22,8 @@ What gets written, and why each is needed:
   SetupAssistant DidSee* keys        suppresses the *per-user* assistant, which runs
                                      at first login even when the system one is gone
   Library/User Template/.skipbuddy   the same, for accounts created later
+  HIToolbox input sources            the host's keyboard layout; a guest left on
+                                     U.S. puts the punctuation somewhere else
   loginwindow autoLoginUser          boot straight to the desktop
   /etc/kcpassword                    the obfuscated password autologin reads
   launchd disabled.plist             turns on Remote Login, which is how cib then
@@ -67,6 +69,15 @@ class Account:
     full_name: str = "chrome-in-a-box"
     uid: int = UID
     gid: int = GID
+
+
+@dataclass(frozen=True)
+class Keyboard:
+    """The layout the guest should type in. Defaults to what macOS installs with,
+    so a caller that cannot read the host's layout still gets a working guest."""
+
+    layout_id: int = 0
+    name: str = "U.S."
 
 
 def shadow_hash_data(password: str) -> bytes:
@@ -177,6 +188,24 @@ def suppress_setup_assistant(root: Path, account: Account) -> None:
     template.touch()
 
 
+def set_keyboard_layout(root: Path, account: Account, keyboard: Keyboard) -> None:
+    """Give the guest the host's keyboard layout.
+
+    Written per account, because HIToolbox is a per-user preference. Both keys are
+    needed: "Enabled" is what the guest may switch between and "Selected" is what
+    it types in, and selecting a layout that is not enabled leaves it on U.S.
+    """
+    source = {
+        "InputSourceKind": "Keyboard Layout",
+        "KeyboardLayout ID": keyboard.layout_id,
+        "KeyboardLayout Name": keyboard.name,
+    }
+    write_plist(
+        root / f"Users/{account.name}/Library/Preferences/com.apple.HIToolbox.plist",
+        {"AppleEnabledInputSources": [source], "AppleSelectedInputSources": [source]},
+    )
+
+
 def enable_autologin(root: Path, account: Account) -> None:
     path = root / "Library/Preferences/com.apple.loginwindow.plist"
     record = read_plist(path)
@@ -241,7 +270,7 @@ def mark_setup_done(root: Path) -> None:
     marker.chmod(0o644)
 
 
-def patch(root: Path, account: Account) -> None:
+def patch(root: Path, account: Account, keyboard: Keyboard | None = None) -> None:
     """Apply everything to a mounted guest Data volume."""
     # This runs as root and builds paths from the account name, so it validates it
     # rather than trusting whoever invoked it.
@@ -258,6 +287,7 @@ def patch(root: Path, account: Account) -> None:
     create_account(root, account)
     mark_setup_done(root)
     suppress_setup_assistant(root, account)
+    set_keyboard_layout(root, account, keyboard or Keyboard())
     enable_autologin(root, account)
     enable_remote_login(root)
     # Last, not inside create_account: suppress_setup_assistant creates
@@ -397,7 +427,7 @@ def unmount(volume: str) -> None:
     )
 
 
-def prepare(disk: Path, account: Account) -> None:
+def prepare(disk: Path, account: Account, keyboard: Keyboard | None = None) -> None:
     """Attach the guest's disk, patch its Data volume, and put it all back.
 
     Unwound in reverse even when the patch fails, so a half-finished run never
@@ -407,7 +437,7 @@ def prepare(disk: Path, account: Account) -> None:
     volume = None
     try:
         volume = data_volume(device)
-        patch(mount(volume), account)
+        patch(mount(volume), account, keyboard)
     finally:
         if volume:
             unmount(volume)
@@ -426,12 +456,20 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="cibpatch", description=__doc__)
     parser.add_argument("--disk", required=True, type=Path)
     parser.add_argument("--user", required=True)
+    # Defaulted rather than required, so the patcher stays usable on its own; cib
+    # always passes the host's layout.
+    parser.add_argument("--keyboard-id", type=int, default=Keyboard.layout_id)
+    parser.add_argument("--keyboard-name", default=Keyboard.name)
     args = parser.parse_args(argv)
     password = sys.stdin.readline().rstrip("\n")
     if not password:
         raise SystemExit("error: no password on stdin")
     try:
-        prepare(args.disk, Account(name=args.user, password=password))
+        prepare(
+            args.disk,
+            Account(name=args.user, password=password),
+            Keyboard(layout_id=args.keyboard_id, name=args.keyboard_name),
+        )
     except PatchError as exc:
         raise SystemExit(f"error: {exc}") from None
     print("prepared")
