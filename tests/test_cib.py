@@ -3454,3 +3454,56 @@ def test_the_guest_script_needs_nothing_the_guest_does_not_have(tool):
     assert not re.search(rf"(^|[\s|;&(]){re.escape(tool)}([\s;&)]|$)", body), (
         f"{tool} is not on a bare macOS; using it turns 'cib vm setup' into a dialog"
     )
+
+
+def test_the_guest_never_locks_its_screen(tmp_path):
+    # A lock screen asks for the generated 24-character password, and a VM has no
+    # Touch ID to shortcut it — so the one thing the password exists to avoid.
+    (tmp_path / "Downloads").mkdir()
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir(parents=True)
+    for tool in ("defaults", "pmset", "sysadminctl"):
+        (bin_dir / tool).write_text(f'#!/bin/sh\necho "{tool} $@" >> {tmp_path}/lock.log\n')
+        (bin_dir / tool).chmod(0o755)
+    result = _run_guest_script(
+        cib.guest_install_script("pw"), tmp_path, share_exists=True, extra_bin=bin_dir
+    )
+    assert result.returncode == 0, result.stderr
+    log = (tmp_path / "lock.log").read_text()
+    assert "screensaver idleTime -int 0" in log, "the screensaver would still start"
+    assert "screensaver askForPassword -int 0" in log, "it would still ask"
+    assert "pmset -a displaysleep 0 sleep 0" in log, "the display would still sleep"
+
+
+def test_a_guest_without_sysadminctl_still_finishes(tmp_path):
+    # The flag is macOS 14 and later; on an older guest the command is absent, and
+    # under `sh -e` an unguarded failure would abort the whole install.
+    (tmp_path / "Downloads").mkdir()
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir(parents=True)
+    for tool in ("defaults", "pmset"):
+        (bin_dir / tool).write_text("#!/bin/sh\nexit 0\n")
+        (bin_dir / tool).chmod(0o755)
+    (bin_dir / "sysadminctl").write_text("#!/bin/sh\nexit 127\n")
+    (bin_dir / "sysadminctl").chmod(0o755)
+    result = _run_guest_script(
+        cib.guest_install_script("pw"), tmp_path, share_exists=True, extra_bin=bin_dir
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_the_vnc_viewer_is_how_the_window_goes_full_screen(monkeypatch):
+    # tart's own window has neither full screen nor scaling; Screen Sharing has
+    # both, and the offline patch already turns on the Remote Login it needs.
+    monkeypatch.setenv("CIB_VM_VIEWER", "vnc")
+    assert "--vnc" in cib.vm_run_args(cib.VmConfig())
+
+
+def test_the_built_in_window_stays_the_default(monkeypatch):
+    assert "--vnc" not in cib.vm_run_args(cib.VmConfig())
+
+
+def test_an_unknown_viewer_is_refused(monkeypatch):
+    monkeypatch.setenv("CIB_VM_VIEWER", "kiosk")
+    with pytest.raises(cib.Failure, match="CIB_VM_VIEWER"):
+        cib.vm_run_args(cib.VmConfig())
