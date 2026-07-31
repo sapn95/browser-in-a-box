@@ -963,28 +963,50 @@ def test_ssh_never_offers_another_key_or_falls_back_to_a_password(tmp_path):
     assert f"UserKnownHostsFile={cib.KNOWN_HOSTS}" in options
 
 
-def test_the_vnc_address_is_kept_rather_than_thrown_away(tmp_path):
-    """A detached start has no terminal, and tart's password is per run.
+def test_the_screen_address_carries_the_account_password(tmp_path, credentials):
+    """Screen Sharing prompts otherwise, for a generated 24-character password.
 
-    Discarding this line strands a running guest: there is no second way to reach
-    its screen and no way to regenerate the password without restarting it.
+    tart's --vnc is not a VNC server of its own — it opens macOS Screen Sharing at
+    the guest — so the credential here is the guest account's, and cib is the only
+    thing that knows it.
     """
-    cib.BOOT_LOG.parent.mkdir(parents=True, exist_ok=True)
-    cib.BOOT_LOG.write_text(
-        "Downloading...\nVNC server is running at vnc://admin:hunter2@192.168.64.9:5900\n"
-    )
-    url = cib.remember_vnc_url(cib.VmConfig(viewer="vnc"))
-    assert url == "vnc://admin:hunter2@192.168.64.9:5900"
-    assert cib.VNC_URL.read_text().strip() == url
-    # It carries a password, so it may not be world-readable.
-    assert cib.VNC_URL.stat().st_mode & 0o077 == 0
+    cib.CREDENTIALS.write_text("pa/ss word\n")
+    url = cib.screen_url(cib.VmConfig(user="admin"), "10.0.0.5")
+    # Percent-encoded, or a password with a slash or a space silently truncates the
+    # address into something that points somewhere else.
+    assert url == "vnc://admin:pa%2Fss%20word@10.0.0.5"
 
 
-def test_the_window_viewer_has_no_address_to_keep(tmp_path):
-    cib.BOOT_LOG.parent.mkdir(parents=True, exist_ok=True)
-    cib.BOOT_LOG.write_text("vnc://admin:hunter2@192.168.64.9:5900\n")
-    assert cib.remember_vnc_url(cib.VmConfig(viewer="window")) == ""
-    assert not cib.VNC_URL.exists()
+def test_the_screen_address_says_so_when_the_guest_is_not_sharing(tmp_path, monkeypatch):
+    """macOS 26 only takes Screen Sharing from the guest's own System Settings.
+
+    Nothing on the host can turn it on, so the useful thing to do is say that
+    rather than hand back an address that connects and immediately drops.
+    """
+    monkeypatch.setattr(cib, "vm_running", lambda tart, vm: True)
+    monkeypatch.setattr(cib, "vm_ip", lambda tart, vm: "10.0.0.5")
+    monkeypatch.setattr(cib, "guest_answers", lambda ip, port=22: False)
+    with pytest.raises(cib.Failure, match="System Settings"):
+        cib.screen_address("tart", cib.VmConfig(viewer="vnc"))
+
+
+def test_a_detached_start_leaves_the_callers_process_group(tmp_path, isolate_secrets):
+    """Otherwise the guest dies with whatever started it.
+
+    A child in the caller's process group takes the SIGHUP sent when that group
+    goes away, so closing the terminal — or a wrapper script exiting, which is
+    what the Dock icon does — killed the VM seconds after it appeared. A
+    different process group is what "detached" has to mean.
+    """
+    faketart = tmp_path / "faketart"
+    faketart.write_text("#!/bin/sh\nsleep 30\n")
+    faketart.chmod(0o755)
+    boot = isolate_secrets.start_detached(str(faketart), cib.VmConfig())
+    try:
+        assert os.getpgid(boot.pid) != os.getpgid(0)
+    finally:
+        boot.kill()
+        boot.wait()
 
 
 def test_a_detached_start_records_what_tart_printed(tmp_path, isolate_secrets):
@@ -3616,9 +3638,19 @@ def test_the_guest_never_locks_its_screen(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     log = (tmp_path / "lock.log").read_text()
-    assert "screensaver idleTime -int 0" in log, "the screensaver would still start"
-    assert "screensaver askForPassword -int 0" in log, "it would still ask"
+    # -currentHost spelled out: idleTime is a ByHost preference, so without it the
+    # write lands in a domain nothing reads and the screensaver still starts. An
+    # assertion on the tail alone matches either spelling and would not notice.
+    assert "defaults -currentHost write com.apple.screensaver idleTime -int 0" in log, (
+        "the screensaver would still start"
+    )
+    assert "defaults -currentHost write com.apple.screensaver askForPassword -int 0" in log, (
+        "it would still ask"
+    )
     assert "pmset -a displaysleep 0 sleep 0" in log, "the display would still sleep"
+    # The one that actually does it on every guest this project can build: macOS 14
+    # moved the lock behind sysadminctl, and cib requires 15+ for the Apple Account.
+    assert "sysadminctl -screenLock off" in log, "macOS 14+ would still lock the screen"
 
 
 def test_a_guest_without_sysadminctl_still_finishes(tmp_path):
