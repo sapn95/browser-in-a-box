@@ -32,6 +32,7 @@ import re
 import secrets
 import shlex
 import shutil
+import socket
 import ssl
 import subprocess
 import sys
@@ -520,6 +521,9 @@ CREDENTIALS = SECRETS / "vm-credentials"
 VM_KEY = SECRETS / "vm-key"
 VM_HOST_KEY = SECRETS / "vm-host-key"
 KNOWN_HOSTS = SECRETS / "vm-known-hosts"
+# The address the guest last answered on. arp forgets an idle guest and
+# `tart ip --wait` cannot make it remember, so this is the fallback.
+LAST_IP = SECRETS / "vm-last-ip"
 
 
 PATCHER = Path(__file__).resolve().parent / "cibpatch.py"
@@ -1405,6 +1409,13 @@ IP_WAIT_SECS = "60"
 GUEST_WAIT_SECS = 300
 
 
+def guest_answers(ip: str) -> bool:
+    """Whether anything is listening for ssh at this address."""
+    with socket.socket() as probe:
+        probe.settimeout(2)
+        return probe.connect_ex((ip, 22)) == 0
+
+
 def vm_ip(tart: str, vm: VmConfig) -> str:
     """Resolve the guest's address. Bridged guests get theirs from the real
     network, so the DHCP lease file the default resolver reads is empty."""
@@ -1421,15 +1432,23 @@ def vm_ip(tart: str, vm: VmConfig) -> str:
         capture=True,
     )
     ip = result.stdout.strip()
-    if result.returncode != 0 or not ip:
-        # Not "past Setup Assistant": the offline path never shows one, so naming it
-        # here sent people looking for a screen that does not exist.
-        detail = (result.stderr or "").strip()
-        raise Failure(
-            f"could not work out the address of {vm.name!r} after {IP_WAIT_SECS}s — is "
-            f"it running? ('cib vm status', then 'cib vm up')" + (f"\n{detail}" if detail else "")
-        )
-    return ip
+    if ip:
+        LAST_IP.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        LAST_IP.write_text(ip + "\n")
+        return ip
+    # The host's arp table forgets a guest that has been quiet, and `tart ip --wait`
+    # only re-reads that table — it sends nothing that would repopulate it. The
+    # guest is usually still there on the address it last answered on.
+    remembered = LAST_IP.read_text().strip() if LAST_IP.exists() else ""
+    if remembered and guest_answers(remembered):
+        return remembered
+    # Not "past Setup Assistant": the offline path never shows one, so naming it
+    # here sent people looking for a screen that does not exist.
+    detail = (result.stderr or "").strip()
+    raise Failure(
+        f"could not work out the address of {vm.name!r} after {IP_WAIT_SECS}s — is it "
+        f"running? ('cib vm status', then 'cib vm up')" + (f"\n{detail}" if detail else "")
+    )
 
 
 def validate_vm_user(name: str) -> str:

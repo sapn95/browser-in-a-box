@@ -3606,3 +3606,52 @@ def test_no_test_can_start_a_real_vm():
     # minutes. The autouse fixture is what stops that.
     assert cib.start_detached("tart", cib.VmConfig()).poll() is None
     assert cib.wait_for_guest("tart", cib.VmConfig(), _FakeBoot()) == "192.168.1.50"
+
+
+def test_the_address_the_guest_last_answered_on_is_remembered(credentials, monkeypatch):
+    # The host's arp table forgets a guest that has been quiet, and `tart ip --wait`
+    # only re-reads that table — it sends nothing that would repopulate it. Hit
+    # twice on a real guest that was pingable the whole time.
+    monkeypatch.setattr(
+        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="10.0.0.9\n")
+    )
+    assert cib.vm_ip("tart", cib.VmConfig()) == "10.0.0.9"
+    assert cib.LAST_IP.read_text().strip() == "10.0.0.9"
+
+    monkeypatch.setattr(cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=""))
+    monkeypatch.setattr(cib, "guest_answers", lambda ip: ip == "10.0.0.9")
+    assert cib.vm_ip("tart", cib.VmConfig()) == "10.0.0.9"
+
+
+def test_a_remembered_address_that_answers_nothing_is_not_used(credentials, monkeypatch):
+    # A guest that has really gone needs the error, not an address that will time
+    # out on every command after it.
+    cib.LAST_IP.parent.mkdir(parents=True, exist_ok=True)
+    cib.LAST_IP.write_text("10.0.0.9\n")
+    monkeypatch.setattr(cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=""))
+    monkeypatch.setattr(cib, "guest_answers", lambda ip: False)
+    with pytest.raises(cib.Failure, match="cib vm status"):
+        cib.vm_ip("tart", cib.VmConfig())
+
+
+def test_the_probe_asks_for_ssh_and_gives_up_quickly(monkeypatch):
+    seen = {}
+
+    class _Probe:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def settimeout(self, t):
+            seen["timeout"] = t
+
+        def connect_ex(self, addr):
+            seen["addr"] = addr
+            return 0
+
+    monkeypatch.setattr(cib.socket, "socket", lambda *a, **k: _Probe())
+    assert cib.guest_answers("10.0.0.9") is True
+    assert seen["addr"] == ("10.0.0.9", 22)
+    assert seen["timeout"] <= 5, "a dead guest must not hold the command up"
