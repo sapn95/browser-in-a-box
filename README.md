@@ -243,7 +243,9 @@ Neither `cib vm setup` nor `cib vm ssh` asks you to type anything. `vm create`
 generates an SSH key pair, installs the public half in the guest, and plants the
 guest's own **host key** as well — so the very first connection is verified rather
 than trusted. Everything lives beside the password in
-`~/.config/chrome-in-a-box/`, and `cib vm delete` removes all of it.
+`~/.config/chrome-in-a-box/<CIB_VM_NAME>/` — a directory per VM, so a second one
+cannot reuse the first's key — and `cib vm delete` removes all of it. An older
+cib kept them one level up; the first VM command you run moves them.
 
 The guest has no Touch ID, so passkey confirmations do ask for the account
 password. You never type that either — `cib vm password` prints it, and you paste
