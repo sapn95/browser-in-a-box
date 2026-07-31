@@ -11,7 +11,7 @@ license = "MIT"
 requires-python = ">=3.10"
 # Standard library only, on purpose. The published binary bundles the interpreter,
 # so there is nothing to install alongside it either.
-dependencies = []
+dependencies = ["PyYAML>=6.0"]
 
 [project.urls]
 Homepage = "https://github.com/sapn95/chrome-in-a-box"

@@ -10,7 +10,8 @@ cib box open # open https://localhost:6901/?resize=remote
 cib box down # stop it (profile is kept)
 ```
 
-One file, standard library only. Run it straight from a checkout with `./cib.py box up`,
+One file, and one optional dependency. Run it straight from a checkout with
+`./cib.py box up`,
 install it as a `cib` command, or download a self-contained binary — see
 [Install](#install).
 
@@ -290,10 +291,44 @@ and for the VM `CIB_VM_NAME`, `CIB_VM_CPUS`, `CIB_VM_MEMORY`, `CIB_VM_DISK`,
 `CIB_VM_DISPLAY`, `CIB_VM_NET`, `CIB_VM_INTERFACE`, `CIB_VM_USER`, `CIB_VM_SHARE`,
 `CIB_VM_PASSWORD` (a password of your own instead of a generated one; letters and
 digits only, and no y or z, because the packer path types it as keystrokes),
+`CIB_VM_CAPTURE_KEYS` (send Cmd+Space, Cmd+Tab and the rest to the guest while
+its window has focus — off by default, because it is all-or-nothing and a host
+launcher on Cmd+Space becomes unreachable until you click away),
 `CIB_VM_FIRSTBOOT_SECS` (how long the guest is given to lay down its first-boot
 state before the disk is patched — 180 s, raise it on a slow disk) and
 `CIB_VM_IPSW` (the macOS installer: `latest` by default, or a URL or `.ipsw` path
 to pin the guest to one version).
+
+### The settings file
+
+Everything above can live in `~/.config/chrome-in-a-box/cib.yaml` instead of your
+shell profile. `CIB_CONFIG` points somewhere else.
+
+```yaml
+box:
+  port: 6901
+  resolution: 1280x800
+
+vm:
+  name: chrome-vm
+  user: admin
+  password: admin        # or leave it out for a generated one
+  display: 1280x800
+  net: bridged
+  share: ~/Downloads/chrome-vm
+  capture_keys: false
+```
+
+Keys are the environment variable names without their prefix, lowercased: `[box]`
+holds the `CIB_*` ones and `[vm]` the `CIB_VM_*` ones. An environment variable
+still wins, so exporting one for a single command overrides the file without
+editing it.
+
+This is the one thing outside the standard library — reading it needs PyYAML,
+which the Homebrew, `uv tool` and compiled installs all bring with them. Running
+`./cib.py` from a bare checkout without it still works; it only refuses if a
+settings file is actually there, because ignoring one silently is the same as the
+setting not working.
 
 `CIB_VM_VIEWER` picks how you look at the guest. `window` (the default) is tart's
 own window. `vnc` opens no window at all: tart serves the screen over VNC and

@@ -60,6 +60,10 @@ def isolate_secrets(tmp_path, monkeypatch):
 def clean_env(monkeypatch):
     """cib is configured by CIB_* variables, so a developer who actually uses the
     tool would otherwise fail its tests."""
+    # The settings file is read once at import, from the real home. Left alone, a
+    # developer who actually configured cib would be testing their own settings —
+    # the same way a hand-written path list once let tests reach real secrets.
+    monkeypatch.setattr(cib, "CONFIG", {})
     for name in [k for k in os.environ if k.startswith("CIB_")]:
         monkeypatch.delenv(name, raising=False)
 
@@ -3838,3 +3842,57 @@ def test_a_chosen_password_with_a_shifting_key_is_refused(credentials, monkeypat
     monkeypatch.setenv("CIB_VM_PASSWORD", "crazy")
     with pytest.raises(cib.Failure, match="Swiss German"):
         cib.guest_password(create=True)
+
+
+def test_the_settings_file_fills_in_what_the_environment_does_not(tmp_path, monkeypatch):
+    config = tmp_path / "cib.yaml"
+    config.write_text(
+        "box:\n  port: 7000\n  resolution: 1280x800\nvm:\n  name: work-vm\n  display: 1440x900\n"
+    )
+    monkeypatch.setenv("CIB_CONFIG", str(config))
+    monkeypatch.setattr(cib, "CONFIG", cib.load_config())
+    # Sections map onto the two prefixes, so one file configures both variants.
+    assert cib.VmConfig().name == "work-vm"
+    assert cib.VmConfig().display == "1440x900"
+    assert cib.Config().port == 7000
+
+
+def test_the_environment_wins_over_the_settings_file(tmp_path, monkeypatch):
+    """A variable exported for one command has to beat a file you edited once."""
+    config = tmp_path / "cib.yaml"
+    config.write_text("vm:\n  name: from-file\n")
+    monkeypatch.setenv("CIB_CONFIG", str(config))
+    monkeypatch.setattr(cib, "CONFIG", cib.load_config())
+    monkeypatch.setenv("CIB_VM_NAME", "from-env")
+    assert cib.VmConfig().name == "from-env"
+
+
+def test_a_settings_file_that_is_not_a_mapping_is_refused(tmp_path, monkeypatch):
+    config = tmp_path / "cib.yaml"
+    config.write_text("- one\n- two\n")
+    monkeypatch.setenv("CIB_CONFIG", str(config))
+    with pytest.raises(cib.Failure, match="mapping of sections"):
+        cib.load_config()
+
+
+def test_an_unknown_section_is_named_rather_than_ignored(tmp_path, monkeypatch):
+    # Silently ignoring it looks exactly like the setting not working, which is the
+    # one failure mode a settings file must not have.
+    config = tmp_path / "cib.yaml"
+    config.write_text("vm:\n  name: ok\ncontainer:\n  port: 1\n")
+    monkeypatch.setenv("CIB_CONFIG", str(config))
+    with pytest.raises(cib.Failure, match="container"):
+        cib.load_config()
+
+
+def test_a_yaml_boolean_survives_as_the_string_the_rest_of_cib_reads(tmp_path, monkeypatch):
+    # yaml turns "yes" into True, and everything downstream compares strings.
+    config = tmp_path / "cib.yaml"
+    config.write_text("box:\n  force: yes\n")
+    monkeypatch.setenv("CIB_CONFIG", str(config))
+    assert cib.load_config()["CIB_FORCE"] == "true"
+
+
+def test_no_settings_file_is_normal_and_silent(tmp_path, monkeypatch):
+    monkeypatch.setenv("CIB_CONFIG", str(tmp_path / "absent.yaml"))
+    assert cib.load_config() == {}
