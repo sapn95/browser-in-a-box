@@ -24,6 +24,26 @@ import cib
 
 
 @pytest.fixture(autouse=True)
+def isolate_secrets(tmp_path, monkeypatch):
+    """No test may reach the real ~/.config/chrome-in-a-box.
+
+    Found the hard way, during a real build: running `pytest` deleted a live VM's
+    password and both key pairs, because two delete tests called cmd_vm_delete
+    against the module-level paths. Per-test fixtures were not enough — this has to
+    hold for every test, including ones written later.
+    """
+    home = tmp_path / "isolated-home"
+    secrets_dir = home / ".config" / "chrome-in-a-box" / "chrome-vm"
+    secrets_dir.mkdir(parents=True)
+    monkeypatch.setattr(cib.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(cib, "SECRETS", secrets_dir)
+    monkeypatch.setattr(cib, "CREDENTIALS", secrets_dir / "vm-credentials")
+    monkeypatch.setattr(cib, "VM_KEY", secrets_dir / "vm-key")
+    monkeypatch.setattr(cib, "VM_HOST_KEY", secrets_dir / "vm-host-key")
+    monkeypatch.setattr(cib, "KNOWN_HOSTS", secrets_dir / "vm-known-hosts")
+
+
+@pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
     """cib is configured by CIB_* variables, so a developer who actually uses the
     tool would otherwise fail its tests."""
@@ -3409,3 +3429,13 @@ def test_a_disk_whose_containers_hold_no_data_volume_names_them_all(monkeypatch)
     )
     with pytest.raises(cibpatch.PatchError, match="iSCPreboot, Recovery"):
         cibpatch.data_volume("/dev/disk4")
+
+
+def test_the_suite_cannot_reach_the_real_secrets():
+    # Running pytest once deleted a live VM's password and both key pairs. The
+    # autouse fixture is what stops that; this is what stops the fixture being
+    # dropped.
+    real = Path(os.path.expanduser("~")) / ".config" / "chrome-in-a-box"
+    for path in (cib.SECRETS, cib.CREDENTIALS, cib.VM_KEY, cib.VM_HOST_KEY, cib.KNOWN_HOSTS):
+        assert real not in path.parents and path != real, f"{path} is the user's own"
+    assert cib.Path.home() != Path(os.path.expanduser("~")), "Path.home() is not redirected"

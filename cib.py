@@ -846,7 +846,10 @@ def cmd_vm_prepare(tart: str, vm: VmConfig) -> None:
             f"{vm.name!r} is running — 'cib vm down' first. Its disk cannot be patched "
             "while the guest has it open."
         )
-    _prepare_guest(vm, guest_password())
+    # create=True: the patch rewrites the account record wholesale, so whatever
+    # password it writes *is* the account's password afterwards. Refusing here
+    # because the file went missing would leave a built guest with no way forward.
+    _prepare_guest(vm, guest_password(create=True))
 
 
 # `tart create` returns before the Virtualization framework has let go of the VM's
