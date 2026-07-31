@@ -228,16 +228,35 @@ build, because sudo forgets a credential in about five minutes and the build tak
 thirty to sixty. If the patch step still fails, `cib vm prepare` redoes just it,
 without rebuilding the VM.
 
-Chrome is **not** part of `vm create`. `cib vm setup` installs it and the clipboard
-agent over SSH, once the guest is up.
+Chrome **is** part of `vm create`: it builds the VM, starts it, waits for SSH and
+installs Chrome and the clipboard agent, all from the one command. `cib vm setup`
+exists to redo only that last step against a guest that is already up.
 
 Every write onto the guest's disk is one Apple could change, so `CIB_VM_PACKER=1`
 keeps the old path available: it drives Setup Assistant with Packer instead. It
 needs Packer installed, and a VM that does not exist yet (`cib vm delete` first).
 
-Two things stay manual, because Apple makes them interactive on purpose: the
-**Apple Account sign-in** and turning on **iCloud Keychain** (System Settings →
-Apple Account → iCloud → Passwords & Keychain).
+One thing stays manual, because Apple makes it interactive on purpose: the
+**Apple Account sign-in**, in the guest's own window.
+
+It cannot be scripted, and not for want of an unexplored trick. Joining the
+iCloud Keychain sync circle is a cryptographic handshake, not a setting: a new
+device is either *sponsored* by a device already in the circle, or it recovers
+via an SMS code plus the iCloud security code. Both need a second party in the
+moment. The `KEYCHAIN_SYNC` entry in `defaults read MobileMeAccounts` is a
+read-only mirror of that state — accountsd owns the truth in a TCC-protected
+database — and `otctl`, which does drive Octagon, is walled off behind
+`com.apple.private.*` entitlements that only Apple can sign. A configuration
+profile cannot help either: `allowCloudKeychainSync` only *permits*, and already
+defaults to true.
+
+The good news is that the sign-in is enough on its own. Signing in switches
+Keychain sync on and joins the circle, so there is no second toggle to find:
+
+```console
+$ otctl status | grep State:
+State: Ready
+```
 
 `cib vm up` runs the guest in the foreground: the window opens and the shell does
 not come back until the VM shuts down, and Ctrl-C there kills the guest. Run the
