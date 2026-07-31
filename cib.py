@@ -313,8 +313,11 @@ def cmd_up(engine: str, cfg: Config) -> None:
         print(f"Already running. Open {cfg.url}")
         return
 
-    run(engine, "rm", "-f", cfg.name, check=False, capture=True)
+    # Pulled before the container is removed, not after: a pull that cannot succeed
+    # would otherwise have destroyed a working container and then reported only the
+    # pull. A guard has to run before the thing it guards.
     ensure_image(engine, cfg)
+    run(engine, "rm", "-f", cfg.name, check=False, capture=True)
     print("Starting Google Chrome (amd64 image; emulated on Apple Silicon) ...")
     run(
         engine,
@@ -549,8 +552,8 @@ def find_patcher() -> Path:
         raise Failure(
             f"the patcher is missing at {PATCHER} — the offline path needs it beside "
             "cib. Either run cib.py from the repository, or fall back to driving Setup "
-            "Assistant: 'cib vm delete' first, then re-run with CIB_VM_PACKER=1 "
-            "(without the delete, 'vm create' only reports that the VM exists)."
+            "Assistant: re-run with CIB_VM_PACKER=1, and 'cib vm delete' first if a "
+            "half-built VM is already there ('vm create' only reports that it exists)."
         )
     return PATCHER
 
@@ -940,6 +943,7 @@ def _prepare_guest(vm: VmConfig, password: str) -> None:
     # cannot ask for anything when cib runs detached; check before trying.
     ensure_vm_keys()
     layout_id, layout_name = host_keyboard_layout()
+    zone, _city = host_time_zone()
     print(
         f"Preparing the guest without Setup Assistant, keyboard {layout_name} "
         "(this step needs sudo) ..."
@@ -966,6 +970,8 @@ def _prepare_guest(vm: VmConfig, password: str) -> None:
             str(layout_id),
             "--keyboard-name",
             layout_name,
+            "--time-zone",
+            zone,
             "--authorized-key",
             str(VM_KEY.with_suffix(".pub")),
             "--host-key",

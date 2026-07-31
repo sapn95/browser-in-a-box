@@ -29,7 +29,7 @@
       ]
     },
     {
-      "description": "Keep the pinned tart-guest-agent version in cib.py up to date. This pin and the packer template's must move together; a test asserts they match.",
+      "description": "Keep the pinned tart-guest-agent version in cib.py up to date. It is the only pin: the packer template no longer installs the agent.",
       "customType": "regex",
       "managerFilePatterns": [
         "/^cib\\.py$/"

@@ -3125,3 +3125,124 @@ def test_a_secret_written_over_a_loose_file_gets_the_tight_mode(tmp_path):
     cibpatch.write_private(target, b"NEWKEY\n")
     assert target.read_bytes() == b"NEWKEY\n"
     assert target.stat().st_mode & 0o777 == 0o600
+
+
+# --- round 19 ------------------------------------------------------------------
+
+
+def test_owning_the_home_never_descends_through_a_link(tmp_path, monkeypatch):
+    # The old assertion pinned the chown's follow_symlinks flag, which is only half
+    # the guard: os.walk(followlinks=True) descends *through* a symlinked directory
+    # and lchowns whatever is inside it — on the host. Both mutations have to fail.
+    chowned: list[str] = []
+    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g, **kw: chowned.append(str(p)))
+    outside = tmp_path / "host"
+    (outside / "deeper").mkdir(parents=True)
+    (outside / "deeper" / "sudoers").write_text("root ALL")
+    home = tmp_path / "volume" / "Users" / "admin"
+    home.mkdir(parents=True)
+    (home / "real").write_text("guest file")
+    (home / "escape").symlink_to(outside)
+    cibpatch.own_home(tmp_path / "volume", cibpatch.Account("admin", "pw"))
+    assert str(home / "real") in chowned
+    # The link itself is chowned (harmlessly, as a link). What must never happen is
+    # the walk stepping through it.
+    assert not any(str(outside) in path for path in chowned), (
+        "the walk descended into a directory the guest pointed at"
+    )
+    assert not any("sudoers" in path for path in chowned)
+
+
+def test_the_templates_keyboard_provisioner_keeps_the_two_things_that_make_it_work():
+    # The offline copy of this logic is pinned by three tests; the packer copy was
+    # only grepped for a variable name. Rounds 8/9 and 14/15 were both keyboard
+    # regressions.
+    template = (Path(cib.__file__).resolve().parent / "packer" / "chrome-vm.pkr.hcl").read_text()
+    line = next(ln for ln in template.splitlines() if "AppleEnabledInputSources" in ln)
+    # An integer, not a string: `defaults write` stores it as a string and HIToolbox
+    # then ignores the entry, which is why PlistBuddy is used at all.
+    assert "'KeyboardLayout ID' integer" in line
+    assert "'KeyboardLayout ID' string" not in line
+    # Both lists: writing only the enabled one leaves the layout inactive.
+    assert "AppleEnabledInputSources AppleSelectedInputSources" in line
+
+
+def test_the_clipboard_agent_is_installed_as_a_launch_agent_not_a_daemon():
+    # The path was asserted against itself, so it could move to LaunchDaemons and
+    # everything still reported success — while launchd loads it as a root daemon,
+    # which has no pasteboard, so copy-paste is dead.
+    assert f"/Library/LaunchAgents/{cib.AGENT_LABEL}.plist" == cib.AGENT_PLIST_PATH
+    assert "/Library/LaunchDaemons" not in cib.guest_install_script("pw")
+
+
+def test_the_keepalive_refreshes_faster_than_sudo_forgets():
+    # sudo's timestamp_timeout is five minutes by default and the build takes thirty
+    # to sixty; any interval above that makes the thread do nothing useful, and the
+    # last step of every unattended build is refused.
+    assert cib.SudoKeepalive().interval <= 120
+
+
+def test_the_image_is_pulled_before_the_container_is_removed(monkeypatch):
+    # A guard has to run before the thing it guards: the rm used to happen first, so
+    # a pull that could not succeed destroyed a working container and then reported
+    # only the pull.
+    order: list[str] = []
+    monkeypatch.setattr(cib, "container_running", lambda *a, **k: False)
+    monkeypatch.setattr(
+        cib,
+        "ensure_image",
+        lambda e, c: order.append("pull") or (_ for _ in ()).throw(cib.Failure("could not pull")),
+    )
+    monkeypatch.setattr(
+        cib, "run", lambda e, *a, **k: order.append(a[0]) or subprocess.CompletedProcess([], 0)
+    )
+    with pytest.raises(cib.Failure, match="could not pull"):
+        cib.cmd_up("podman", cib.Config())
+    assert "rm" not in order, "a working container was removed for a pull that failed"
+
+
+def test_the_default_build_gives_the_guest_the_hosts_time_zone(credentials, monkeypatch, tmp_path):
+    # Only the packer fallback set it, so the default path produced a guest whose
+    # every timestamp was wrong.
+    _fake_guest_disk(monkeypatch, tmp_path)
+    monkeypatch.setattr(cib, "host_time_zone", lambda: ("Europe/Rome", "Rome"))
+    seen = {}
+    monkeypatch.setattr(
+        cib.subprocess,
+        "run",
+        lambda cmd, **kw: (
+            (seen.update(cmd=cmd) if any("cibpatch" in str(c) for c in cmd) else None)
+            or subprocess.CompletedProcess(cmd, 0)
+        ),
+    )
+    cib._prepare_guest(cib.VmConfig(), "pw")
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("--time-zone") + 1] == "Europe/Rome"
+
+
+def test_the_guest_time_zone_is_a_link_into_its_own_zoneinfo(tmp_path):
+    root = tmp_path / "volume"
+    zone = root / "private/var/db/timezone/zoneinfo/Europe"
+    zone.mkdir(parents=True)
+    (zone / "Rome").write_bytes(b"TZif")
+    cibpatch.set_time_zone(root, "Europe/Rome")
+    link = root / "private/etc/localtime"
+    assert link.is_symlink()
+    # Relative to the guest's own root, not this host's filesystem.
+    assert str(link.readlink()) == "/var/db/timezone/zoneinfo/Europe/Rome"
+
+
+@pytest.mark.parametrize("zone", ["../../etc", "/etc/passwd", ""])
+def test_a_dangerous_time_zone_is_refused(tmp_path, zone):
+    # The zone reaches a path built inside a volume this runs as root over.
+    with pytest.raises(cibpatch.PatchError, match="refusing to use"):
+        cibpatch.set_time_zone(tmp_path, zone)
+
+
+def test_an_unknown_time_zone_leaves_the_guest_alone(tmp_path):
+    # A guest on the installer's zone still works; refusing the build over it would
+    # not be an improvement.
+    root = tmp_path / "volume"
+    (root / "private/etc").mkdir(parents=True)
+    cibpatch.set_time_zone(root, "Mars/Olympus")
+    assert not (root / "private/etc/localtime").exists()

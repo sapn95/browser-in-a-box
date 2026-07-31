@@ -89,6 +89,7 @@ class Keyboard:
 
     layout_id: int = 0
     name: str = "U.S."
+    time_zone: str = ""
 
 
 def shadow_hash_data(password: str) -> bytes:
@@ -334,6 +335,24 @@ def set_keyboard_layout(root: Path, account: Account, keyboard: Keyboard) -> Non
     )
 
 
+def set_time_zone(root: Path, zone: str) -> None:
+    """Give the guest the host's time zone.
+
+    /etc/localtime is a link into the zoneinfo database; macOS reads it and
+    Preferences follows. Written as a *relative* link so it resolves inside the
+    guest rather than against this host, and refused if the zone is not there.
+    """
+    if not zone or ".." in zone or zone.startswith("/"):
+        raise PatchError(f"refusing to use {zone!r} as a time zone")
+    zoneinfo = guest_path(root, f"private/var/db/timezone/zoneinfo/{zone}")
+    if not zoneinfo.is_file():
+        # Not fatal on its own: a guest on the installer's zone still works.
+        return
+    link = guest_path(root, "private/etc/localtime", make_parents=True)
+    link.unlink(missing_ok=True)
+    link.symlink_to(f"/var/db/timezone/zoneinfo/{zone}")
+
+
 def enable_autologin(root: Path, account: Account) -> None:
     relative = "Library/Preferences/com.apple.loginwindow.plist"
     record = read_plist(root, relative)
@@ -453,7 +472,10 @@ def patch(
     create_account(root, account)
     mark_setup_done(root)
     suppress_setup_assistant(root, account)
-    set_keyboard_layout(root, account, keyboard or Keyboard())
+    keyboard = keyboard or Keyboard()
+    set_keyboard_layout(root, account, keyboard)
+    if keyboard.time_zone:
+        set_time_zone(root, keyboard.time_zone)
     keys = keys or Keys()
     if keys.authorized:
         authorise_key(root, account, keys.authorized)
@@ -652,6 +674,7 @@ def main(argv: list[str]) -> int:
     # always passes the host's layout.
     parser.add_argument("--keyboard-id", type=int, default=Keyboard.layout_id)
     parser.add_argument("--keyboard-name", default=Keyboard.name)
+    parser.add_argument("--time-zone", default=Keyboard.time_zone)
     # Paths rather than key material: an argument list is readable by every local
     # user for as long as the process runs.
     parser.add_argument("--authorized-key", type=Path)
@@ -669,7 +692,11 @@ def main(argv: list[str]) -> int:
         prepare(
             args.disk,
             Account(name=args.user, password=password),
-            Keyboard(layout_id=args.keyboard_id, name=args.keyboard_name),
+            Keyboard(
+                layout_id=args.keyboard_id,
+                name=args.keyboard_name,
+                time_zone=args.time_zone,
+            ),
             keys,
         )
     except PatchError as exc:
