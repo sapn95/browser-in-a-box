@@ -37,11 +37,14 @@ def isolate_secrets(tmp_path, monkeypatch):
     secrets_dir = home / ".config" / "chrome-in-a-box" / "chrome-vm"
     secrets_dir.mkdir(parents=True)
     monkeypatch.setattr(cib.Path, "home", classmethod(lambda cls: home))
+    # Derived, not a hand-written list of names. The list version held CREDENTIALS,
+    # VM_KEY, VM_HOST_KEY and KNOWN_HOSTS but not LAST_IP, which was added later —
+    # so the suite wrote its 10.0.0.9 test constant into a live VM's real
+    # vm-last-ip. Anything added tomorrow is covered without a person remembering.
+    for name, value in list(vars(cib).items()):
+        if isinstance(value, Path) and value.parent == cib.SECRETS:
+            monkeypatch.setattr(cib, name, secrets_dir / value.name)
     monkeypatch.setattr(cib, "SECRETS", secrets_dir)
-    monkeypatch.setattr(cib, "CREDENTIALS", secrets_dir / "vm-credentials")
-    monkeypatch.setattr(cib, "VM_KEY", secrets_dir / "vm-key")
-    monkeypatch.setattr(cib, "VM_HOST_KEY", secrets_dir / "vm-host-key")
-    monkeypatch.setattr(cib, "KNOWN_HOSTS", secrets_dir / "vm-known-hosts")
     # And no test may start a real VM. start_detached uses subprocess.Popen
     # directly, so a test that replaces only `cib.run` would spawn tart for real and
     # then sit in wait_for_guest for five minutes. Tests that care replace these.
@@ -636,14 +639,10 @@ def test_an_interactive_shell_keeps_this_terminals_stdin(credentials, monkeypatc
 
 
 @pytest.fixture
-def credentials(tmp_path, monkeypatch):
-    # All four live together under ~/.config/chrome-in-a-box and are module-level,
-    # so redirecting Path.home() afterwards would not move them.
-    monkeypatch.setattr(cib, "SECRETS", tmp_path)
-    monkeypatch.setattr(cib, "CREDENTIALS", tmp_path / "vm-credentials")
-    monkeypatch.setattr(cib, "VM_KEY", tmp_path / "vm-key")
-    monkeypatch.setattr(cib, "VM_HOST_KEY", tmp_path / "vm-host-key")
-    monkeypatch.setattr(cib, "KNOWN_HOSTS", tmp_path / "vm-known-hosts")
+def credentials():
+    # Nothing is redirected here. isolate_secrets is autouse and has already moved
+    # every module-level path under SECRETS into this test's own directory; a second
+    # hand-written list of names beside it is what let LAST_IP slip through once.
     # Stand-ins rather than real ssh-keygen output: these tests replace `run`, so a
     # real keygen would never happen. ensure_vm_keys() then only rewrites
     # known_hosts, which is the part they care about.
@@ -651,6 +650,31 @@ def credentials(tmp_path, monkeypatch):
         key.write_text(f"PRIVATE {key.name}\n")
         key.with_suffix(".pub").write_text(f"ssh-ed25519 AAAAC3Nz-{key.name} cib\n")
     return cib.CREDENTIALS
+
+
+def test_no_module_level_path_still_points_at_the_real_home(tmp_path):
+    """The guard has to cover paths nobody has written yet.
+
+    Twice now a path added to cib.py was not added to the fixture, and the suite
+    wrote into the real ~/.config/chrome-in-a-box — the second time replacing a
+    live VM's remembered address with 10.0.0.9. This fails the moment a new
+    module-level path escapes, instead of waiting for a user to notice.
+    """
+    # Not Path.home(): isolate_secrets patches that, so it would return the fake one
+    # and every path would look safe. os.path.expanduser reads HOME, untouched here.
+    # PATCHER and PACKER_TEMPLATE are deliberately not covered: they are read-only
+    # paths into the installed package, and cib never writes to them.
+    real = Path(os.path.expanduser("~")) / ".config" / "chrome-in-a-box"
+    escaped = [
+        name
+        for name, value in vars(cib).items()
+        if isinstance(value, Path) and (value == real or real in value.parents)
+    ]
+    assert escaped == [], f"these still point at the real secrets directory: {escaped}"
+    # Non-vacuous: there are paths of this shape, and they were moved rather than
+    # simply absent.
+    assert cib.SECRETS.is_relative_to(tmp_path)
+    assert cib.LAST_IP.is_relative_to(tmp_path)
 
 
 def test_the_guest_password_is_generated_once_and_remembered(credentials):
@@ -847,7 +871,7 @@ chmod 0755 "$dst"
 """
 
 
-def _run_guest_script(script: str, home, share_exists: bool, extra_bin=None):
+def _run_guest_script(script: str, home, share_exists: bool, extra_bin=None, override_bin=None):
     """Execute the guest script the way ssh would: /bin/sh -e, with fakes."""
     bin_dir = home / "fakebin"
     bin_dir.mkdir(parents=True, exist_ok=True)
@@ -869,6 +893,11 @@ def _run_guest_script(script: str, home, share_exists: bool, extra_bin=None):
     # macOS-only tools the guest script uses. The suite runs on Linux in CI, where
     # they simply do not exist and every one of them is an exit 127.
     for name, body_text in (("sudo", _FAKE_SUDO), ("install", _FAKE_INSTALL)):
+        (bin_dir / name).write_text(body_text)
+        (bin_dir / name).chmod(0o755)
+    # Applied last, so a test can replace even sudo or install — which the two
+    # loops above would otherwise write back over.
+    for name, body_text in (override_bin or {}).items():
         (bin_dir / name).write_text(body_text)
         (bin_dir / name).chmod(0o755)
     share = Path(cib.GUEST_SHARE)
@@ -893,6 +922,93 @@ def _run_guest_script(script: str, home, share_exists: bool, extra_bin=None):
         capture_output=True,
         text=True,
     )
+
+
+def test_the_guest_script_fails_when_the_agent_did_not_end_up_executable(tmp_path):
+    """Without the agent there is no copy-paste, and the password is unguessable.
+
+    Reporting success here is worse than failing: the user is left with a guest
+    whose generated password can only be typed in by hand.
+    """
+    (tmp_path / "Downloads").mkdir()
+    # install that leaves the file there but not executable — a plausible failure,
+    # and the one thing `test -x` is there to catch.
+    limp = '#!/bin/sh\nfor dst in "$@"; do :; done\nmkdir -p "$(dirname "$dst")"\n: > "$dst"\n'
+    result = _run_guest_script(
+        cib.guest_install_script("pw"),
+        tmp_path,
+        share_exists=True,
+        override_bin={"install": limp},
+    )
+    assert result.returncode != 0
+
+
+def test_ssh_never_offers_another_key_or_falls_back_to_a_password(tmp_path):
+    """Each of these has to be present, and the reason differs per option.
+
+    Without IdentitiesOnly ssh offers every key the agent holds before ours, so a
+    guest that has forgotten our key prompts for a password instead of failing —
+    and the script sent over that connection carries the guest's password.
+    """
+    options = cib.ssh_options()
+    for expected in (
+        "IdentitiesOnly=yes",
+        "PasswordAuthentication=no",
+        "KbdInteractiveAuthentication=no",
+        "NumberOfPasswordPrompts=0",
+        "StrictHostKeyChecking=yes",
+    ):
+        assert expected in options, f"{expected} is no longer passed to ssh"
+    assert str(cib.VM_KEY) in options
+    assert f"UserKnownHostsFile={cib.KNOWN_HOSTS}" in options
+
+
+def test_the_vnc_address_is_kept_rather_than_thrown_away(tmp_path):
+    """A detached start has no terminal, and tart's password is per run.
+
+    Discarding this line strands a running guest: there is no second way to reach
+    its screen and no way to regenerate the password without restarting it.
+    """
+    cib.BOOT_LOG.parent.mkdir(parents=True, exist_ok=True)
+    cib.BOOT_LOG.write_text(
+        "Downloading...\nVNC server is running at vnc://admin:hunter2@192.168.64.9:5900\n"
+    )
+    url = cib.remember_vnc_url(cib.VmConfig(viewer="vnc"))
+    assert url == "vnc://admin:hunter2@192.168.64.9:5900"
+    assert cib.VNC_URL.read_text().strip() == url
+    # It carries a password, so it may not be world-readable.
+    assert cib.VNC_URL.stat().st_mode & 0o077 == 0
+
+
+def test_the_window_viewer_has_no_address_to_keep(tmp_path):
+    cib.BOOT_LOG.parent.mkdir(parents=True, exist_ok=True)
+    cib.BOOT_LOG.write_text("vnc://admin:hunter2@192.168.64.9:5900\n")
+    assert cib.remember_vnc_url(cib.VmConfig(viewer="window")) == ""
+    assert not cib.VNC_URL.exists()
+
+
+def test_a_detached_start_records_what_tart_printed(tmp_path, isolate_secrets):
+    """The regression itself: stdout went to DEVNULL, so the URL was unrecoverable."""
+    faketart = tmp_path / "faketart"
+    faketart.write_text("#!/bin/sh\necho 'VNC server is running at vnc://a:b@10.0.0.5:5900'\n")
+    faketart.chmod(0o755)
+    boot = isolate_secrets.start_detached(str(faketart), cib.VmConfig(viewer="vnc"))
+    boot.wait()
+    assert "vnc://a:b@10.0.0.5:5900" in cib.BOOT_LOG.read_text()
+
+
+def test_deleting_the_vm_takes_the_remembered_address_with_it(tmp_path, monkeypatch):
+    """A list of names left vm-last-ip behind, and the next build inherited it."""
+    cib.SECRETS.mkdir(parents=True, exist_ok=True)
+    cib.LAST_IP.write_text("10.0.0.9\n")
+    cib.CREDENTIALS.write_text("secret\n")
+    monkeypatch.setattr("builtins.input", lambda _: "y")
+    monkeypatch.setattr(
+        cib, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="", stderr="")
+    )
+    cib.cmd_vm_delete("tart", cib.VmConfig())
+    assert not cib.LAST_IP.exists()
+    assert not cib.CREDENTIALS.exists()
 
 
 def test_the_guest_script_fails_when_the_share_is_missing(tmp_path):

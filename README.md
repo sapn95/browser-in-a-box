@@ -290,9 +290,21 @@ state before the disk is patched — 180 s, raise it on a slow disk) and
 `CIB_VM_IPSW` (the macOS installer: `latest` by default, or a URL or `.ipsw` path
 to pin the guest to one version).
 
-Downloads in the guest land in `~/Downloads/chrome-vm` on the host: the folder is
-shared into the VM and the guest's own `~/Downloads` is a symlink to it, so every
-app follows, not just Chrome. Point it elsewhere with `CIB_VM_SHARE`.
+`CIB_VM_VIEWER` picks how you look at the guest. `window` (the default) is tart's
+own window. `vnc` opens no window at all: tart serves the screen over VNC and
+prints an address for it, which `cib vm viewer` reprints. That address carries a
+password tart generates per run, so it is worth nothing once the guest restarts —
+and a guest started without the address being captured cannot be reached at all.
+
+**Chrome's** downloads in the guest land in `~/Downloads/chrome-vm` on the host.
+The folder is shared into the VM and Chrome is pointed at it through its own
+settings. Point it elsewhere with `CIB_VM_SHARE`.
+
+Only Chrome. Replacing the guest's `~/Downloads` with a symlink would make every
+app follow, but macOS refuses: TCC protects Downloads, Desktop and Documents, and
+renaming one over SSH fails with `Operation not permitted` however much root you
+have. Other apps in the guest save to the guest's own `~/Downloads`, where a link
+named `on-the-host` points at the share for dragging things across by hand.
 
 ## Passkeys — what does and does not work
 
