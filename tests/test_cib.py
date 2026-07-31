@@ -575,7 +575,7 @@ def test_setup_passes_the_install_script_to_the_guest(credentials, monkeypatch):
     cib.cmd_vm_setup("tart", cib.VmConfig())
     # The generated password has to reach the guest: sshd runs this with no tty and
     # no cached credential, so sudo there can only be fed one.
-    assert seen["script"] == cib.guest_install_script(password)
+    assert seen["script"] == cib.guest_install_script(password, cib.host_time_zone()[0])
     assert password in seen["script"]
 
 
@@ -827,10 +827,14 @@ chmod 0755 "$dst"
 """
 
 
-def _run_guest_script(script: str, home, share_exists: bool):
+def _run_guest_script(script: str, home, share_exists: bool, extra_bin=None):
     """Execute the guest script the way ssh would: /bin/sh -e, with fakes."""
     bin_dir = home / "fakebin"
     bin_dir.mkdir(parents=True, exist_ok=True)
+    if extra_bin:
+        for tool in extra_bin.iterdir():
+            (bin_dir / tool.name).write_text(tool.read_text())
+            (bin_dir / tool.name).chmod(0o755)
     for name in ("curl", "hdiutil", "tar"):
         (bin_dir / name).write_text("#!/bin/sh\nexit 0\n")
         (bin_dir / name).chmod(0o755)
@@ -3201,48 +3205,62 @@ def test_the_image_is_pulled_before_the_container_is_removed(monkeypatch):
     assert "rm" not in order, "a working container was removed for a pull that failed"
 
 
-def test_the_default_build_gives_the_guest_the_hosts_time_zone(credentials, monkeypatch, tmp_path):
-    # Only the packer fallback set it, so the default path produced a guest whose
-    # every timestamp was wrong.
-    _fake_guest_disk(monkeypatch, tmp_path)
+def test_the_guest_sets_its_own_time_zone_with_its_own_tool(credentials, monkeypatch):
+    # Patching /etc/localtime from the host cannot work: on a real Data volume both
+    # it and the zoneinfo directory are symlinks into paths that resolve against the
+    # host, so the patcher refused them and aborted the whole patch.
+    cib.guest_password(create=True)
+    monkeypatch.setattr(cib, "vm_ip", lambda *a, **k: "192.168.1.50")
     monkeypatch.setattr(cib, "host_time_zone", lambda: ("Europe/Rome", "Rome"))
     seen = {}
     monkeypatch.setattr(
-        cib.subprocess,
-        "run",
-        lambda cmd, **kw: (
-            (seen.update(cmd=cmd) if any("cibpatch" in str(c) for c in cmd) else None)
-            or subprocess.CompletedProcess(cmd, 0)
-        ),
+        cib, "guest_ssh", lambda vm, ip, script=None: seen.update(script=script) or 0
     )
-    cib._prepare_guest(cib.VmConfig(), "pw")
-    cmd = seen["cmd"]
-    assert cmd[cmd.index("--time-zone") + 1] == "Europe/Rome"
+    cib.cmd_vm_setup("tart", cib.VmConfig())
+    assert "sudo_pw systemsetup -settimezone Europe/Rome" in seen["script"]
 
 
-def test_the_guest_time_zone_is_a_link_into_its_own_zoneinfo(tmp_path):
-    root = tmp_path / "volume"
-    zone = root / "private/var/db/timezone/zoneinfo/Europe"
-    zone.mkdir(parents=True)
-    (zone / "Rome").write_bytes(b"TZif")
-    cibpatch.set_time_zone(root, "Europe/Rome")
-    link = root / "private/etc/localtime"
-    assert link.is_symlink()
-    # Relative to the guest's own root, not this host's filesystem.
-    assert str(link.readlink()) == "/var/db/timezone/zoneinfo/Europe/Rome"
+def test_a_guest_script_without_a_time_zone_still_runs(tmp_path):
+    # The step has to be a no-op, not an empty line that `sh -e` chokes on.
+    result = _run_guest_script(cib.guest_install_script("pw"), tmp_path, share_exists=True)
+    assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("zone", ["../../etc", "/etc/passwd", ""])
-def test_a_dangerous_time_zone_is_refused(tmp_path, zone):
-    # The zone reaches a path built inside a volume this runs as root over.
-    with pytest.raises(cibpatch.PatchError, match="refusing to use"):
-        cibpatch.set_time_zone(tmp_path, zone)
+def test_the_time_zone_step_runs_in_the_guest(tmp_path):
+    script = cib.guest_install_script("pw", "Europe/Rome")
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "systemsetup").write_text(f'#!/bin/sh\necho "$@" >> {tmp_path}/tz.log\n')
+    (bin_dir / "systemsetup").chmod(0o755)
+    result = _run_guest_script(script, tmp_path, share_exists=True, extra_bin=bin_dir)
+    assert result.returncode == 0, result.stderr
+    assert "-settimezone Europe/Rome" in (tmp_path / "tz.log").read_text()
 
 
-def test_an_unknown_time_zone_leaves_the_guest_alone(tmp_path):
-    # A guest on the installer's zone still works; refusing the build over it would
-    # not be an improvement.
-    root = tmp_path / "volume"
-    (root / "private/etc").mkdir(parents=True)
-    cibpatch.set_time_zone(root, "Mars/Olympus")
-    assert not (root / "private/etc/localtime").exists()
+def test_a_time_zone_the_guest_rejects_does_not_fail_the_install(tmp_path):
+    # A wrong clock is an annoyance; a failed `vm setup` costs Chrome and the
+    # clipboard agent. Under `sh -e` the step has to swallow its own failure.
+    script = cib.guest_install_script("pw", "Mars/Olympus")
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "systemsetup").write_text("#!/bin/sh\nexit 1\n")
+    (bin_dir / "systemsetup").chmod(0o755)
+    result = _run_guest_script(script, tmp_path, share_exists=True, extra_bin=bin_dir)
+    assert result.returncode == 0, result.stderr
+    assert "could not set the time zone" in result.stderr
+
+
+@pytest.mark.parametrize("command", ["ssh", "setup"])
+def test_the_repair_advice_names_the_step_that_makes_it_possible(credentials, monkeypatch, command):
+    # Both messages can only be printed while the guest is up, and `cib vm prepare`
+    # refuses while it is up. Naming prepare alone sent the user to a second error.
+    cib.guest_password(create=True)
+    monkeypatch.setattr(cib, "vm_ip", lambda *a, **k: "192.168.1.50")
+    monkeypatch.setattr(cib, "guest_ssh", lambda *a, **k: 255)
+    action = cib.cmd_vm_ssh if command == "ssh" else cib.cmd_vm_setup
+    with pytest.raises(cib.Failure) as caught:
+        action("tart", cib.VmConfig())
+    message = str(caught.value)
+    assert "cib vm prepare" in message
+    assert "cib vm down" in message, "prepare refuses while the guest is running"
+    assert message.index("cib vm down") < message.index("cib vm prepare")

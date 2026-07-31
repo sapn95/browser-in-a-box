@@ -943,7 +943,6 @@ def _prepare_guest(vm: VmConfig, password: str) -> None:
     # cannot ask for anything when cib runs detached; check before trying.
     ensure_vm_keys()
     layout_id, layout_name = host_keyboard_layout()
-    zone, _city = host_time_zone()
     print(
         f"Preparing the guest without Setup Assistant, keyboard {layout_name} "
         "(this step needs sudo) ..."
@@ -970,8 +969,6 @@ def _prepare_guest(vm: VmConfig, password: str) -> None:
             str(layout_id),
             "--keyboard-name",
             layout_name,
-            "--time-zone",
-            zone,
             "--authorized-key",
             str(VM_KEY.with_suffix(".pub")),
             "--host-key",
@@ -1126,7 +1123,7 @@ AGENT_PLIST = f"""<?xml version="1.0" encoding="UTF-8"?>
 </plist>"""
 
 
-def guest_install_script(password: str) -> str:
+def guest_install_script(password: str, time_zone: str = "") -> str:
     """Chrome, the clipboard agent and the shared Downloads folder, as a script the
     guest runs.
 
@@ -1140,6 +1137,16 @@ def guest_install_script(password: str) -> str:
     used to be used here and could never succeed, which left the clipboard agent
     uninstalled on every guest built the default way.
     """
+    # Set in the guest rather than by patching its disk: on a real Data volume both
+    # /etc/localtime and the zoneinfo directory are symlinks into paths that resolve
+    # against *this* host, so the patcher cannot follow them safely — and refusing
+    # them aborted the whole patch. systemsetup is the guest's own tool for this.
+    time_zone_step = (
+        f"sudo_pw systemsetup -settimezone {shlex.quote(time_zone)} >/dev/null || \\\n"
+        f'  echo "could not set the time zone to {time_zone}" >&2'
+        if time_zone
+        else ":"
+    )
     return f"""set -eu
 CIB_SUDO_PW={shlex.quote(password)}
 # Scratch space under the account's own home rather than /tmp, which every user in
@@ -1219,6 +1226,7 @@ sudo_pw install -m 0644 -o root -g wheel "$CIB_WORK/agent.plist" {AGENT_PLIST_PA
 # Already loaded from an earlier run, or not yet: neither is an error.
 launchctl bootout "gui/$(id -u)/{AGENT_LABEL}" >/dev/null 2>&1 || true
 launchctl bootstrap "gui/$(id -u)" {AGENT_PLIST_PATH} >/dev/null 2>&1 || true
+{time_zone_step}
 # Failing here rather than reporting success: without the agent there is no
 # copy-paste, and the generated password would have to be typed by hand.
 test -x {AGENT_BIN}
@@ -1338,7 +1346,10 @@ def cmd_vm_ssh(tart: str, vm: VmConfig) -> None:
             f"could not open a shell on {vm.user}@{ip}. The offline build turns Remote "
             "Login on and installs cib's key, so this usually means the guest was built "
             "another way, or CIB_VM_USER no longer matches the account it was built "
-            f"with. 'cib vm prepare' re-installs the key ({VM_KEY.with_suffix('.pub')})."
+            "with.\n"
+            "To re-install the key: 'cib vm down', then 'cib vm prepare', then "
+            "'cib vm up' — prepare refuses while the guest is running, and the guest "
+            "has to be running for you to have seen this."
         )
 
 
@@ -1346,11 +1357,12 @@ def cmd_vm_setup(tart: str, vm: VmConfig) -> None:
     """Finish the guest from here: everything after Setup Assistant."""
     ip = vm_ip(tart, vm)
     print(f"Installing Chrome on {vm.user}@{ip} ...")
-    if guest_ssh(vm, ip, guest_install_script(guest_password())) != 0:
+    if guest_ssh(vm, ip, guest_install_script(guest_password(), host_time_zone()[0])) != 0:
         raise Failure(
             f"installing Chrome on the guest at {ip} failed (see above). The offline "
             "build turns Remote Login on and installs cib's key; if the connection "
-            "itself was refused, 'cib vm prepare' re-installs both."
+            "itself was refused, re-install both with 'cib vm down', then "
+            "'cib vm prepare', then 'cib vm up'."
         )
     print("Done. In the guest, sign Chrome into your Google account.")
 
