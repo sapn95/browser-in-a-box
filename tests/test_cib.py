@@ -3439,3 +3439,18 @@ def test_the_download_preferences_are_valid_json():
 
     written = _json.loads(cib.DOWNLOAD_PREFS)
     assert written["download"]["default_directory"] == cib.GUEST_SHARE
+
+
+@pytest.mark.parametrize(
+    "tool", ["python3", "python", "git", "make", "gcc", "clang", "cc", "svn", "jq"]
+)
+def test_the_guest_script_needs_nothing_the_guest_does_not_have(tool):
+    # A fresh macOS has no Command Line Tools. Any of these is a stub that opens
+    # "The <tool> command requires the command line developer tools" — a dialog on
+    # the guest's screen, waiting for a click, from a command that is supposed to
+    # need none. Seen for real, from a diagnostic that used python3 in the guest.
+    script = cib.guest_install_script("pw", "Europe/Rome")
+    body = "\n".join(ln for ln in script.split("\n") if not ln.lstrip().startswith("#"))
+    assert not re.search(rf"(^|[\s|;&(]){re.escape(tool)}([\s;&)]|$)", body), (
+        f"{tool} is not on a bare macOS; using it turns 'cib vm setup' into a dialog"
+    )
