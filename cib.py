@@ -107,13 +107,81 @@ def env_flag(name: str) -> bool:
     return os.environ.get(name, "0") == "1"
 
 
+def config_path() -> Path:
+    """Where the settings file lives. CIB_CONFIG is read straight from the
+    environment, because everything else is read through the file it names."""
+    named = os.environ.get("CIB_CONFIG", "")
+    if named:
+        return Path(named).expanduser()
+    return Path.home() / ".config" / "chrome-in-a-box" / "cib.yaml"
+
+
+# Sections rather than one flat list, because the two variants share a prefix but
+# not much else: [box] keys become CIB_<KEY>, [vm] keys become CIB_VM_<KEY>.
+CONFIG_SECTIONS = {"box": "CIB_", "vm": "CIB_VM_"}
+
+
+def load_config() -> dict[str, str]:
+    """The settings file, flattened into the same names the environment uses.
+
+    Absent is normal and silent. Present but unreadable is not: a typo in a file
+    someone wrote on purpose should say so rather than be ignored, which would
+    look exactly like the setting not working.
+    """
+    path = config_path()
+    if not path.exists():
+        return {}
+    try:
+        import yaml
+    except ImportError:
+        # cib runs from a checkout with nothing installed, which is one of the four
+        # documented ways in. Silently ignoring the file in that case would be the
+        # worst outcome: the settings would simply not apply, with no clue why.
+        raise Failure(
+            f"{path} needs PyYAML to read, and it is not installed. Install cib with "
+            "'uv tool install' or 'brew install', or use CIB_* environment variables "
+            "instead — they need nothing."
+        ) from None
+    try:
+        loaded = yaml.safe_load(path.read_text()) or {}
+    except (yaml.YAMLError, OSError) as exc:
+        raise Failure(f"cannot read {path}: {exc}") from None
+    if not isinstance(loaded, dict):
+        raise Failure(f"{path} must hold a mapping of sections, not {type(loaded).__name__}")
+    settings: dict[str, str] = {}
+    for section, prefix in CONFIG_SECTIONS.items():
+        values = loaded.get(section) or {}
+        if not isinstance(values, dict):
+            raise Failure(f"{path}: the {section!r} section must be a mapping")
+        for key, value in values.items():
+            if isinstance(value, bool):
+                # yaml turns "yes" into True, and everything downstream reads
+                # strings. Lower case, because that is what the env vars use.
+                value = str(value).lower()
+            settings[f"{prefix}{str(key).upper()}"] = str(value)
+    unknown = set(loaded) - set(CONFIG_SECTIONS)
+    if unknown:
+        raise Failure(
+            f"{path}: unknown section(s) {', '.join(sorted(unknown))} — "
+            f"expected {' and '.join(CONFIG_SECTIONS)}"
+        )
+    return settings
+
+
+CONFIG = load_config()
+
+
 def _env(name: str, default: str) -> str:
-    return os.environ.get(name, default)
+    # Environment first: it is the more immediate of the two, so exporting a
+    # variable for one command overrides the file without editing it.
+    return os.environ.get(name) or CONFIG.get(name, default)
 
 
 def _env_int(name: str, default: str, minimum: int = 1) -> int:
     """An integer setting. A bad value is the user's typo, not a crash."""
-    raw = os.environ.get(name, default)
+    # Through _env, not os.environ: reading the environment directly here meant the
+    # settings file worked for every string setting and silently for no numeric one.
+    raw = _env(name, default)
     try:
         value = int(raw)
     except ValueError:
@@ -521,6 +589,11 @@ class VmConfig:
     # "window" is tart's own, which cannot go full screen or scale. "vnc" hands the
     # display to macOS Screen Sharing, which does both.
     viewer: str = field(default_factory=lambda: _env("CIB_VM_VIEWER", "window"))
+    # Sends Cmd+Space, Cmd+Tab and the rest to the guest while its window has focus,
+    # instead of to whatever on the host has registered them. Off by default: it is
+    # all-or-nothing, so a host launcher on Cmd+Space becomes unreachable until you
+    # click away. tart rejects it alongside --vnc, which has no window to focus.
+    capture_keys: str = field(default_factory=lambda: _env("CIB_VM_CAPTURE_KEYS", "false"))
 
 
 PACKER_TEMPLATE = Path(__file__).resolve().parent / "packer" / "chrome-vm.pkr.hcl"
@@ -1207,6 +1280,13 @@ def vm_run_args(vm: VmConfig) -> list[str]:
         args.append("--vnc")
     elif vm.viewer != "window":
         raise Failure(f"CIB_VM_VIEWER must be window or vnc, got {vm.viewer!r}")
+    if vm.capture_keys.lower() in ("1", "true", "yes"):
+        if vm.viewer != "window":
+            raise Failure(
+                "CIB_VM_CAPTURE_KEYS needs tart's own window; tart rejects it with "
+                "--vnc, which has no window of its own to hold the focus"
+            )
+        args.append("--capture-system-keys")
     if vm.net == "bridged":
         return [*args, f"--net-bridged={vm.interface}", vm.name]
     if vm.net == "host":
@@ -1494,6 +1574,18 @@ for CIB_KEY in AutomaticCheckEnabled AutomaticDownload AutomaticallyInstallMacOS
 done
 sudo_pw defaults write /Library/Preferences/com.apple.commerce AutoUpdate -bool true
 
+# Spotlight in the guest answers to Ctrl+Opt+Cmd+Space rather than Cmd+Space. A
+# host launcher on Cmd+Space — Raycast, Alfred, Spotlight itself — registers it as a
+# global hotkey, and a global hotkey wins over the focused VM window, so the guest
+# never sees the keystroke. Nothing can tell the two Command keys apart either: the
+# shortcut is stored as a device-independent modifier mask with no left/right bit.
+# 32 is the space character, 49 its key code, and 1835008 is control+option+command.
+defaults write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add 64 \\
+  '{{enabled = 1; value = {{parameters = (32, 49, 1835008); type = standard;}};}}'
+# Applies it to the running session, so this does not need a logout to take effect.
+/System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings -u \\
+  >/dev/null 2>&1 || true
+
 # Chrome opens the links, since a guest whose default browser is Safari defeats the
 # point. macOS takes this without a prompt only because Chrome asks for it itself.
 open -a {shlex.quote(CHROME_APP)} --args --make-default-browser >/dev/null 2>&1 || true
@@ -1511,6 +1603,9 @@ defaults write com.apple.dock show-recents -bool false
 # it sits on, so a permanent Dock costs a strip of the little room there is.
 defaults write com.apple.dock autohide -bool true
 defaults write com.apple.dock autohide-delay -float 0
+# Right edge, so it does not sit on top of the host's own Dock along the bottom of
+# the same screen. macOS centres the Dock on whichever edge it is given.
+defaults write com.apple.dock orientation -string right
 killall Dock >/dev/null 2>&1 || true
 
 # Failing here rather than reporting success: without the agent there is no
