@@ -460,7 +460,13 @@ class VmConfig:
     cpus: int = field(default_factory=lambda: _env_int("CIB_VM_CPUS", "4", 2))
     memory: int = field(default_factory=lambda: _env_int("CIB_VM_MEMORY", "8192", 4096))
     disk: int = field(default_factory=lambda: _env_int("CIB_VM_DISK", "100", 20))
-    display: str = field(default_factory=lambda: _env("CIB_VM_DISPLAY", "1920x1200"))
+    # Deliberately smaller than the screen you are reading this on. tart makes the
+    # VM's resolution the window's *minimum* size, and SwiftUI marks a window whose
+    # minimum does not fit the display fullScreenNone — which greys out View > Enter
+    # Full Screen with nothing to say why. 1920x1200 did that on a 1728x1117-point
+    # laptop screen, i.e. on most of them. Nothing is lost by starting small: the
+    # window resizes freely upwards, and tart refits the guest's resolution to match.
+    display: str = field(default_factory=lambda: _env("CIB_VM_DISPLAY", "1280x800"))
     # "bridged" gives the guest an address from the real network, so it inherits a
     # working DNS resolver. tart's default "shared" mode hands out the vmnet gateway
     # as resolver, and on some hosts that gateway does not answer DNS at all — the
@@ -807,7 +813,21 @@ def guest_password(create: bool = False) -> str:
     # character whose key moves between the US and Swiss German layouts: -, _, y, z
     # and their capitals all do.
     alphabet = "abcdefghijklmnopqrstuvwxABCDEFGHIJKLMNOPQRSTUVWX0123456789"
-    password = "".join(secrets.choice(alphabet) for _ in range(24))
+    chosen = _env("CIB_VM_PASSWORD", "")
+    if chosen:
+        # Yours to choose, and yours to weigh: a bridged guest sits on the same
+        # network as everyone else on it. SSH here is key-only, so a guessable
+        # password does not open that — but Screen Sharing, if you ever turn it on
+        # inside the guest, takes exactly this password from anywhere on the LAN.
+        if set(chosen) - set(alphabet):
+            raise Failure(
+                "CIB_VM_PASSWORD may only hold letters and digits, and not y or z: "
+                "the build types it as keystrokes, and those keys move between the "
+                "US and Swiss German layouts"
+            )
+        password = chosen
+    else:
+        password = "".join(secrets.choice(alphabet) for _ in range(24))
     CREDENTIALS.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     # Created 0600 rather than chmod-ed afterwards, so it is never briefly readable.
     with os.fdopen(os.open(CREDENTIALS, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
@@ -1294,9 +1314,31 @@ CHROME_EXE = f"{CHROME_APP}/Contents/MacOS/Google Chrome"
 
 # Chrome's own preference file, written before its first launch. prompt_for_download
 # stays off so a download does not open a panel pointing at the guest's own disk.
-DOWNLOAD_PREFS = json.dumps(
-    {"download": {"default_directory": GUEST_SHARE, "prompt_for_download": False}}
+FIRST_RUN_PREFS = json.dumps(
+    {
+        "download": {"default_directory": GUEST_SHARE, "prompt_for_download": False},
+        # Everything below sends less to Google. User preferences, not managed
+        # policy: a policy is the one thing this VM exists to be free of, and it
+        # would put a "managed by your organization" banner in the menu.
+        #
+        # None of it touches passkeys. Those come from iCloud Keychain by way of
+        # macOS, not from Google's password manager, so turning Google's own
+        # services down does not take them away.
+        "search": {"suggest_enabled": False},
+        "alternate_error_pages": {"enabled": False},
+        "safebrowsing": {"enabled": False, "enhanced": False},
+        "spellcheck": {"use_spelling_service": False},
+        # 2 is "do not preconnect or prefetch", which otherwise resolves and opens
+        # connections to whatever a page merely hints at.
+        "net": {"network_prediction_options": 2},
+        "browser": {"has_seen_welcome_page": True},
+        "credentials_enable_service": False,
+        "profile": {"password_manager_leak_detection": False},
+    }
 )
+# Metrics consent is not a profile preference — it lives in Local State, beside the
+# profiles rather than inside one, so writing it into Preferences does nothing.
+LOCAL_STATE_PREFS = json.dumps({"user_experience_metrics": {"reporting_enabled": False}})
 
 AGENT_BIN = "/usr/local/bin/tart-guest-agent"
 AGENT_LABEL = "org.cirruslabs.tart-guest-agent"
@@ -1380,7 +1422,8 @@ if [ -d "{GUEST_SHARE}" ]; then
     # than being reconfigured afterwards. A user preference, not a managed policy:
     # a policy is the one thing this VM exists to be free of.
     mkdir -p "$CIB_PROFILE"
-    printf '%s' {shlex.quote(DOWNLOAD_PREFS)} > "$CIB_PROFILE/Preferences"
+    printf '%s' {shlex.quote(FIRST_RUN_PREFS)} > "$CIB_PROFILE/Preferences"
+    printf '%s' {shlex.quote(LOCAL_STATE_PREFS)} > "$CIB_PROFILE/../Local State"
   fi
 else
   echo "the shared downloads folder is not mounted; start the VM with 'cib vm up'" >&2
@@ -1439,6 +1482,37 @@ sudo_pw pmset -a displaysleep 0 sleep 0 >/dev/null ||
 # macOS 14 and later keep the lock behind sysadminctl as well; older ones do not
 # have the flag at all, so its absence is not a failure.
 sudo_pw sysadminctl -screenLock off -password {shlex.quote(password)} >/dev/null 2>&1 || true
+
+# Updates apply themselves. An unpatched guest is the browser you do your banking
+# in, and the alternative is the update badge nagging in a VM you opened to do one
+# thing. Chrome brings its own updater (Keystone) with the install, so only macOS
+# needs saying.
+sudo_pw softwareupdate --schedule on >/dev/null 2>&1 || true
+for CIB_KEY in AutomaticCheckEnabled AutomaticDownload AutomaticallyInstallMacOSUpdates \\
+               CriticalUpdateInstall ConfigDataInstall; do
+  sudo_pw defaults write /Library/Preferences/com.apple.SoftwareUpdate "$CIB_KEY" -bool true
+done
+sudo_pw defaults write /Library/Preferences/com.apple.commerce AutoUpdate -bool true
+
+# Chrome opens the links, since a guest whose default browser is Safari defeats the
+# point. macOS takes this without a prompt only because Chrome asks for it itself.
+open -a {shlex.quote(CHROME_APP)} --args --make-default-browser >/dev/null 2>&1 || true
+
+# One thing in the Dock, because there is one thing to do here. The default row is
+# Apple's whole suite, none of which this VM is for.
+defaults write com.apple.dock persistent-apps -array \\
+  '<dict><key>tile-data</key><dict><key>file-data</key><dict>'\\
+'<key>_CFURLString</key><string>{CHROME_APP}</string>'\\
+'<key>_CFURLStringType</key><integer>0</integer></dict></dict>'\\
+'<key>tile-type</key><string>file-tile</string></dict>'
+defaults write com.apple.dock persistent-others -array
+defaults write com.apple.dock show-recents -bool false
+# Out of the way by default: the guest's window is already smaller than the screen
+# it sits on, so a permanent Dock costs a strip of the little room there is.
+defaults write com.apple.dock autohide -bool true
+defaults write com.apple.dock autohide-delay -float 0
+killall Dock >/dev/null 2>&1 || true
+
 # Failing here rather than reporting success: without the agent there is no
 # copy-paste, and the generated password would have to be typed by hand.
 test -x {AGENT_BIN}

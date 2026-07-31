@@ -339,6 +339,13 @@ def enable_autologin(root: Path, account: Account) -> None:
     record = read_plist(root, relative)
     record["autoLoginUser"] = account.name
     record["autoLoginUserUID"] = account.uid
+    # "Log in automatically, then lock the screen", which is autologin doing all the
+    # work and none of the good. Whatever the base image carried used to survive, so
+    # the guest booted to a password prompt for a generated 24-character password
+    # that a VM has no Touch ID to shortcut. It is a separate mechanism from the
+    # screensaver lock: turning that one off, in every way there is, changes nothing
+    # here, because loginwindow applies this at session creation.
+    record["autoLoginUserScreenLocked"] = False
     # An AccountInfo entry re-launches Setup Assistant at the next graphical login
     # even with .AppleSetupDone present, so it has to go.
     record.pop("AccountInfo", None)

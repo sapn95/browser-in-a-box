@@ -193,7 +193,10 @@ The macOS VM variant (Apple silicon):
 | `cib vm prepare`  | redo just the offline preparation of a built VM  |
 | `cib vm up`       | start it again — a window opens, shell blocks    |
 | `cib vm setup`    | redo just the Chrome install, over SSH           |
+| `cib vm open`     | start it if stopped, then show its screen        |
+| `cib vm icon`     | write a clickable app into `~/Applications`      |
 | `cib vm password` | print the generated guest password               |
+| `cib vm login`    | print the guest account name and password        |
 | `cib vm ssh`      | open a shell in the guest                        |
 | `cib vm ip`       | print the guest's address                        |
 | `cib vm down`     | stop it                                          |
@@ -285,6 +288,8 @@ Overridable: `CIB_PORT`, `CIB_RESOLUTION`, `CIB_WAIT_SECS`, `CIB_ENGINE`,
 `CIB_IMAGE`, `CIB_NAME`, `CIB_VOLUME`, `CIB_PASSWORD`, `CIB_LOG_TAIL`, `CIB_FORCE`,
 and for the VM `CIB_VM_NAME`, `CIB_VM_CPUS`, `CIB_VM_MEMORY`, `CIB_VM_DISK`,
 `CIB_VM_DISPLAY`, `CIB_VM_NET`, `CIB_VM_INTERFACE`, `CIB_VM_USER`, `CIB_VM_SHARE`,
+`CIB_VM_PASSWORD` (a password of your own instead of a generated one; letters and
+digits only, and no y or z, because the packer path types it as keystrokes),
 `CIB_VM_FIRSTBOOT_SECS` (how long the guest is given to lay down its first-boot
 state before the disk is patched — 180 s, raise it on a slow disk) and
 `CIB_VM_IPSW` (the macOS installer: `latest` by default, or a URL or `.ipsw` path
