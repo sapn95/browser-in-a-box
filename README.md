@@ -189,10 +189,10 @@ The macOS VM variant (Apple silicon):
 
 | Command           | What it does                                    |
 | ----------------- | ----------------------------------------------- |
-| `cib vm create`   | build the VM from a fresh macOS image (large)   |
+| `cib vm create`   | build it, start it, install Chrome — one command |
 | `cib vm prepare`  | redo just the offline preparation of a built VM |
-| `cib vm up`       | start it — a window opens, and this shell blocks |
-| `cib vm setup`    | install Chrome in the guest over SSH            |
+| `cib vm up`       | start it again — a window opens, shell blocks    |
+| `cib vm setup`    | redo just the Chrome install, over SSH          |
 | `cib vm password` | print the generated guest password              |
 | `cib vm ssh`      | open a shell in the guest                       |
 | `cib vm ip`       | print the guest's address                       |
