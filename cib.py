@@ -44,6 +44,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NoReturn
+from urllib.parse import quote
 from xml.parsers.expat import ExpatError
 
 __version__ = "1.4.0"
@@ -475,10 +476,28 @@ class VmConfig:
 
     def check(self) -> None:
         """Reject what would fail later, or quietly do the wrong thing."""
+        # The name is a path component: SECRETS is ~/.config/chrome-in-a-box/<name>,
+        # and 'cib vm delete' removes that directory whole. Empty would make it every
+        # VM's secrets, and ".." would make it ~/.config.
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", self.name):
+            raise Failure(
+                f"CIB_VM_NAME must start with a letter or digit and hold only letters, "
+                f"digits, dot, dash or underscore, got {self.name!r}"
+            )
         # An empty share expands to the current directory, which would be shared
         # into the guest wholesale.
         if not self.share.strip():
             raise Failure("CIB_VM_SHARE is empty; unset it for the default, or give a path")
+        # Checked here rather than only in vm_run_args: 'create' does not reach that
+        # until the guest is built, so a typo used to cost the whole build first.
+        if self.viewer not in ("window", "vnc"):
+            raise Failure(f"CIB_VM_VIEWER must be window or vnc, got {self.viewer!r}")
+        if self.net not in ("bridged", "shared", "host"):
+            raise Failure(f"CIB_VM_NET must be bridged, shared or host, got {self.net!r}")
+        if ":" in str(Path(self.share).expanduser()):
+            raise Failure(
+                f"CIB_VM_SHARE cannot contain a colon, tart uses it as a separator: {self.share}"
+            )
         # Normalised, not merely rejected: the box variant accepts "1280 X 800" and
         # lowercases it, and tart takes 1920X1200 without complaint while ignoring
         # it — so a capital X used to produce a guest silently stuck at 1024x768.
@@ -528,7 +547,6 @@ LAST_IP = SECRETS / "vm-last-ip"
 # and its password is generated fresh for every run. A detached start has no terminal
 # to print it on, so tart's output is kept here and the URL copied out of it.
 BOOT_LOG = SECRETS / "vm-boot-log"
-VNC_URL = SECRETS / "vm-vnc-url"
 
 
 PATCHER = Path(__file__).resolve().parent / "cibpatch.py"
@@ -969,6 +987,9 @@ def _create_offline(tart: str, vm: VmConfig) -> None:
     print("Starting it — a window opens, and this carries on without it ...")
     boot = start_detached(tart, vm)
     ip = wait_for_guest(tart, vm, boot)
+    # 'create' resolves the address itself rather than through vm_ip, so without this
+    # the fallback is empty for exactly the user who ran one command and walked away.
+    remember_ip(ip)
     print(f"Installing Chrome, the clipboard agent and downloads on {vm.user}@{ip} ...")
     if guest_ssh(vm, ip, guest_install_script(password, host_time_zone()[0])) != 0:
         raise Failure(
@@ -977,7 +998,7 @@ def _create_offline(tart: str, vm: VmConfig) -> None:
         )
     print()
     print(f"Ready. The account is {vm.user!r}; 'cib vm password' prints its password.")
-    show_viewer(vm, remember_vnc_url(vm))
+    show_viewer(vm, ip)
     print()
     # Signing in switches iCloud Keychain on by itself and joins the sync circle, so
     # there is no second toggle to hunt for. Nor could there be a third command here:
@@ -989,19 +1010,24 @@ def _create_offline(tart: str, vm: VmConfig) -> None:
     print("'cib vm down' stops it, 'cib vm up' brings it back.")
 
 
-def show_viewer(vm: VmConfig, url: str) -> None:
+SCREEN_SHARING_OFF = """\
+CIB_VM_VIEWER=vnc needs Screen Sharing turned on inside the guest, and nothing on
+this side can turn it on: macOS 26 only accepts it from the guest's own System
+Settings. Do it once, in tart's window (CIB_VM_VIEWER=window):
+
+    System Settings > General > Sharing > Screen Sharing
+
+Then 'cib vm open' connects, and the window can go full screen."""
+
+
+def show_viewer(vm: VmConfig, ip: str) -> None:
     """Say how to look at the guest, which differs per CIB_VM_VIEWER."""
     if vm.viewer != "vnc":
-        print("Its window is already open.")
-    elif url:
-        print(f"Open its screen with:  open {url!r}")
-        print("'cib vm viewer' prints that again — the password is good for this run only.")
+        print("Its window is already open. 'cib vm icon' puts it in ~/Applications.")
+    elif guest_answers(ip, SCREEN_SHARING_PORT):
+        print("Open its screen with 'cib vm open' — the password goes in for you.")
     else:
-        print(
-            "It is running, but tart printed no VNC address, so there is no way to see "
-            "it. 'cib vm down' then 'cib vm up' starts it in the foreground, where tart "
-            "prints the address straight to your terminal."
-        )
+        print(SCREEN_SHARING_OFF)
 
 
 def _prepare_guest(vm: VmConfig, password: str) -> None:
@@ -1177,9 +1203,8 @@ def start_detached(tart: str, vm: VmConfig) -> subprocess.Popen[str]:
     `cib vm up` blocks. Left as a child that outlives cib, the window stays and the
     command can carry on — 'cib vm down' stops it, the same as before.
 
-    Its stdout goes to a file rather than to nothing. Under CIB_VM_VIEWER=vnc the
-    URL tart prints there is the only way to reach the guest's screen, and its
-    password is generated per run, so discarding it strands a running guest.
+    Its stdout goes to a file rather than to nothing, so a start that fails leaves
+    something to read afterwards — a detached run has no terminal to print on.
     """
     BOOT_LOG.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     # Unlinked first so O_CREAT applies the mode even when the file is already there.
@@ -1191,38 +1216,27 @@ def start_detached(tart: str, vm: VmConfig) -> subprocess.Popen[str]:
             stdout=log,
             stderr=subprocess.PIPE,
             text=True,
+            # The detach this function is named for. Without a session of its own the
+            # guest is still in the caller's process group, so it takes the SIGHUP
+            # sent when that group goes away: closing the terminal, or a wrapper
+            # exiting, killed the VM seconds after it started. "Not held by this
+            # terminal" has to mean not reachable by that terminal's signals.
+            start_new_session=True,
         )
     finally:
         # Popen duplicates the descriptor, so the child keeps writing after this.
         log.close()
 
 
-def remember_vnc_url(vm: VmConfig) -> str:
-    """Copy the Screen Sharing URL out of tart's output, and keep it.
+def screen_url(vm: VmConfig, ip: str) -> str:
+    """The address Screen Sharing opens, with the credentials already in it.
 
-    Returns "" when there is nothing to find: CIB_VM_VIEWER=window has no URL
-    because the window itself is the view.
+    tart's --vnc is not a VNC server of its own: it opens macOS Screen Sharing at
+    the guest and nothing more, so the password here is the guest account's, not
+    something tart generated. Putting it in the URL is what stops Screen Sharing
+    asking for a password nobody can be expected to type from memory.
     """
-    if vm.viewer != "vnc":
-        return ""
-    deadline = time.monotonic() + VNC_URL_WAIT_SECS
-    while True:
-        printed = BOOT_LOG.read_text(errors="replace") if BOOT_LOG.exists() else ""
-        for line in printed.splitlines():
-            # Mid-line, not at the start: tart prints "VNC server is running at
-            # vnc://...", so anchoring this to the line start finds nothing.
-            _, marker, rest = line.partition("vnc://")
-            if marker:
-                url = (marker + rest).strip()
-                VNC_URL.unlink(missing_ok=True)
-                with os.fdopen(
-                    os.open(VNC_URL, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w"
-                ) as handle:
-                    handle.write(url + "\n")
-                return url
-        if time.monotonic() >= deadline:
-            return ""
-        time.sleep(1)
+    return f"vnc://{vm.user}:{quote(guest_password(), safe='')}@{ip}"
 
 
 def wait_for_guest(tart: str, vm: VmConfig, boot: subprocess.Popen[str]) -> str:
@@ -1414,9 +1428,12 @@ launchctl bootstrap "gui/$(id -u)" {AGENT_PLIST_PATH} >/dev/null 2>&1 || true
 # A guest that locks its screen asks for the generated 24-character password, and
 # a VM has no Touch ID to shortcut it. The screensaver never starts, the display
 # never sleeps, and neither does the machine.
+# All three are ByHost preferences, so all three need -currentHost. Two of them
+# used to go without it, which writes a domain nothing reads: the guest kept
+# asking for the password however many times the setting was turned off.
 defaults -currentHost write com.apple.screensaver idleTime -int 0
-defaults write com.apple.screensaver askForPassword -int 0
-defaults write com.apple.screensaver askForPasswordDelay -int 0
+defaults -currentHost write com.apple.screensaver askForPassword -int 0
+defaults -currentHost write com.apple.screensaver askForPasswordDelay -int 0
 sudo_pw pmset -a displaysleep 0 sleep 0 >/dev/null ||
   echo "could not turn off display sleep" >&2
 # macOS 14 and later keep the lock behind sysadminctl as well; older ones do not
@@ -1472,15 +1489,22 @@ IP_WAIT_SECS = "60"
 # How long `vm create` gives the guest to boot and answer before it gives up and
 # tells the user to finish with `vm setup`.
 GUEST_WAIT_SECS = 300
-# tart prints the VNC URL while it is starting, so this only covers a slow start.
-VNC_URL_WAIT_SECS = 20
 
 
-def guest_answers(ip: str) -> bool:
-    """Whether anything is listening for ssh at this address."""
+SCREEN_SHARING_PORT = 5900
+
+
+def guest_answers(ip: str, port: int = 22) -> bool:
+    """Whether anything is listening at this address."""
     with socket.socket() as probe:
         probe.settimeout(2)
-        return probe.connect_ex((ip, 22)) == 0
+        return probe.connect_ex((ip, port)) == 0
+
+
+def remember_ip(ip: str) -> None:
+    """Keep the address, so a guest arp has forgotten can still be reached."""
+    LAST_IP.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    LAST_IP.write_text(ip + "\n")
 
 
 def vm_ip(tart: str, vm: VmConfig) -> str:
@@ -1500,8 +1524,7 @@ def vm_ip(tart: str, vm: VmConfig) -> str:
     )
     ip = result.stdout.strip()
     if ip:
-        LAST_IP.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        LAST_IP.write_text(ip + "\n")
+        remember_ip(ip)
         return ip
     # The host's arp table forgets a guest that has been quiet, and `tart ip --wait`
     # only re-reads that table — it sends nothing that would repopulate it. The
@@ -1560,21 +1583,116 @@ def cmd_vm_login(tart: str, vm: VmConfig) -> None:
     print(f"password: {guest_password()}")
 
 
-def cmd_vm_viewer(tart: str, vm: VmConfig) -> None:
-    if vm.viewer != "vnc":
-        raise Failure(
-            "CIB_VM_VIEWER is 'window', so the guest has no VNC address — its own "
-            "window is the view. Set CIB_VM_VIEWER=vnc before 'cib vm up' to get one."
-        )
+def screen_address(tart: str, vm: VmConfig) -> str:
+    """The guest's screen address, or say why there is not one."""
     if not vm_running(tart, vm):
         raise Failure(f"{vm.name!r} is not running — 'cib vm up' starts it")
-    if not VNC_URL.exists():
+    ip = vm_ip(tart, vm)
+    if not guest_answers(ip, SCREEN_SHARING_PORT):
         raise Failure(
-            f"no VNC address was kept for {vm.name!r}. tart generates its password "
-            "when the guest starts, so a run whose address was never captured cannot "
-            "be reached: 'cib vm down' then 'cib vm up' makes a new one."
+            f"{vm.name!r} is up at {ip}, but nothing answers on 5900.\n{SCREEN_SHARING_OFF}"
         )
-    print(VNC_URL.read_text().strip())
+    return screen_url(vm, ip)
+
+
+def cmd_vm_viewer(tart: str, vm: VmConfig) -> None:
+    # Printed rather than opened, so it can be piped. It carries the password.
+    print(screen_address(tart, vm))
+
+
+def cmd_vm_open(tart: str, vm: VmConfig) -> None:
+    """Put the guest's screen in front of the user, whatever the viewer is.
+
+    This is what the clickable app runs, so it has to cope with a guest that is
+    not running yet rather than telling the user to go and start it first.
+    """
+    if not vm_running(tart, vm):
+        print(f"Starting {vm.name!r} ...")
+        boot = start_detached(tart, vm)
+        wait_for_guest(tart, vm, boot)
+    if vm.viewer != "vnc":
+        # tart's own window is the view, and starting it is all there is to do.
+        print(f"{vm.name!r} is running; its window is open.")
+        return
+    run("/usr/bin/open", screen_address(tart, vm))
+
+
+APPS_DIR = Path("~/Applications").expanduser()
+# Info.plist rather than a bare script: a plain executable double-clicks into a
+# Terminal window, and LaunchServices will not give it a Dock icon.
+ICON_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" \
+"http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>{name}</string>
+  <key>CFBundleDisplayName</key><string>{name}</string>
+  <key>CFBundleIdentifier</key><string>ch.sapn.chrome-in-a-box.{ident}</string>
+  <key>CFBundleExecutable</key><string>start</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>{version}</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
+"""
+
+
+def launcher_command() -> str:
+    """How to invoke this same cib from a Dock click.
+
+    The interpreter is named outright when cib is running as a script. A Dock
+    launch gets almost none of a login shell's PATH, so `#!/usr/bin/env python3`
+    resolves against /usr/bin — where an unconfigured Mac has a stub that opens
+    the "install command line tools" dialog instead of running anything.
+    """
+    entry = Path(sys.argv[0]).resolve()
+    if entry.suffix != ".py":
+        # A frozen build is its own interpreter.
+        return shlex.quote(str(entry))
+    python = Path(sys.executable)
+    # A virtualenv is the wrong thing to bake into a launcher meant to outlive the
+    # shell that wrote it — the icon would break the day that project is cleaned up.
+    # cib imports nothing outside the standard library, so the base interpreter the
+    # virtualenv was built on runs it just as well. /usr/bin/python3 is not an option:
+    # macOS still ships 3.9 there, and cib needs 3.10.
+    if sys.prefix != sys.base_prefix:
+        base = Path(sys.base_prefix) / "bin" / "python3"
+        if base.exists():
+            python = base
+    return f"{shlex.quote(str(python))} {shlex.quote(str(entry))}"
+
+
+def cmd_vm_icon(tart: str, vm: VmConfig) -> None:
+    """Write a clickable app that starts the guest and shows its screen.
+
+    The environment is baked in rather than read at click time: a Dock icon gets
+    almost none of a login shell's environment, so a CIB_VM_NAME that only exists
+    in the user's shell profile would silently open the wrong VM.
+    """
+    name = f"Chrome in a Box ({vm.name})" if vm.name != DEFAULT_VM_NAME else "Chrome in a Box"
+    bundle = APPS_DIR / f"{name}.app"
+    macos = bundle / "Contents" / "MacOS"
+    macos.mkdir(parents=True, exist_ok=True)
+    (bundle / "Contents" / "Info.plist").write_text(
+        ICON_PLIST.format(name=name, ident=vm.name, version=__version__)
+    )
+    settings = "\n".join(
+        f"export {key}={shlex.quote(value)}"
+        for key, value in (("CIB_VM_NAME", vm.name), ("CIB_VM_VIEWER", vm.viewer))
+    )
+    start = macos / "start"
+    start.write_text(
+        f"#!/bin/sh\n"
+        f"# Written by 'cib vm icon' {__version__}. Rerun it after moving cib.\n"
+        f"{settings}\n"
+        # Failures land in the Console rather than nowhere: a Dock launch has no
+        # terminal, so without this a broken start looks like nothing happening.
+        f"{launcher_command()} vm open 2>&1 | /usr/bin/logger -t chrome-in-a-box\n"
+    )
+    start.chmod(0o755)
+    print(f"Wrote {bundle}")
+    print("Drag it to the Dock to keep it there.")
 
 
 def cmd_vm_ip(tart: str, vm: VmConfig) -> None:
@@ -1647,6 +1765,13 @@ def cmd_vm_delete(tart: str, vm: VmConfig) -> None:
     # The whole directory goes, rather than a list of names. SECRETS is per VM name,
     # so nothing else lives here; a list is what left vm-last-ip behind, so a fresh
     # build inherited the deleted guest's address and probed it forever.
+    #
+    # Checked again right here, not just in VmConfig.check(): SECRETS is built at
+    # import from the raw environment, so a name that would widen this to every VM's
+    # secrets — or to ~/.config — must not reach rmtree even if the check moves.
+    expected = Path.home() / ".config" / "chrome-in-a-box" / vm.name
+    if SECRETS.resolve() != expected.resolve():
+        raise Failure(f"refusing to delete {SECRETS}: that is not {vm.name!r}'s own directory")
     shutil.rmtree(SECRETS, ignore_errors=True)
     print("Deleted.")
 
@@ -1659,6 +1784,8 @@ VM_ACTIONS = {
     "ssh": cmd_vm_ssh,
     "ip": cmd_vm_ip,
     "viewer": cmd_vm_viewer,
+    "open": cmd_vm_open,
+    "icon": cmd_vm_icon,
     "password": cmd_vm_password,
     "login": cmd_vm_login,
     "down": cmd_vm_down,
@@ -1696,6 +1823,8 @@ VM_HELP = """\
   ssh      open a shell in the guest
   ip       print the guest's address
   viewer   print the address of the guest's screen (CIB_VM_VIEWER=vnc only)
+  open     start it if it is stopped, then put its screen in front of you
+  icon     write a clickable app into ~/Applications that runs 'vm open'
   password print the generated guest account password (copy it, do not retype it)
   login    print the guest account name and password together
   down     stop it
