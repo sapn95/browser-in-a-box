@@ -140,7 +140,9 @@ def kcpassword(password: str) -> bytes:
     return bytes(b ^ KCPASSWORD_KEY[i % len(KCPASSWORD_KEY)] for i, b in enumerate(data))
 
 
-def guest_path(root: Path, relative: str, make_parents: bool = False) -> Path:
+def guest_path(
+    root: Path, relative: str, make_parents: bool = False, directory: bool = False
+) -> Path:
     """A path inside the guest volume, with every component proved not to be a link.
 
     This runs as root on the *host*, and the guest volume is just a directory on the
@@ -183,12 +185,21 @@ def guest_path(root: Path, relative: str, make_parents: bool = False) -> Path:
                 f"{relative!r} passes through {current}, which is a file where a "
                 "directory has to be; refusing to write through it"
             )
-    if make_parents:
-        if current.is_dir():
+    # The leaf's own kind, checked whether or not parents are being created: a
+    # directory where a file belongs is a traceback from a step running as root,
+    # and a file where a directory belongs is the same in reverse.
+    if current.exists():
+        if directory and not current.is_dir():
+            raise PatchError(
+                f"{relative!r} is a file in the guest where a directory has to be; "
+                "refusing to write through it"
+            )
+        if not directory and current.is_dir():
             raise PatchError(
                 f"{relative!r} is a directory in the guest where a file has to be; "
                 "refusing to write through it"
             )
+    if make_parents:
         # Safe now: no component above this one is a link, so nothing can be
         # created somewhere else.
         current.parent.mkdir(parents=True, exist_ok=True)
@@ -233,7 +244,10 @@ def authorise_key(root: Path, account: Account, public_key: str) -> None:
     account's password for sudo. Sending that password to authenticate as well
     would mean sending it before the peer is identified at all.
     """
-    ssh_dir = guest_path(root, f"Users/{account.name}/.ssh", make_parents=True)
+    # directory=True: this leaf IS a directory, and after the first patch it exists.
+    # Without it every later 'cib vm prepare' — the documented retry — refused to
+    # run, blaming the guest for something the guest did correctly.
+    ssh_dir = guest_path(root, f"Users/{account.name}/.ssh", make_parents=True, directory=True)
     ssh_dir.mkdir(parents=True, exist_ok=True)
     ssh_dir.chmod(0o700)
     write_private(
@@ -342,7 +356,7 @@ def enable_remote_login(root: Path) -> None:
 
 
 def create_account(root: Path, account: Account) -> None:
-    users = guest_path(root, "private/var/db/dslocal/nodes/Default/users")
+    users = guest_path(root, "private/var/db/dslocal/nodes/Default/users", directory=True)
     if not users.is_dir():
         raise PatchError(
             f"{users} is missing — is this the guest's Data volume, and has the guest "
@@ -390,7 +404,7 @@ def create_account(root: Path, account: Account) -> None:
     )
     for group in ("admin", "staff"):
         add_to_group(root, group, account, guid)
-    home = guest_path(root, f"Users/{account.name}")
+    home = guest_path(root, f"Users/{account.name}", directory=True)
     home.mkdir(parents=True, exist_ok=True)
     guest_path(root, f"Users/{account.name}/.CFUserTextEncoding").write_text("0:0")
 
@@ -403,7 +417,7 @@ def own_home(root: Path, account: Account) -> None:
     following one here would hand host paths to the guest: `ln -s / ~` inside the
     guest would otherwise chown the host's root filesystem on the next prepare.
     """
-    home = guest_path(root, f"Users/{account.name}")
+    home = guest_path(root, f"Users/{account.name}", directory=True)
     os.chown(home, account.uid, account.gid, follow_symlinks=False)
     for parent, dirs, files in os.walk(home, followlinks=False):
         for name in dirs + files:
@@ -434,7 +448,7 @@ def patch(
             "ownership, so this needs root — re-run with sudo"
         )
     root = Path(root)
-    if not guest_path(root, "private/var/db").is_dir():
+    if not guest_path(root, "private/var/db", directory=True).is_dir():
         raise PatchError(f"{root} does not look like a macOS Data volume")
     create_account(root, account)
     mark_setup_done(root)
