@@ -2623,6 +2623,28 @@ def test_each_vm_name_keeps_its_own_password_and_keys(monkeypatch, tmp_path):
     assert cib.secrets_dir().parent == first.parent
 
 
+def test_the_six_files_that_have_to_be_migrated_are_named_here_too():
+    # All three migration tests seed and assert with SECRET_NAMES, so the tuple was
+    # only ever compared with itself: dropping "vm-credentials" from it left the
+    # password stranded in the flat directory with the suite green, and the first
+    # command an upgrading user ran died on a guest that exists.
+    assert set(cib.SECRET_NAMES) == {
+        "vm-credentials",
+        "vm-key",
+        "vm-key.pub",
+        "vm-host-key",
+        "vm-host-key.pub",
+        "vm-known-hosts",
+    }
+    # And they are the files the rest of cib actually uses.
+    assert cib.CREDENTIALS.name in cib.SECRET_NAMES
+    assert cib.VM_KEY.name in cib.SECRET_NAMES
+    assert cib.VM_KEY.with_suffix(".pub").name in cib.SECRET_NAMES
+    assert cib.VM_HOST_KEY.name in cib.SECRET_NAMES
+    assert cib.VM_HOST_KEY.with_suffix(".pub").name in cib.SECRET_NAMES
+    assert cib.KNOWN_HOSTS.name in cib.SECRET_NAMES
+
+
 def test_secrets_an_older_cib_left_flat_go_to_the_default_vm(monkeypatch, tmp_path):
     # Nothing on disk says which guest they belong to. Moving them into whichever
     # name runs first takes them away from the guest actually using them — whose
@@ -3043,4 +3065,63 @@ def test_up_mounts_the_profile_volume_where_the_image_keeps_it(calls, monkeypatc
     monkeypatch.setattr(cib, "ensure_desktop", lambda e, c: True)
     cfg = cib.Config()
     cib.cmd_up("podman", cfg)
-    assert f"-v {cfg.volume}:{cib.PROFILE_DIR.rsplit('/.config', 1)[0]}" in flat(calls)
+    # The exact pair, not a substring: "/home/kasm-user/Downloads" contains
+    # "/home/kasm-user", so the substring form could only ever catch a dropped -v,
+    # never the drift the comment above names.
+    argv = [a for call in calls for a in call]
+    assert argv[argv.index("-v") + 1] == f"{cfg.volume}:/home/kasm-user"
+    assert cib.PROFILE_DIR.startswith("/home/kasm-user/"), (
+        "the profile has to live under what is mounted, or it stops persisting"
+    )
+
+
+def test_the_selected_layout_wins_over_the_merely_enabled_ones(monkeypatch):
+    # Every keyboard test so far fed AppleSelectedInputSources only, so the loop
+    # order — "Selected first: enabled can hold several, and only one of them is in
+    # use" — was never exercised. This host really does have three enabled and two
+    # selected, so swapping the two keys silently hands the guest U.S.
+    import plistlib
+
+    us = {
+        "InputSourceKind": "Keyboard Layout",
+        "KeyboardLayout ID": 0,
+        "KeyboardLayout Name": "U.S.",
+    }
+    exported = plistlib.dumps(
+        {"AppleEnabledInputSources": [us, _SWISS], "AppleSelectedInputSources": [_SWISS]},
+        fmt=plistlib.FMT_XML,
+    ).decode()
+    monkeypatch.setattr(
+        cib.subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout=exported),
+    )
+    assert cib.host_keyboard_layout() == (19, "Swiss German")
+
+
+def test_the_enabled_list_is_used_when_nothing_is_selected(monkeypatch):
+    import plistlib
+
+    exported = plistlib.dumps(
+        {"AppleEnabledInputSources": [_SWISS], "AppleSelectedInputSources": []},
+        fmt=plistlib.FMT_XML,
+    ).decode()
+    monkeypatch.setattr(
+        cib.subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout=exported),
+    )
+    assert cib.host_keyboard_layout() == (19, "Swiss German")
+
+
+def test_a_secret_written_over_a_loose_file_gets_the_tight_mode(tmp_path):
+    # O_CREAT|O_TRUNC applies the mode only when it creates the file, so the unlink
+    # is the only thing that makes the docstring true for a path that exists. sshd
+    # refuses to start with a group-readable host key, so the guest would silently
+    # become unreachable and the documented retry would not repair it.
+    target = tmp_path / "ssh_host_ed25519_key"
+    target.write_bytes(b"OLD\n")
+    target.chmod(0o644)
+    cibpatch.write_private(target, b"NEWKEY\n")
+    assert target.read_bytes() == b"NEWKEY\n"
+    assert target.stat().st_mode & 0o777 == 0o600
