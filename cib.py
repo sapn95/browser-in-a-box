@@ -622,8 +622,10 @@ def host_keyboard_layout() -> tuple[int, str]:
 
 SUDO_MESSAGE = (
     "this step needs sudo and there is no cached credential to use.\n"
-    "Run 'sudo -v', then re-run — cib never prompts for a password itself, so\n"
-    "a credential cached beforehand is the only way in, whatever it is run from."
+    "Run 'sudo -v' and then cib FROM THE SAME TERMINAL: sudo remembers a\n"
+    "credential per tty, so one cached in another window does not count, and a\n"
+    "process with no tty at all can never have one. cib never prompts for a\n"
+    "password itself, so a credential cached beforehand is the only way in."
 )
 
 
@@ -632,6 +634,10 @@ def sudo_is_cached() -> bool:
 
     sudo prompts on its own tty, so it can ask for nothing when cib runs detached;
     -n turns that into an exit code instead of a hang.
+
+    It also *remembers* per tty: a credential cached in another window is invisible
+    here, and a process launched without a tty at all can never obtain one. So this
+    is not only "has the user run sudo -v", it is "did they run it here".
     """
     probe = subprocess.run(["/usr/bin/sudo", "-n", "true"], check=False, capture_output=True)
     return probe.returncode == 0

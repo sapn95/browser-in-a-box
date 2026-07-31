@@ -3264,3 +3264,11 @@ def test_the_repair_advice_names_the_step_that_makes_it_possible(credentials, mo
     assert "cib vm prepare" in message
     assert "cib vm down" in message, "prepare refuses while the guest is running"
     assert message.index("cib vm down") < message.index("cib vm prepare")
+
+
+def test_the_sudo_message_says_the_credential_is_per_terminal():
+    # sudo remembers per tty. "Run 'sudo -v', then re-run" is only true from the
+    # same window, and a process with no tty can never satisfy the check at all —
+    # which is exactly how this was found, from a tool that has none.
+    assert "SAME TERMINAL" in cib.SUDO_MESSAGE
+    assert "per tty" in cib.SUDO_MESSAGE

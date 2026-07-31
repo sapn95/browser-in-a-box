@@ -219,6 +219,10 @@ Login, cib's SSH key and the guest's host key, and **this host's keyboard layout
 sudo -v && cib vm create
 ```
 
+Both in the **same terminal**, and that matters: sudo remembers a credential per
+tty, so one cached in another window does not count — and a process started
+without a tty (a launchd job, a wrapper, an agent) can never obtain one at all.
+
 It is checked before the download starts, not after — and held open across the
 build, because sudo forgets a credential in about five minutes and the build takes
 thirty to sixty. If the patch step still fails, `cib vm prepare` redoes just it,
