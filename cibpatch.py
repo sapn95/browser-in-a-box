@@ -518,6 +518,10 @@ def data_volume(device: str) -> str:
 
     Matched on the APFS role rather than the name, because the System volume is
     sealed and read-only: writing to the wrong one silently achieves nothing.
+
+    A macOS disk carries more than one container: the first one found on the device
+    holds iSCPreboot, xART, Hardware and Recovery, and the guest's own volumes are
+    in the next. So every matching container is searched, not just the first.
     """
     result = subprocess.run(
         ["/usr/sbin/diskutil", "apfs", "list", "-plist"],
@@ -527,6 +531,7 @@ def data_volume(device: str) -> str:
     if result.returncode != 0:
         raise PatchError("could not list the APFS containers on this host")
     ours = Path(device).name  # e.g. "disk10"
+    found: list[str] = []
     for container in plistlib.loads(result.stdout).get("Containers", []):
         stores = container.get("PhysicalStores", [])
         if not any(
@@ -539,10 +544,9 @@ def data_volume(device: str) -> str:
             roles = volume.get("Roles") or []
             if "Data" in roles or volume.get("Name") == "Data":
                 return "/dev/" + volume["DeviceIdentifier"]
-        raise PatchError(
-            f"the container on {device} has no Data volume; it has "
-            + ", ".join(v.get("Name", "?") for v in container.get("Volumes", []))
-        )
+        found.extend(v.get("Name", "?") for v in container.get("Volumes", []))
+    if found:
+        raise PatchError(f"no Data volume on {device}; its containers hold " + ", ".join(found))
     raise PatchError(f"nothing on this host has {device} as its physical store")
 
 
