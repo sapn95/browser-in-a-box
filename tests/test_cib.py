@@ -3343,3 +3343,69 @@ def test_a_lock_that_never_clears_is_reported(monkeypatch):
     monkeypatch.setattr(cib.subprocess, "Popen", lambda *a, **k: _Locked())
     with pytest.raises(cib.Failure, match="still locked after"):
         cib.boot_once("tart", cib.VmConfig())
+
+
+def test_the_data_volume_is_found_in_the_second_container_too(monkeypatch):
+    # A macOS disk carries more than one APFS container. The first one on the
+    # device holds iSCPreboot, xART, Hardware and Recovery; the guest's own volumes
+    # are in the next. Stopping at the first cost a whole real build.
+    import plistlib
+
+    listing = plistlib.dumps(
+        {
+            "Containers": [
+                {
+                    "PhysicalStores": [{"DeviceIdentifier": "disk4s1"}],
+                    "Volumes": [
+                        {"DeviceIdentifier": "disk4s1", "Name": "iSCPreboot"},
+                        {"DeviceIdentifier": "disk4s2", "Name": "xART"},
+                        {"DeviceIdentifier": "disk4s3", "Name": "Hardware"},
+                        {"DeviceIdentifier": "disk4s4", "Name": "Recovery"},
+                    ],
+                },
+                {
+                    "PhysicalStores": [{"DeviceIdentifier": "disk4s2"}],
+                    "Volumes": [
+                        {
+                            "DeviceIdentifier": "disk5s1",
+                            "Name": "Macintosh HD",
+                            "Roles": ["System"],
+                        },
+                        {"DeviceIdentifier": "disk5s2", "Name": "Data", "Roles": ["Data"]},
+                    ],
+                },
+            ]
+        }
+    )
+    monkeypatch.setattr(
+        cibpatch.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=listing, stderr=b""),
+    )
+    assert cibpatch.data_volume("/dev/disk4") == "/dev/disk5s2"
+
+
+def test_a_disk_whose_containers_hold_no_data_volume_names_them_all(monkeypatch):
+    import plistlib
+
+    listing = plistlib.dumps(
+        {
+            "Containers": [
+                {
+                    "PhysicalStores": [{"DeviceIdentifier": "disk4s1"}],
+                    "Volumes": [{"DeviceIdentifier": "disk4s1", "Name": "iSCPreboot"}],
+                },
+                {
+                    "PhysicalStores": [{"DeviceIdentifier": "disk4s2"}],
+                    "Volumes": [{"DeviceIdentifier": "disk5s1", "Name": "Recovery"}],
+                },
+            ]
+        }
+    )
+    monkeypatch.setattr(
+        cibpatch.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=listing, stderr=b""),
+    )
+    with pytest.raises(cibpatch.PatchError, match="iSCPreboot, Recovery"):
+        cibpatch.data_volume("/dev/disk4")
