@@ -2926,3 +2926,121 @@ def test_a_directory_where_a_file_belongs_is_a_message_too(tmp_path):
     (root / "private/etc/kcpassword").mkdir(parents=True)
     with pytest.raises(cibpatch.PatchError, match="directory in the guest where a file"):
         cibpatch.guest_path(root, "private/etc/kcpassword", make_parents=True)
+
+
+# --- round 17 ------------------------------------------------------------------
+
+
+def test_preparing_a_guest_that_already_has_the_key_still_works(tmp_path, monkeypatch):
+    # `cib vm prepare` is the documented retry for a half-hour build, and every
+    # failure message points at it. The directory guard added for a file where a
+    # directory belongs fired on ~/.ssh, which is a directory and is supposed to be.
+    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g, **kw: None)
+    root = _guest_volume(tmp_path)
+    keys = cibpatch.Keys(
+        authorized="ssh-ed25519 AAAAPUB cib",
+        host_private="KEY\n",
+        host_public="ssh-ed25519 AAAAHOST guest",
+    )
+    cibpatch.patch(root, cibpatch.Account("admin", "pw"), None, keys)
+    cibpatch.patch(root, cibpatch.Account("admin", "pw"), None, keys)  # must not raise
+    authorized = root / "Users/admin/.ssh/authorized_keys"
+    assert authorized.read_text().strip() == keys.authorized
+    assert authorized.stat().st_mode & 0o777 == 0o600
+
+
+def test_a_file_where_the_ssh_directory_belongs_is_still_refused(tmp_path, monkeypatch):
+    # The guard has to keep catching the case it was added for.
+    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g, **kw: None)
+    root = _guest_volume(tmp_path)
+    (root / "Users/admin").mkdir(parents=True)
+    (root / "Users/admin/.ssh").write_text("not a directory")
+    with pytest.raises(cibpatch.PatchError, match="file in the guest where a directory"):
+        cibpatch.authorise_key(root, cibpatch.Account("admin", "pw"), "ssh-ed25519 AAAA cib")
+
+
+def test_every_vm_command_migrates_an_older_installs_secrets(monkeypatch, tmp_path):
+    # 'cib vm ssh' reads the keys through ssh_options() without ever calling
+    # guest_password(), so it was the one command that failed on a pre-1.4 install
+    # while every other one repaired it on the way past.
+    monkeypatch.setattr(cib.Path, "home", classmethod(lambda c: tmp_path))
+    flat = tmp_path / ".config" / "chrome-in-a-box"
+    flat.mkdir(parents=True)
+    for name in cib.SECRET_NAMES:
+        (flat / name).write_text(f"old {name}\n")
+    monkeypatch.setattr(cib, "SECRETS", flat / cib.DEFAULT_VM_NAME)
+    monkeypatch.setattr(cib, "find_tart", lambda: "/usr/bin/tart")
+    monkeypatch.setattr(cib, "VM_ACTIONS", {"ssh": lambda tart, vm: None})
+    cib.main(["vm", "ssh"])
+    for name in cib.SECRET_NAMES:
+        assert (flat / cib.DEFAULT_VM_NAME / name).exists(), f"{name} was not migrated"
+
+
+def test_the_patcher_turns_the_key_paths_it_is_given_into_key_material(monkeypatch, tmp_path):
+    # cib's side of this wire is asserted; the patcher's side was not, so main()
+    # could throw both arguments away with the suite green.
+    import io
+
+    pub, priv = tmp_path / "k.pub", tmp_path / "h"
+    pub.write_text("ssh-ed25519 AAAAPUB cib\n")
+    priv.write_text("HOSTKEY\n")
+    priv.with_suffix(".pub").write_text("ssh-ed25519 AAAAHOST guest\n")
+    seen = {}
+    monkeypatch.setattr(cibpatch, "prepare", lambda d, a, k, ks: seen.update(keys=ks))
+    monkeypatch.setattr(cibpatch.sys, "stdin", io.StringIO("pw\n"))
+    cibpatch.main(
+        [
+            "--disk",
+            "/x/disk.img",
+            "--user",
+            "admin",
+            "--authorized-key",
+            str(pub),
+            "--host-key",
+            str(priv),
+        ]
+    )
+    assert seen["keys"].authorized.strip() == "ssh-ed25519 AAAAPUB cib"
+    assert seen["keys"].host_private == "HOSTKEY\n"
+    assert seen["keys"].host_public.strip() == "ssh-ed25519 AAAAHOST guest"
+
+
+def test_the_templates_key_provisioner_writes_what_ssh_will_look_for(tmp_path):
+    # Grepping the template for "authorized_keys" passes even if the provisioner
+    # writes it somewhere sshd never reads.
+    import re as _re
+
+    template = (Path(cib.__file__).resolve().parent / "packer" / "chrome-vm.pkr.hcl").read_text()
+    lines = _re.findall(
+        r'^\s*"(mkdir -p ~/\.ssh.*?|printf .*?authorized_keys)",\s*$', template, _re.M
+    )
+    assert lines, "the key provisioner is no longer where it was"
+    home = tmp_path / "home"
+    home.mkdir()
+    # HCL escapes its strings, so what packer hands the shell is the unescaped
+    # form: `printf '%s\\n'` in the template is `printf '%s\n'` in the guest.
+    script = "\n".join(
+        ln.replace("\\\\n", "\\n").replace("${var.authorized_key}", "ssh-ed25519 AAAAPUB cib")
+        for ln in lines
+    )
+    subprocess.run(  # noqa: S603
+        ["/bin/sh", "-e", "-c", script],
+        env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+        check=True,
+        capture_output=True,
+    )
+    assert (home / ".ssh/authorized_keys").read_text().strip() == "ssh-ed25519 AAAAPUB cib"
+
+
+def test_up_mounts_the_profile_volume_where_the_image_keeps_it(calls, monkeypatch):
+    # Drop the -v, or let the container path drift from /home/kasm-user, and the
+    # profile stops persisting while `box down` still promises it is kept.
+    monkeypatch.setattr(cib, "container_running", lambda *a, **k: False)
+    monkeypatch.setattr(cib, "ensure_image", lambda e, c: None)
+    monkeypatch.setattr(cib, "wait_for_ui", lambda e, c: None)
+    monkeypatch.setattr(cib, "ensure_desktop", lambda e, c: True)
+    cfg = cib.Config()
+    cib.cmd_up("podman", cfg)
+    assert f"-v {cfg.volume}:{cib.PROFILE_DIR.rsplit('/.config', 1)[0]}" in flat(calls)

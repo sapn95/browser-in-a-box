@@ -1511,6 +1511,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         if args.variant == "vm":
+            # Once, here, rather than in whichever helper happens to read the
+            # secrets first: 'cib vm ssh' reads them through ssh_options() without
+            # ever calling guest_password(), so it was the one command that failed
+            # on a pre-1.4 install while every other one repaired it.
+            migrate_flat_secrets()
             vm = VmConfig()
             vm.check()
             VM_ACTIONS[args.action](find_tart(), vm)
