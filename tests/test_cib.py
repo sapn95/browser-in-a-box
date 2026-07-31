@@ -3600,11 +3600,19 @@ def test_an_existing_chrome_profile_is_not_overwritten(tmp_path):
     assert "already has a profile" in result.stderr
 
 
-def test_the_download_preferences_are_valid_json():
+def test_the_first_run_preferences_are_valid_json():
     import json as _json
 
-    written = _json.loads(cib.DOWNLOAD_PREFS)
+    written = _json.loads(cib.FIRST_RUN_PREFS)
     assert written["download"]["default_directory"] == cib.GUEST_SHARE
+    # Chrome reads this file once, before its first launch, so anything malformed is
+    # silently discarded and every setting here is quietly lost.
+    assert written["safebrowsing"]["enabled"] is False
+    assert written["search"]["suggest_enabled"] is False
+    state = _json.loads(cib.LOCAL_STATE_PREFS)
+    # Not in Preferences: metrics consent lives beside the profiles, not inside one,
+    # so putting it in the profile would look right and do nothing.
+    assert state["user_experience_metrics"]["reporting_enabled"] is False
 
 
 @pytest.mark.parametrize(
@@ -3813,3 +3821,20 @@ def test_the_probe_asks_for_ssh_and_gives_up_quickly(monkeypatch):
     assert cib.guest_answers("10.0.0.9") is True
     assert seen["addr"] == ("10.0.0.9", 22)
     assert seen["timeout"] <= 5, "a dead guest must not hold the command up"
+
+
+def test_a_chosen_guest_password_is_used_instead_of_a_generated_one(credentials, monkeypatch):
+    monkeypatch.setenv("CIB_VM_PASSWORD", "admin")
+    assert cib.guest_password(create=True) == "admin"
+    # Saved like any other, so 'cib vm login' and the guest agree after the variable
+    # is gone from the shell that built it.
+    monkeypatch.delenv("CIB_VM_PASSWORD")
+    assert cib.guest_password() == "admin"
+
+
+def test_a_chosen_password_with_a_shifting_key_is_refused(credentials, monkeypatch):
+    # y and z swap between the US and Swiss German layouts, and the packer path types
+    # this password in as keystrokes — so it would build a guest nobody can log into.
+    monkeypatch.setenv("CIB_VM_PASSWORD", "crazy")
+    with pytest.raises(cib.Failure, match="Swiss German"):
+        cib.guest_password(create=True)
