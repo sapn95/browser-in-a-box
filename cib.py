@@ -524,6 +524,11 @@ KNOWN_HOSTS = SECRETS / "vm-known-hosts"
 # The address the guest last answered on. arp forgets an idle guest and
 # `tart ip --wait` cannot make it remember, so this is the fallback.
 LAST_IP = SECRETS / "vm-last-ip"
+# With CIB_VM_VIEWER=vnc, tart prints the Screen Sharing URL on stdout as it starts,
+# and its password is generated fresh for every run. A detached start has no terminal
+# to print it on, so tart's output is kept here and the URL copied out of it.
+BOOT_LOG = SECRETS / "vm-boot-log"
+VNC_URL = SECRETS / "vm-vnc-url"
 
 
 PATCHER = Path(__file__).resolve().parent / "cibpatch.py"
@@ -972,11 +977,31 @@ def _create_offline(tart: str, vm: VmConfig) -> None:
         )
     print()
     print(f"Ready. The account is {vm.user!r}; 'cib vm password' prints its password.")
-    print("Two things Apple only allows by hand, in the window:")
-    print("  1. sign in to your Apple Account")
-    print("  2. System Settings > Apple Account > iCloud > turn on Passwords & Keychain")
+    show_viewer(vm, remember_vnc_url(vm))
+    print()
+    # Signing in switches iCloud Keychain on by itself and joins the sync circle, so
+    # there is no second toggle to hunt for. Nor could there be a third command here:
+    # joining is a sponsorship handshake with a device already in the circle, not a
+    # setting a script could write.
+    print("One thing Apple only allows by hand: sign in to your Apple Account in the")
+    print("guest. That is also what brings your passkeys in.")
     print()
     print("'cib vm down' stops it, 'cib vm up' brings it back.")
+
+
+def show_viewer(vm: VmConfig, url: str) -> None:
+    """Say how to look at the guest, which differs per CIB_VM_VIEWER."""
+    if vm.viewer != "vnc":
+        print("Its window is already open.")
+    elif url:
+        print(f"Open its screen with:  open {url!r}")
+        print("'cib vm viewer' prints that again — the password is good for this run only.")
+    else:
+        print(
+            "It is running, but tart printed no VNC address, so there is no way to see "
+            "it. 'cib vm down' then 'cib vm up' starts it in the foreground, where tart "
+            "prints the address straight to your terminal."
+        )
 
 
 def _prepare_guest(vm: VmConfig, password: str) -> None:
@@ -1112,9 +1137,9 @@ def _create_with_packer(tart: str, vm: VmConfig) -> None:
     print(f"Built. The account is {vm.user!r}; 'cib vm password' prints its password.")
     print("Next:")
     print("  1. cib vm up")
+    # No Keychain step: signing in switches it on and joins the sync circle itself.
     print("  2. sign in to your Apple Account            (interactive: 2FA)")
-    print("  3. System Settings > Apple Account > iCloud > turn on Passwords & Keychain")
-    print("  4. cib vm setup    — installs Chrome, the clipboard agent and downloads")
+    print("  3. cib vm setup    — installs Chrome, the clipboard agent and downloads")
 
 
 # Where a tart directory share appears inside a macOS guest.
@@ -1151,13 +1176,53 @@ def start_detached(tart: str, vm: VmConfig) -> subprocess.Popen[str]:
     `tart run` is a foreground process for as long as the VM lives, which is why
     `cib vm up` blocks. Left as a child that outlives cib, the window stays and the
     command can carry on — 'cib vm down' stops it, the same as before.
+
+    Its stdout goes to a file rather than to nothing. Under CIB_VM_VIEWER=vnc the
+    URL tart prints there is the only way to reach the guest's screen, and its
+    password is generated per run, so discarding it strands a running guest.
     """
-    return subprocess.Popen(  # noqa: S603
-        [tart, *vm_run_args(vm)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    BOOT_LOG.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Unlinked first so O_CREAT applies the mode even when the file is already there.
+    BOOT_LOG.unlink(missing_ok=True)
+    log = os.fdopen(os.open(BOOT_LOG, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w")
+    try:
+        return subprocess.Popen(  # noqa: S603
+            [tart, *vm_run_args(vm)],
+            stdout=log,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    finally:
+        # Popen duplicates the descriptor, so the child keeps writing after this.
+        log.close()
+
+
+def remember_vnc_url(vm: VmConfig) -> str:
+    """Copy the Screen Sharing URL out of tart's output, and keep it.
+
+    Returns "" when there is nothing to find: CIB_VM_VIEWER=window has no URL
+    because the window itself is the view.
+    """
+    if vm.viewer != "vnc":
+        return ""
+    deadline = time.monotonic() + VNC_URL_WAIT_SECS
+    while True:
+        printed = BOOT_LOG.read_text(errors="replace") if BOOT_LOG.exists() else ""
+        for line in printed.splitlines():
+            # Mid-line, not at the start: tart prints "VNC server is running at
+            # vnc://...", so anchoring this to the line start finds nothing.
+            _, marker, rest = line.partition("vnc://")
+            if marker:
+                url = (marker + rest).strip()
+                VNC_URL.unlink(missing_ok=True)
+                with os.fdopen(
+                    os.open(VNC_URL, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w"
+                ) as handle:
+                    handle.write(url + "\n")
+                return url
+        if time.monotonic() >= deadline:
+            return ""
+        time.sleep(1)
 
 
 def wait_for_guest(tart: str, vm: VmConfig, boot: subprocess.Popen[str]) -> str:
@@ -1407,6 +1472,8 @@ IP_WAIT_SECS = "60"
 # How long `vm create` gives the guest to boot and answer before it gives up and
 # tells the user to finish with `vm setup`.
 GUEST_WAIT_SECS = 300
+# tart prints the VNC URL while it is starting, so this only covers a slow start.
+VNC_URL_WAIT_SECS = 20
 
 
 def guest_answers(ip: str) -> bool:
@@ -1479,7 +1546,35 @@ def guest_ssh(vm: VmConfig, ip: str, script: str | None = None) -> int:
 
 
 def cmd_vm_password(tart: str, vm: VmConfig) -> None:
+    # Just the password, nothing around it, so it can be piped straight to pbcopy.
     print(guest_password())
+
+
+def cmd_vm_login(tart: str, vm: VmConfig) -> None:
+    """Both halves of the credential, for the times a login screen does appear.
+
+    Autologin means the guest normally walks past it, but the screen still comes
+    back for Screen Sharing, for System Settings and after a lock.
+    """
+    print(f"user:     {vm.user}")
+    print(f"password: {guest_password()}")
+
+
+def cmd_vm_viewer(tart: str, vm: VmConfig) -> None:
+    if vm.viewer != "vnc":
+        raise Failure(
+            "CIB_VM_VIEWER is 'window', so the guest has no VNC address — its own "
+            "window is the view. Set CIB_VM_VIEWER=vnc before 'cib vm up' to get one."
+        )
+    if not vm_running(tart, vm):
+        raise Failure(f"{vm.name!r} is not running — 'cib vm up' starts it")
+    if not VNC_URL.exists():
+        raise Failure(
+            f"no VNC address was kept for {vm.name!r}. tart generates its password "
+            "when the guest starts, so a run whose address was never captured cannot "
+            "be reached: 'cib vm down' then 'cib vm up' makes a new one."
+        )
+    print(VNC_URL.read_text().strip())
 
 
 def cmd_vm_ip(tart: str, vm: VmConfig) -> None:
@@ -1548,15 +1643,11 @@ def cmd_vm_delete(tart: str, vm: VmConfig) -> None:
     # The password and the keys belong to the VM that is gone. Left behind, the next
     # build silently reuses them — and 'cib vm password' keeps printing a password
     # for a guest that no longer exists.
-    for leftover in (
-        CREDENTIALS,
-        VM_KEY,
-        VM_KEY.with_suffix(".pub"),
-        VM_HOST_KEY,
-        VM_HOST_KEY.with_suffix(".pub"),
-        KNOWN_HOSTS,
-    ):
-        leftover.unlink(missing_ok=True)
+    #
+    # The whole directory goes, rather than a list of names. SECRETS is per VM name,
+    # so nothing else lives here; a list is what left vm-last-ip behind, so a fresh
+    # build inherited the deleted guest's address and probed it forever.
+    shutil.rmtree(SECRETS, ignore_errors=True)
     print("Deleted.")
 
 
@@ -1567,7 +1658,9 @@ VM_ACTIONS = {
     "setup": cmd_vm_setup,
     "ssh": cmd_vm_ssh,
     "ip": cmd_vm_ip,
+    "viewer": cmd_vm_viewer,
     "password": cmd_vm_password,
+    "login": cmd_vm_login,
     "down": cmd_vm_down,
     "status": cmd_vm_status,
     "delete": cmd_vm_delete,
@@ -1602,7 +1695,9 @@ VM_HELP = """\
   setup    redo just the Chrome and clipboard-agent install, over SSH
   ssh      open a shell in the guest
   ip       print the guest's address
+  viewer   print the address of the guest's screen (CIB_VM_VIEWER=vnc only)
   password print the generated guest account password (copy it, do not retype it)
+  login    print the guest account name and password together
   down     stop it
   status   list VMs and their state
   delete   delete the VM and everything in it (asks first)
@@ -1626,8 +1721,10 @@ guest on the very first connection. Nothing asks you to type anything.
 
 Downloads in the guest land in ~/Downloads/chrome-vm on the host (CIB_VM_SHARE).
 
-Two things stay manual, because Apple makes them interactive on purpose: signing
-in to the Apple Account, and turning on iCloud Keychain."""
+One thing stays manual, because Apple makes it interactive on purpose: signing in
+to the Apple Account. That switches iCloud Keychain on by itself, so there is no
+second toggle to find — joining the sync circle is a handshake with a device
+already in it, not a setting any script could write."""
 
 
 def build_parser() -> argparse.ArgumentParser:
