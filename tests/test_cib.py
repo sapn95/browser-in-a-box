@@ -3272,3 +3272,74 @@ def test_the_sudo_message_says_the_credential_is_per_terminal():
     # which is exactly how this was found, from a tool that has none.
     assert "SAME TERMINAL" in cib.SUDO_MESSAGE
     assert "per tty" in cib.SUDO_MESSAGE
+
+
+def test_a_boot_blocked_by_the_installers_lock_is_retried(monkeypatch):
+    # `tart create` returns before the Virtualization framework lets go of the VM's
+    # auxiliary storage, so a boot started straight afterwards fails with EAGAIN.
+    # Nothing holds it a moment later: it is a handover, not a conflict.
+    import io
+
+    attempts = []
+
+    class _Locked(_FakeBoot):
+        returncode = 1
+
+        # A property, not a class attribute: one StringIO shared by every instance
+        # is emptied by the first read, so the second attempt would see no detail
+        # and be reported as a different failure.
+        @property
+        def stderr(self):
+            return io.StringIO('VZErrorDomain Code=2 "Failed to lock auxiliary storage."')
+
+        def poll(self):
+            return 1
+
+    def spawn(*a, **k):
+        attempts.append(1)
+        return _FakeBoot() if len(attempts) >= 3 else _Locked()
+
+    monkeypatch.setattr(cib.time, "sleep", lambda s: None)
+    monkeypatch.setattr(cib.subprocess, "Popen", spawn)
+    assert cib.boot_once("tart", cib.VmConfig()).poll() is None
+    assert len(attempts) == 3
+
+
+def test_a_boot_that_failed_for_another_reason_is_not_retried(monkeypatch):
+    # A guest that never booted has no first-boot state; patching it produces
+    # something that reports "Built." and cannot be logged in to.
+    import io
+
+    attempts = []
+
+    class _Broken(_FakeBoot):
+        returncode = 2
+        stderr = io.StringIO("no such vm")
+
+        def poll(self):
+            return 2
+
+    monkeypatch.setattr(cib.time, "sleep", lambda s: None)
+    monkeypatch.setattr(cib.subprocess, "Popen", lambda *a, **k: attempts.append(1) or _Broken())
+    with pytest.raises(cib.Failure, match="no such vm"):
+        cib.boot_once("tart", cib.VmConfig())
+    assert len(attempts) == 1, "only the lock error is transient"
+
+
+def test_a_lock_that_never_clears_is_reported(monkeypatch):
+    import io
+
+    class _Locked(_FakeBoot):
+        returncode = 1
+
+        @property
+        def stderr(self):
+            return io.StringIO("Failed to lock auxiliary storage.")
+
+        def poll(self):
+            return 1
+
+    monkeypatch.setattr(cib.time, "sleep", lambda s: None)
+    monkeypatch.setattr(cib.subprocess, "Popen", lambda *a, **k: _Locked())
+    with pytest.raises(cib.Failure, match="still locked after"):
+        cib.boot_once("tart", cib.VmConfig())

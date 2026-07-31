@@ -849,6 +849,47 @@ def cmd_vm_prepare(tart: str, vm: VmConfig) -> None:
     _prepare_guest(vm, guest_password())
 
 
+# `tart create` returns before the Virtualization framework has let go of the VM's
+# auxiliary storage, so a boot started straight afterwards fails with "Failed to
+# lock auxiliary storage" (EAGAIN). Nothing on the host holds it a moment later: it
+# is a handover, not a conflict.
+BOOT_ATTEMPTS = 12
+BOOT_SETTLE_SECS = 5
+LOCKED_MARKER = "lock auxiliary storage"
+
+
+def boot_once(tart: str, vm: VmConfig) -> subprocess.Popen[str]:
+    """Start the fresh guest, waiting out the installer's lock if it is still held.
+
+    Returns the still-running child. A boot that exits for any other reason is
+    reported as it is: a guest that never booted has no first-boot state, and
+    patching it would produce something that says "Built" and cannot log in.
+    """
+    for attempt in range(1, BOOT_ATTEMPTS + 1):
+        boot = subprocess.Popen(  # noqa: S603
+            [tart, "run", "--no-graphics", vm.name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        time.sleep(BOOT_SETTLE_SECS)
+        if boot.poll() is None:
+            return boot
+        detail = (boot.stderr.read() or "").strip() if boot.stderr else ""
+        if LOCKED_MARKER not in detail:
+            raise Failure(
+                f"the guest's first boot exited immediately (tart exit {boot.returncode})"
+                + (f": {detail}" if detail else "")
+            )
+        if attempt == 1:
+            print("  the installer has not let go of the VM yet, waiting ...")
+    raise Failure(
+        f"{vm.name!r} was still locked after "
+        f"{BOOT_ATTEMPTS * BOOT_SETTLE_SECS}s. Check 'cib vm status', and that no "
+        "other tart process has it open."
+    )
+
+
 def _create_offline(tart: str, vm: VmConfig) -> None:
     """Build the guest and prepare it by patching its disk, so Setup Assistant is
     never shown. Deterministic, unlike typing into it."""
@@ -885,17 +926,14 @@ def _create_offline(tart: str, vm: VmConfig) -> None:
         # The guest has to boot once for its first-boot state to exist; there is nothing
         # to patch before that.
         print("Booting once so the guest lays down its first-boot state ...")
-        boot = subprocess.Popen(  # noqa: S603
-            [tart, "run", "--no-graphics", vm.name],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        time.sleep(firstboot)
-        # A boot that never happened would otherwise be patched and called "Built".
+        # A boot that never happened would otherwise be patched and called "Built",
+        # so boot_once raises rather than returning a dead child.
+        boot = boot_once(tart, vm)
+        time.sleep(max(0, firstboot - BOOT_SETTLE_SECS))
         if boot.poll() is not None:
             raise Failure(
-                f"the guest's first boot exited immediately (tart exit {boot.returncode})"
+                f"the guest's first boot stopped before it was ready (tart exit "
+                f"{boot.returncode})"
                 + (f": {(boot.stderr.read() or '').strip()}" if boot.stderr else "")
             )
         run(tart, "stop", vm.name, check=False, capture=True)
