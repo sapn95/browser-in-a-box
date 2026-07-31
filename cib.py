@@ -957,13 +957,22 @@ def _create_offline(tart: str, vm: VmConfig) -> None:
 
         _prepare_guest(vm, password)
     print()
-    print(f"Built. The account is {vm.user!r}; 'cib vm password' prints its password.")
-    print("Next:")
-    print("  1. cib vm up          — boots straight to the desktop, no Setup Assistant.")
-    print("                          It stays in the foreground, so run the rest from")
-    print("                          a second terminal; Ctrl-C here stops the guest.")
-    print("  2. cib vm setup       — installs Chrome, the clipboard agent and downloads")
-    print("  3. sign in to your Apple Account, then turn on iCloud Keychain")
+    print("Starting it — a window opens, and this carries on without it ...")
+    boot = start_detached(tart, vm)
+    ip = wait_for_guest(tart, vm, boot)
+    print(f"Installing Chrome, the clipboard agent and downloads on {vm.user}@{ip} ...")
+    if guest_ssh(vm, ip, guest_install_script(password, host_time_zone()[0])) != 0:
+        raise Failure(
+            f"the guest at {ip} is up but the install failed (see above). It is still "
+            "running: 'cib vm setup' retries just this part."
+        )
+    print()
+    print(f"Ready. The account is {vm.user!r}; 'cib vm password' prints its password.")
+    print("Two things Apple only allows by hand, in the window:")
+    print("  1. sign in to your Apple Account")
+    print("  2. System Settings > Apple Account > iCloud > turn on Passwords & Keychain")
+    print()
+    print("'cib vm down' stops it, 'cib vm up' brings it back.")
 
 
 def _prepare_guest(vm: VmConfig, password: str) -> None:
@@ -1130,6 +1139,52 @@ def vm_run_args(vm: VmConfig) -> list[str]:
     if vm.net != "shared":
         raise Failure(f"CIB_VM_NET must be bridged, shared or host, got {vm.net!r}")
     return [*args, vm.name]
+
+
+def start_detached(tart: str, vm: VmConfig) -> subprocess.Popen[str]:
+    """Start the guest without holding this terminal.
+
+    `tart run` is a foreground process for as long as the VM lives, which is why
+    `cib vm up` blocks. Left as a child that outlives cib, the window stays and the
+    command can carry on — 'cib vm down' stops it, the same as before.
+    """
+    return subprocess.Popen(  # noqa: S603
+        [tart, *vm_run_args(vm)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def wait_for_guest(tart: str, vm: VmConfig, boot: subprocess.Popen[str]) -> str:
+    """Wait until the guest answers on the network, or say why it never did."""
+    deadline = time.monotonic() + GUEST_WAIT_SECS
+    while time.monotonic() < deadline:
+        if boot.poll() is not None:
+            detail = (boot.stderr.read() or "").strip() if boot.stderr else ""
+            raise Failure(
+                f"{vm.name!r} stopped while it was starting (tart exit {boot.returncode})"
+                + (f": {detail}" if detail else "")
+            )
+        result = run(
+            tart,
+            "ip",
+            "--resolver",
+            "arp" if vm.net == "bridged" else "dhcp",
+            "--wait",
+            "10",
+            vm.name,
+            check=False,
+            capture=True,
+        )
+        ip = result.stdout.strip()
+        if ip:
+            return ip
+        time.sleep(2)
+    raise Failure(
+        f"{vm.name!r} did not answer on the network within {GUEST_WAIT_SECS}s. It is "
+        "still running: 'cib vm setup' retries just this part."
+    )
 
 
 def cmd_vm_up(tart: str, vm: VmConfig) -> None:
@@ -1345,6 +1400,10 @@ def ssh_options() -> list[str]:
 # nothing ever passed one.
 IP_WAIT_SECS = "60"
 
+# How long `vm create` gives the guest to boot and answer before it gives up and
+# tells the user to finish with `vm setup`.
+GUEST_WAIT_SECS = 300
+
 
 def vm_ip(tart: str, vm: VmConfig) -> str:
     """Resolve the guest's address. Bridged guests get theirs from the real
@@ -1518,10 +1577,10 @@ BOX_HELP = """\
   reset    delete the browser profile, losing every login (asks first)"""
 
 VM_HELP = """\
-  create   build the VM from a fresh macOS image (large download, one time)
+  create   build it, start it and install Chrome — the whole thing, one command
   prepare  redo just the offline preparation on an already-built VM
-  up       start it; a window opens
-  setup    install Chrome and the clipboard agent in the guest, over SSH
+  up       start it again after 'cib vm down'; a window opens
+  setup    redo just the Chrome and clipboard-agent install, over SSH
   ssh      open a shell in the guest
   ip       print the guest's address
   password print the generated guest account password (copy it, do not retype it)
@@ -1535,11 +1594,14 @@ real boot: the account, autologin, Remote Login, and this host's keyboard layout
 That one step needs sudo on the host; nothing else does. The account password is
 generated, so you never have to type it.
 
-`cib vm up` stays in the foreground: run the steps after it from a second terminal,
-because Ctrl-C there stops the guest.
+`cib vm up` stays in the foreground and Ctrl-C there stops the guest, so run
+anything after it from a second terminal. `create` does not: it starts the guest
+as a child that outlives it, which is what lets one command finish the job.
 
-Chrome is not part of `create` — 'cib vm setup' installs it and the clipboard
-agent, over SSH. That connection is by key, not by password: the build generates
+`create` finishes with a running guest that has Chrome in it: it boots the VM
+itself, waits for it to answer, and installs Chrome, the clipboard agent and the
+shared downloads folder. `up`, `setup` and `prepare` are still there for redoing
+one part without the rest. That connection is by key, not by password: the build generates
 one and installs it, along with the guest's own host key, so cib can verify the
 guest on the very first connection. Nothing asks you to type anything.
 

@@ -14,6 +14,7 @@ import sys
 import time
 import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 from typing import ClassVar
 
 import pytest
@@ -41,6 +42,15 @@ def isolate_secrets(tmp_path, monkeypatch):
     monkeypatch.setattr(cib, "VM_KEY", secrets_dir / "vm-key")
     monkeypatch.setattr(cib, "VM_HOST_KEY", secrets_dir / "vm-host-key")
     monkeypatch.setattr(cib, "KNOWN_HOSTS", secrets_dir / "vm-known-hosts")
+    # And no test may start a real VM. start_detached uses subprocess.Popen
+    # directly, so a test that replaces only `cib.run` would spawn tart for real and
+    # then sit in wait_for_guest for five minutes. Tests that care replace these.
+    real = SimpleNamespace(start_detached=cib.start_detached, wait_for_guest=cib.wait_for_guest)
+    monkeypatch.setattr(cib, "start_detached", lambda tart, vm: _FakeBoot())
+    monkeypatch.setattr(cib, "wait_for_guest", lambda tart, vm, boot: "192.168.1.50")
+    # Handed back, so the two tests that exercise the real ones can ask for them
+    # rather than reaching around the guard.
+    return real
 
 
 @pytest.fixture(autouse=True)
@@ -1132,8 +1142,15 @@ def test_create_prepares_the_guest_offline_by_default(calls, credentials, monkey
     monkeypatch.setattr(
         cib.subprocess,
         "run",
+        # Only the patcher: create now goes on to boot the guest and ssh into it, so
+        # "the last call" is no longer the one under test.
         lambda cmd, **kw: (
-            seen.update(cmd=cmd, stdin=kw.get("input")) or subprocess.CompletedProcess(cmd, 0)
+            (
+                seen.update(cmd=cmd, stdin=kw.get("input"))
+                if any("cibpatch" in str(c) for c in cmd)
+                else None
+            )
+            or subprocess.CompletedProcess(cmd, 0)
         ),
     )
     cib.cmd_vm_create("tart", cib.VmConfig())
@@ -1339,7 +1356,12 @@ def test_the_patcher_is_run_with_a_real_interpreter(calls, credentials, monkeypa
     monkeypatch.setattr(
         cib.subprocess,
         "run",
-        lambda cmd, **kw: seen.update(cmd=cmd) or subprocess.CompletedProcess(cmd, 0),
+        # Only the patcher: create now goes on to boot the guest and ssh into it, so
+        # "the last call" is no longer the one under test.
+        lambda cmd, **kw: (
+            (seen.update(cmd=cmd) if any("cibpatch" in str(c) for c in cmd) else None)
+            or subprocess.CompletedProcess(cmd, 0)
+        ),
     )
     cib.cmd_vm_create("tart", cib.VmConfig())
     assert seen["cmd"][:2] == ["/usr/bin/sudo", "-n"]
@@ -3507,3 +3529,80 @@ def test_an_unknown_viewer_is_refused(monkeypatch):
     monkeypatch.setenv("CIB_VM_VIEWER", "kiosk")
     with pytest.raises(cib.Failure, match="CIB_VM_VIEWER"):
         cib.vm_run_args(cib.VmConfig())
+
+
+# --- one command instead of three ----------------------------------------------
+
+
+def test_create_boots_the_guest_and_installs_chrome_itself(
+    calls, credentials, monkeypatch, tmp_path
+):
+    # It used to stop after patching and print three more commands to run. Each of
+    # them is a place a build can fail, and each failure meant starting over.
+    order: list[str] = []
+    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(cib.time, "sleep", lambda s: None)
+    _fake_guest_disk(monkeypatch, tmp_path)
+    monkeypatch.setattr(cib.subprocess, "Popen", lambda *a, **k: _FakeBoot())
+    monkeypatch.setattr(
+        cib.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0)
+    )
+    monkeypatch.setattr(cib, "start_detached", lambda t, vm: order.append("start") or _FakeBoot())
+    monkeypatch.setattr(cib, "wait_for_guest", lambda t, vm, b: order.append("wait") or "10.0.0.9")
+    monkeypatch.setattr(
+        cib, "guest_ssh", lambda vm, ip, script=None: order.append(f"ssh:{ip}") or 0
+    )
+    cib.cmd_vm_create("tart", cib.VmConfig())
+    assert order == ["start", "wait", "ssh:10.0.0.9"]
+
+
+def test_create_says_what_is_left_when_the_install_fails(calls, credentials, monkeypatch, tmp_path):
+    # The guest is built and running by then; telling the user to start over would
+    # throw away half an hour for a step that retries on its own.
+    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(cib.time, "sleep", lambda s: None)
+    _fake_guest_disk(monkeypatch, tmp_path)
+    monkeypatch.setattr(cib.subprocess, "Popen", lambda *a, **k: _FakeBoot())
+    monkeypatch.setattr(
+        cib.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0)
+    )
+    monkeypatch.setattr(cib, "guest_ssh", lambda vm, ip, script=None: 1)
+    with pytest.raises(cib.Failure, match="cib vm setup"):
+        cib.cmd_vm_create("tart", cib.VmConfig())
+
+
+def test_a_guest_that_dies_while_starting_is_not_waited_out(isolate_secrets, monkeypatch):
+    # Five minutes of polling for an address that will never come.
+    class _Died(_FakeBoot):
+        returncode = 3
+
+        @property
+        def stderr(self):
+            import io
+
+            return io.StringIO("bridged networking failed")
+
+        def poll(self):
+            return 3
+
+    monkeypatch.setattr(cib.time, "sleep", lambda s: None)
+    with pytest.raises(cib.Failure, match="bridged networking failed"):
+        isolate_secrets.wait_for_guest("tart", cib.VmConfig(), _Died())
+
+
+def test_a_guest_that_never_answers_points_at_setup(isolate_secrets, monkeypatch):
+    monkeypatch.setattr(cib.time, "sleep", lambda s: None)
+    monkeypatch.setattr(cib, "GUEST_WAIT_SECS", 0)
+    monkeypatch.setattr(
+        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="", stderr="")
+    )
+    with pytest.raises(cib.Failure, match="cib vm setup"):
+        isolate_secrets.wait_for_guest("tart", cib.VmConfig(), _FakeBoot())
+
+
+def test_no_test_can_start_a_real_vm():
+    # start_detached uses subprocess.Popen directly, so a test that replaces only
+    # `cib.run` spawned tart for real and then sat in wait_for_guest for five
+    # minutes. The autouse fixture is what stops that.
+    assert cib.start_detached("tart", cib.VmConfig()).poll() is None
+    assert cib.wait_for_guest("tart", cib.VmConfig(), _FakeBoot()) == "192.168.1.50"
