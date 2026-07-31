@@ -492,6 +492,9 @@ class VmConfig:
     # wants — but it moves, so a rebuild is not reproducible unless it can be told
     # which installer to use (a URL or a path to an .ipsw).
     ipsw: str = field(default_factory=lambda: _env("CIB_VM_IPSW", "latest"))
+    # "window" is tart's own, which cannot go full screen or scale. "vnc" hands the
+    # display to macOS Screen Sharing, which does both.
+    viewer: str = field(default_factory=lambda: _env("CIB_VM_VIEWER", "window"))
 
 
 PACKER_TEMPLATE = Path(__file__).resolve().parent / "packer" / "chrome-vm.pkr.hcl"
@@ -1114,6 +1117,12 @@ def vm_run_args(vm: VmConfig) -> list[str]:
     except OSError as exc:
         raise Failure(f"cannot use {share} as the shared downloads folder: {exc}") from None
     args = ["run", f"--dir=downloads:{share}"]
+    if vm.viewer == "vnc":
+        # tart's own window has no full screen and no scaling; Screen Sharing has
+        # both. It needs Remote Login in the guest, which the offline patch turns on.
+        args.append("--vnc")
+    elif vm.viewer != "window":
+        raise Failure(f"CIB_VM_VIEWER must be window or vnc, got {vm.viewer!r}")
     if vm.net == "bridged":
         return [*args, f"--net-bridged={vm.interface}", vm.name]
     if vm.net == "host":
@@ -1195,7 +1204,7 @@ def guest_install_script(password: str, time_zone: str = "") -> str:
     # against *this* host, so the patcher cannot follow them safely — and refusing
     # them aborted the whole patch. systemsetup is the guest's own tool for this.
     time_zone_step = (
-        f"sudo_pw systemsetup -settimezone {shlex.quote(time_zone)} >/dev/null || \\\n"
+        f"sudo_pw systemsetup -settimezone {shlex.quote(time_zone)} >/dev/null 2>&1 || \\\n"
         f'  echo "could not set the time zone to {time_zone}" >&2'
         if time_zone
         else ":"
@@ -1278,6 +1287,17 @@ sudo_pw install -m 0644 -o root -g wheel "$CIB_WORK/agent.plist" {AGENT_PLIST_PA
 launchctl bootout "gui/$(id -u)/{AGENT_LABEL}" >/dev/null 2>&1 || true
 launchctl bootstrap "gui/$(id -u)" {AGENT_PLIST_PATH} >/dev/null 2>&1 || true
 {time_zone_step}
+# A guest that locks its screen asks for the generated 24-character password, and
+# a VM has no Touch ID to shortcut it. The screensaver never starts, the display
+# never sleeps, and neither does the machine.
+defaults -currentHost write com.apple.screensaver idleTime -int 0
+defaults write com.apple.screensaver askForPassword -int 0
+defaults write com.apple.screensaver askForPasswordDelay -int 0
+sudo_pw pmset -a displaysleep 0 sleep 0 >/dev/null ||
+  echo "could not turn off display sleep" >&2
+# macOS 14 and later keep the lock behind sysadminctl as well; older ones do not
+# have the flag at all, so its absence is not a failure.
+sudo_pw sysadminctl -screenLock off -password {shlex.quote(password)} >/dev/null 2>&1 || true
 # Failing here rather than reporting success: without the agent there is no
 # copy-paste, and the generated password would have to be typed by hand.
 test -x {AGENT_BIN}
@@ -1542,6 +1562,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  vm:  CIB_VM_NAME, CIB_VM_CPUS, CIB_VM_MEMORY, CIB_VM_DISK, CIB_VM_DISPLAY,\n"
             "       CIB_VM_NET, CIB_VM_INTERFACE, CIB_VM_USER, CIB_VM_SHARE,\n"
             "       CIB_VM_FIRSTBOOT_SECS, CIB_VM_IPSW to pin the macOS installer,\n"
+            "       CIB_VM_VIEWER=vnc for a window that can go full screen,\n"
             "       CIB_VM_PACKER=1 to drive Setup Assistant instead of patching the disk"
         ),
     )
