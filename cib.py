@@ -1145,6 +1145,12 @@ CHROME_APP = "/Applications/Google Chrome.app"
 CHROME_EXE = f"{CHROME_APP}/Contents/MacOS/Google Chrome"
 
 
+# Chrome's own preference file, written before its first launch. prompt_for_download
+# stays off so a download does not open a panel pointing at the guest's own disk.
+DOWNLOAD_PREFS = json.dumps(
+    {"download": {"default_directory": GUEST_SHARE, "prompt_for_download": False}}
+)
+
 AGENT_BIN = "/usr/local/bin/tart-guest-agent"
 AGENT_LABEL = "org.cirruslabs.tart-guest-agent"
 AGENT_PLIST_PATH = f"/Library/LaunchAgents/{AGENT_LABEL}.plist"
@@ -1211,26 +1217,24 @@ cleanup
 mkdir -p "$CIB_WORK"
 trap cleanup EXIT
 sudo_pw() {{ printf '%s\\n' "$CIB_SUDO_PW" | sudo -S -p '' "$@"; }}
-# Downloads land on the host: replace the guest's own Downloads folder with the
-# shared one, so every app follows, not just Chrome.
+# Downloads land on the host. Not by replacing ~/Downloads: macOS protects that
+# folder against being renamed, and a process arriving over ssh has no TCC grant
+# for it, so `mv` there fails with EPERM however the permissions look. Chrome is
+# pointed at the share instead, and a link inside ~/Downloads makes it reachable
+# from anything else.
 if [ -d "{GUEST_SHARE}" ]; then
-  # Three states, not two: the offline path creates the home itself, so Downloads
-  # may not exist at all. -e is false for a dangling link, so a stale one is replaced.
-  if [ -e "$HOME/Downloads" ] && [ ! -L "$HOME/Downloads" ]; then
-    # A second run must not nest the backup inside the first one, and must not
-    # overwrite whatever the first one saved.
-    backup="$HOME/Downloads.local"
-    n=1
-    while [ -e "$backup" ] || [ -L "$backup" ]; do
-      backup="$HOME/Downloads.local.$n"
-      n=$((n + 1))
-    done
-    rmdir "$HOME/Downloads" 2>/dev/null || {{
-      mv "$HOME/Downloads" "$backup"
-      echo "kept the guest's own Downloads at $backup" >&2
-    }}
+  ln -sfn "{GUEST_SHARE}" "$HOME/Downloads/on-the-host" 2>/dev/null ||
+    echo "could not link the shared folder into ~/Downloads" >&2
+  CIB_PROFILE="$HOME/Library/Application Support/Google/Chrome/Default"
+  if [ -e "$CIB_PROFILE/Preferences" ]; then
+    echo "Chrome already has a profile; leaving its download folder alone" >&2
+  else
+    # Written before Chrome's first launch, so it starts with the setting rather
+    # than being reconfigured afterwards. A user preference, not a managed policy:
+    # a policy is the one thing this VM exists to be free of.
+    mkdir -p "$CIB_PROFILE"
+    printf '%s' {shlex.quote(DOWNLOAD_PREFS)} > "$CIB_PROFILE/Preferences"
   fi
-  ln -sfn "{GUEST_SHARE}" "$HOME/Downloads"
 else
   echo "the shared downloads folder is not mounted; start the VM with 'cib vm up'" >&2
   exit 1

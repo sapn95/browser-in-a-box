@@ -809,16 +809,6 @@ def test_the_guest_shares_a_host_folder_for_downloads(tmp_path, monkeypatch):
     assert (tmp_path / "dl").is_dir()  # created if missing, so tart does not fail
 
 
-def test_setup_points_the_guest_downloads_at_the_share():
-    assert cib.GUEST_SHARE in cib.guest_install_script("pw")
-    assert "ln -sfn" in cib.guest_install_script("pw")
-    # An existing real folder must not be destroyed.
-    assert "Downloads.local" in cib.guest_install_script("pw")
-
-
-# sudo that actually runs what it is given, so the script's own sudo path is
-# exercised rather than stubbed out. A stub returning 0 hid the bug where the
-# clipboard agent was installed by a `sudo -n` that could never succeed.
 # sudo as sshd actually presents it: no tty, no cached credential. -S reads a
 # password from stdin and works; -n refuses, exactly as the real one does. A fake
 # that stripped -n could not notice a regression to the flag that never worked.
@@ -899,22 +889,6 @@ def test_the_guest_script_fails_when_the_share_is_missing(tmp_path):
     result = _run_guest_script(cib.guest_install_script("pw"), tmp_path, share_exists=False)
     assert result.returncode != 0
     assert "not mounted" in result.stderr
-
-
-def test_the_guest_script_links_downloads_to_the_share(tmp_path):
-    (tmp_path / "Downloads").mkdir()
-    result = _run_guest_script(cib.guest_install_script("pw"), tmp_path, share_exists=True)
-    assert result.returncode == 0, result.stderr
-    assert (tmp_path / "Downloads").is_symlink()
-    assert (tmp_path / "Downloads").resolve() == (tmp_path / "share").resolve()
-
-
-def test_the_guest_script_keeps_a_non_empty_downloads_folder(tmp_path):
-    (tmp_path / "Downloads").mkdir()
-    (tmp_path / "Downloads" / "keep.txt").write_text("mine")
-    result = _run_guest_script(cib.guest_install_script("pw"), tmp_path, share_exists=True)
-    assert result.returncode == 0, result.stderr
-    assert (tmp_path / "Downloads.local" / "keep.txt").read_text() == "mine"
 
 
 def test_a_share_path_with_a_colon_is_rejected(monkeypatch, tmp_path):
@@ -1465,14 +1439,6 @@ def test_mount_failures_report_the_reason(monkeypatch):
     )
     with pytest.raises(cibpatch.PatchError, match="Failed to find disk"):
         cibpatch.mount("/dev/disk99s9")
-
-
-def test_the_guest_script_survives_a_home_with_no_downloads(tmp_path):
-    # The offline path creates the home itself, so Downloads may not exist — under
-    # `set -e` the old two-state handling killed the script before Chrome.
-    result = _run_guest_script(cib.guest_install_script("pw"), tmp_path, share_exists=True)
-    assert result.returncode == 0, result.stderr
-    assert (tmp_path / "Downloads").is_symlink()
 
 
 def test_setup_installs_the_clipboard_agent_too():
@@ -2326,18 +2292,6 @@ def test_the_host_time_zone_is_read_from_the_localtime_link(monkeypatch, link, e
     monkeypatch.setattr(cib.os, "readlink", lambda p: link)
     result = cib.host_time_zone()
     assert result == (expected or ("America/Argentina/Buenos_Aires", "Buenos Aires"))
-
-
-def test_the_backup_slot_search_skips_a_dangling_link(tmp_path):
-    # `[ -e ]` is false for a dangling symlink, so ~/Downloads.local pointing at
-    # nothing was treated as a free slot and the mv failed.
-    (tmp_path / "Downloads").mkdir()
-    (tmp_path / "Downloads" / "keep").write_text("x")
-    (tmp_path / "Downloads.local").symlink_to(tmp_path / "gone")
-    result = _run_guest_script(cib.guest_install_script("pw"), tmp_path, share_exists=True)
-    assert result.returncode == 0, result.stderr
-    assert (tmp_path / "Downloads.local.1" / "keep").read_text() == "x"
-    assert (tmp_path / "Downloads").is_symlink()
 
 
 def test_the_guest_gets_the_key_and_the_host_key_it_will_be_checked_against(tmp_path, monkeypatch):
@@ -3439,3 +3393,49 @@ def test_the_suite_cannot_reach_the_real_secrets():
     for path in (cib.SECRETS, cib.CREDENTIALS, cib.VM_KEY, cib.VM_HOST_KEY, cib.KNOWN_HOSTS):
         assert real not in path.parents and path != real, f"{path} is the user's own"
     assert cib.Path.home() != Path(os.path.expanduser("~")), "Path.home() is not redirected"
+
+
+def test_chrome_is_pointed_at_the_share_rather_than_moving_downloads(tmp_path):
+    # macOS protects ~/Downloads against being renamed, and a process arriving over
+    # ssh has no TCC grant for it, so `mv` there fails with EPERM no matter what the
+    # permissions say. Proven on a real guest.
+    import json as _json
+
+    (tmp_path / "Downloads").mkdir()
+    result = _run_guest_script(cib.guest_install_script("pw"), tmp_path, share_exists=True)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "Downloads").is_dir(), "the guest's own Downloads is left alone"
+    assert not (tmp_path / "Downloads.local").exists(), "nothing is moved aside any more"
+    prefs = tmp_path / "Library/Application Support/Google/Chrome/Default/Preferences"
+    written = _json.loads(prefs.read_text())
+    # The harness rewrites the share to a directory it owns, so the assertion is
+    # that Chrome is pointed at the share — wherever the share is.
+    assert written["download"]["default_directory"] == str(tmp_path / "share")
+    assert written["download"]["prompt_for_download"] is False
+
+
+def test_the_share_is_reachable_from_inside_downloads(tmp_path):
+    (tmp_path / "Downloads").mkdir()
+    _run_guest_script(cib.guest_install_script("pw"), tmp_path, share_exists=True)
+    link = tmp_path / "Downloads" / "on-the-host"
+    assert link.is_symlink()
+    assert str(link.readlink()) == str(tmp_path / "share")
+
+
+def test_an_existing_chrome_profile_is_not_overwritten(tmp_path):
+    # Rewriting Preferences would throw away every setting the user has made.
+    (tmp_path / "Downloads").mkdir()
+    prefs = tmp_path / "Library/Application Support/Google/Chrome/Default/Preferences"
+    prefs.parent.mkdir(parents=True)
+    prefs.write_text('{"mine": true}')
+    result = _run_guest_script(cib.guest_install_script("pw"), tmp_path, share_exists=True)
+    assert result.returncode == 0, result.stderr
+    assert prefs.read_text() == '{"mine": true}'
+    assert "already has a profile" in result.stderr
+
+
+def test_the_download_preferences_are_valid_json():
+    import json as _json
+
+    written = _json.loads(cib.DOWNLOAD_PREFS)
+    assert written["download"]["default_directory"] == cib.GUEST_SHARE
