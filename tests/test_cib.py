@@ -851,11 +851,7 @@ def _run_guest_script(script: str, home, share_exists: bool, extra_bin=None):
     """Execute the guest script the way ssh would: /bin/sh -e, with fakes."""
     bin_dir = home / "fakebin"
     bin_dir.mkdir(parents=True, exist_ok=True)
-    if extra_bin:
-        for tool in extra_bin.iterdir():
-            (bin_dir / tool.name).write_text(tool.read_text())
-            (bin_dir / tool.name).chmod(0o755)
-    for name in ("curl", "hdiutil", "tar"):
+    for name in ("curl", "hdiutil", "tar", "defaults", "pmset", "sysadminctl", "systemsetup"):
         (bin_dir / name).write_text("#!/bin/sh\nexit 0\n")
         (bin_dir / name).chmod(0o755)
     # cp creates its destination, so the staged move that follows is real: a cp
@@ -866,6 +862,12 @@ def _run_guest_script(script: str, home, share_exists: bool, extra_bin=None):
         '*) mkdir -p "$last" ;; esac\n'
     )
     (bin_dir / "cp").chmod(0o755)
+    if extra_bin:
+        for tool in extra_bin.iterdir():
+            (bin_dir / tool.name).write_text(tool.read_text())
+            (bin_dir / tool.name).chmod(0o755)
+    # macOS-only tools the guest script uses. The suite runs on Linux in CI, where
+    # they simply do not exist and every one of them is an exit 127.
     for name, body_text in (("sudo", _FAKE_SUDO), ("install", _FAKE_INSTALL)):
         (bin_dir / name).write_text(body_text)
         (bin_dir / name).chmod(0o755)
@@ -3224,7 +3226,9 @@ def test_a_guest_script_without_a_time_zone_still_runs(tmp_path):
 
 def test_the_time_zone_step_runs_in_the_guest(tmp_path):
     script = cib.guest_install_script("pw", "Europe/Rome")
-    bin_dir = tmp_path / "fakebin"
+    # Not "fakebin": that is the harness's own directory, and writing into it
+    # means the two overwrite each other.
+    bin_dir = tmp_path / "extra"
     bin_dir.mkdir(parents=True)
     (bin_dir / "systemsetup").write_text(f'#!/bin/sh\necho "$@" >> {tmp_path}/tz.log\n')
     (bin_dir / "systemsetup").chmod(0o755)
@@ -3237,7 +3241,9 @@ def test_a_time_zone_the_guest_rejects_does_not_fail_the_install(tmp_path):
     # A wrong clock is an annoyance; a failed `vm setup` costs Chrome and the
     # clipboard agent. Under `sh -e` the step has to swallow its own failure.
     script = cib.guest_install_script("pw", "Mars/Olympus")
-    bin_dir = tmp_path / "fakebin"
+    # Not "fakebin": that is the harness's own directory, and writing into it
+    # means the two overwrite each other.
+    bin_dir = tmp_path / "extra"
     bin_dir.mkdir(parents=True)
     (bin_dir / "systemsetup").write_text("#!/bin/sh\nexit 1\n")
     (bin_dir / "systemsetup").chmod(0o755)
@@ -3482,7 +3488,9 @@ def test_the_guest_never_locks_its_screen(tmp_path):
     # A lock screen asks for the generated 24-character password, and a VM has no
     # Touch ID to shortcut it — so the one thing the password exists to avoid.
     (tmp_path / "Downloads").mkdir()
-    bin_dir = tmp_path / "fakebin"
+    # Not "fakebin": that is the harness's own directory, and writing into it
+    # means the two overwrite each other.
+    bin_dir = tmp_path / "extra"
     bin_dir.mkdir(parents=True)
     for tool in ("defaults", "pmset", "sysadminctl"):
         (bin_dir / tool).write_text(f'#!/bin/sh\necho "{tool} $@" >> {tmp_path}/lock.log\n')
@@ -3501,7 +3509,9 @@ def test_a_guest_without_sysadminctl_still_finishes(tmp_path):
     # The flag is macOS 14 and later; on an older guest the command is absent, and
     # under `sh -e` an unguarded failure would abort the whole install.
     (tmp_path / "Downloads").mkdir()
-    bin_dir = tmp_path / "fakebin"
+    # Not "fakebin": that is the harness's own directory, and writing into it
+    # means the two overwrite each other.
+    bin_dir = tmp_path / "extra"
     bin_dir.mkdir(parents=True)
     for tool in ("defaults", "pmset"):
         (bin_dir / tool).write_text("#!/bin/sh\nexit 0\n")
