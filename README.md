@@ -187,18 +187,18 @@ inside UBI10 so they link against a supported base.
 
 The macOS VM variant (Apple silicon):
 
-| Command           | What it does                                    |
-| ----------------- | ----------------------------------------------- |
+| Command           | What it does                                     |
+| ----------------- | ------------------------------------------------ |
 | `cib vm create`   | build it, start it, install Chrome — one command |
-| `cib vm prepare`  | redo just the offline preparation of a built VM |
+| `cib vm prepare`  | redo just the offline preparation of a built VM  |
 | `cib vm up`       | start it again — a window opens, shell blocks    |
-| `cib vm setup`    | redo just the Chrome install, over SSH          |
-| `cib vm password` | print the generated guest password              |
-| `cib vm ssh`      | open a shell in the guest                       |
-| `cib vm ip`       | print the guest's address                       |
-| `cib vm down`     | stop it                                         |
-| `cib vm status`   | list VMs and their state                        |
-| `cib vm delete`   | delete the VM and everything in it (asks first) |
+| `cib vm setup`    | redo just the Chrome install, over SSH           |
+| `cib vm password` | print the generated guest password               |
+| `cib vm ssh`      | open a shell in the guest                        |
+| `cib vm ip`       | print the guest's address                        |
+| `cib vm down`     | stop it                                          |
+| `cib vm status`   | list VMs and their state                         |
+| `cib vm delete`   | delete the VM and everything in it (asks first)  |
 
 `vm create` is **unattended**, and it never shows Setup Assistant at all. Setup
 Assistant cannot be skipped without MDM, and driving it with synthetic keystrokes is
