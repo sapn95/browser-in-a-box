@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Point Formula/cib.rb at a released version and its published checksums.
+"""Point Formula/bib.rb at a released version and its published checksums.
 
 Called by the release workflow once the assets exist. Kept as a script rather than
 an inline heredoc so it can be tested.
@@ -20,7 +20,7 @@ def update(text: str, version: str, digests: dict[str, str]) -> str:
     text = re.sub(r'version "[^"]+"', f'version "{version}"', text, count=1)
     text = re.sub(r"/download/v[^/]+/", f"/download/v{version}/", text)
     for asset, digest in digests.items():
-        pattern = re.compile(rf'(cib-{re.escape(asset)}\.tar\.gz"\s*\n\s*sha256 ")[0-9a-f]{{64}}')
+        pattern = re.compile(rf'(bib-{re.escape(asset)}\.tar\.gz"\s*\n\s*sha256 ")[0-9a-f]{{64}}')
         text, count = pattern.subn(rf"\g<1>{digest}", text)
         if count != 1:
             raise SystemExit(f"error: {asset} appears {count} times in the formula, expected 1")

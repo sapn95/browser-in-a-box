@@ -120,8 +120,8 @@ jobs:
         run: |
           uv build --wheel
           uv tool install --python "${PYTHON_VERSION}" dist/*.whl
-          "${HOME}/.local/bin/cib" --version
-          "${HOME}/.local/bin/cib" --help > /dev/null
+          "${HOME}/.local/bin/bib" --version
+          "${HOME}/.local/bin/bib" --help > /dev/null
 
   smoke:
     name: smoke (real ${{ matrix.browser }} container)
@@ -144,15 +144,15 @@ jobs:
           'workflow_dispatch') && '["chrome","firefox","chromium"]' ||
           '["chrome"]') }}
     env:
-      CIB_BROWSER: ${{ matrix.browser }}
+      BIB_BROWSER: ${{ matrix.browser }}
       # Pulling ~3GB and booting an amd64 desktop takes a while on a cold runner.
-      CIB_WAIT_SECS: "300"
+      BIB_WAIT_SECS: "300"
       # Pin a size so the assertion below has something deterministic to check.
-      CIB_RESOLUTION: "1920x1200"
+      BIB_RESOLUTION: "1920x1200"
     steps:
       - uses: actions/checkout@v7
       - name: start the container
-        run: ./cib.py box up
+        run: ./bib.py box up
       - name: web UI answers, and without a login prompt
         run: |
           code=$(curl -sk -o /dev/null -w '%{http_code}' https://localhost:6901/)
@@ -160,18 +160,18 @@ jobs:
           test "$code" = "200" || { echo "expected 200 (401 = login prompt is back)"; exit 1; }
       - name: the browser is running
         run: |
-          eng=$(./cib.py box engine)
+          eng=$(./bib.py box engine)
           # Asked of the table the code itself uses, not spelled out again here: the
           # command and the process name differ (chrome is started as google-chrome),
           # and a second copy of that in YAML is a second thing to keep true.
           proc=$(python3 -c \
-            "import cibbrowsers;print(cibbrowsers.BROWSERS['$CIB_BROWSER'].container_process)")
+            "import bibbrowsers;print(bibbrowsers.BROWSERS['$BIB_BROWSER'].container_process)")
           n=$("$eng" exec browser-in-a-box bash -c "pgrep -xc $proc || true")
           echo "$proc processes: ${n:-0}"
           test "${n:-0}" -gt 0
       - name: desktop is at the requested resolution
         run: |
-          eng=$(./cib.py box engine)
+          eng=$(./bib.py box engine)
           mode=""
           for _ in $(seq 1 10); do
             mode=$("$eng" exec -e DISPLAY=:1 browser-in-a-box xrandr --current |
@@ -184,7 +184,7 @@ jobs:
       - name: dump logs on failure
         if: failure()
         timeout-minutes: 2
-        run: ./cib.py box logs 2>&1 | tail -50 || true
+        run: ./bib.py box logs 2>&1 | tail -50 || true
       - name: clean up
         if: always()
-        run: ./cib.py box down
+        run: ./bib.py box down
