@@ -22,6 +22,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import cib
+import cibicon
 
 
 @pytest.fixture(autouse=True)
@@ -320,8 +321,26 @@ def test_a_missing_tart_points_at_the_install_command(monkeypatch):
     monkeypatch.setattr(cib.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(cib.platform, "machine", lambda: "arm64")
     monkeypatch.setattr(cib.shutil, "which", lambda name: None)
+    # Not on PATH and not at either Homebrew prefix. The fallback exists because a
+    # Dock click has no shell profile and so no /opt/homebrew on PATH — but it must
+    # not turn "tart is not installed" into a silent success on a machine that has
+    # a stale binary at one of those paths.
+    monkeypatch.setattr(cib.os, "access", lambda path, mode: False)
     with pytest.raises(cib.Failure, match="brew install"):
         cib.find_tart()
+
+
+def test_tart_is_found_at_the_homebrew_prefix_when_path_is_bare(monkeypatch):
+    """A Dock click runs with PATH=/usr/bin:/bin:/usr/sbin:/sbin and nothing else.
+
+    The clickable app failed with "tart is not on PATH" on a machine where tart
+    was plainly installed, because a shell profile is what puts Homebrew there.
+    """
+    monkeypatch.setattr(cib.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(cib.platform, "machine", lambda: "arm64")
+    monkeypatch.setattr(cib.shutil, "which", lambda name: None)
+    monkeypatch.setattr(cib.os, "access", lambda path, mode: path == "/opt/homebrew/bin/tart")
+    assert cib.find_tart() == "/opt/homebrew/bin/tart"
 
 
 def test_vm_up_refuses_before_create(calls, monkeypatch):
@@ -3896,3 +3915,91 @@ def test_a_yaml_boolean_survives_as_the_string_the_rest_of_cib_reads(tmp_path, m
 def test_no_settings_file_is_normal_and_silent(tmp_path, monkeypatch):
     monkeypatch.setenv("CIB_CONFIG", str(tmp_path / "absent.yaml"))
     assert cib.load_config() == {}
+
+
+def test_the_icon_is_a_real_app_bundle_rather_than_a_script(tmp_path, monkeypatch):
+    """A shell script named in CFBundleExecutable is launched and then does not run.
+
+    LaunchServices reports success, nothing executes, and nothing reaches the log
+    — so the failure is invisible. osacompile builds a real signed bundle.
+    """
+    monkeypatch.setattr(cib, "APPS_DIR", tmp_path / "Applications")
+    cib.cmd_vm_icon("tart", cib.VmConfig())
+    bundle = tmp_path / "Applications" / "Chrome in a Box.app"
+    assert (bundle / "Contents" / "MacOS" / "applet").exists()
+    compiled = cib.run(
+        "/usr/bin/osadecompile",
+        str(bundle / "Contents" / "Resources" / "Scripts" / "main.scpt"),
+        capture=True,
+    ).stdout
+    # The settings are baked in: a Dock click inherits almost none of a login
+    # shell's environment, so a CIB_VM_NAME set in a profile would open another VM.
+    assert "CIB_VM_NAME=chrome-vm" in compiled
+    assert "vm open" in compiled
+
+
+def test_a_second_vm_gets_its_own_icon(tmp_path, monkeypatch):
+    monkeypatch.setattr(cib, "APPS_DIR", tmp_path / "Applications")
+    monkeypatch.setenv("CIB_VM_NAME", "work-vm")
+    cib.cmd_vm_icon("tart", cib.VmConfig())
+    assert (tmp_path / "Applications" / "Chrome in a Box (work-vm).app").exists()
+
+
+def test_an_applescript_string_escapes_its_two_special_characters():
+    # A share path with a quote in it would otherwise end the string early and
+    # compile into something else entirely.
+    assert cib.applescript_string(r'a"b\c') == r'"a\"b\\c"'
+
+
+def test_the_icon_is_a_valid_pdf_that_sips_can_rasterise(tmp_path):
+    """Hand-written PDF, so a malformed one would fail silently as a missing icon.
+
+    The check is that macOS itself reads it, not that the bytes look plausible.
+    """
+    source = tmp_path / "icon.pdf"
+    source.write_bytes(cibicon.pdf())
+    assert source.read_bytes().startswith(b"%PDF-")
+    out = tmp_path / "icon.png"
+    cib.run(
+        "/usr/bin/sips",
+        "-s",
+        "format",
+        "png",
+        "-z",
+        "128",
+        "128",
+        str(source),
+        "--out",
+        str(out),
+        capture=True,
+    )
+    assert out.exists()
+    # Transparent outside the artwork, or the icon wears a white square.
+    alpha = cib.run("/usr/bin/sips", "-g", "hasAlpha", str(out), capture=True).stdout
+    assert "yes" in alpha
+
+
+def test_the_icon_holds_every_size_macos_asks_for(tmp_path):
+    """Chrome's own icns stops at 256, which is what made the Dock look soft."""
+    target = tmp_path / "applet.icns"
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    cib._build_icns(target, scratch)
+    unpacked = tmp_path / "out.iconset"
+    cib.run("/usr/bin/iconutil", "-c", "iconset", "-o", str(unpacked), str(target), capture=True)
+    present = {png.name for png in unpacked.glob("*.png")}
+    assert "icon_512x512@2x.png" in present, "no 1024, so the largest sizes are upscaled"
+    assert "icon_16x16.png" in present
+
+
+def test_the_drawing_uses_both_the_browser_and_the_box():
+    """The name is the whole point: a second Chrome, in a box.
+
+    Asserting on the colours rather than the shapes — it is the four Google ones
+    plus cardboard that carry the meaning, and geometry has no stable assertion.
+    """
+    drawing = "\n".join(cibicon._artwork())
+    for colour in (cibicon.RED, cibicon.YELLOW, cibicon.GREEN, cibicon.BLUE):
+        assert cibicon._fill(colour) in drawing
+    assert cibicon._fill(cibicon.CARTON_FACE) in drawing
+    assert cibicon._fill(cibicon.CARTON_FLAP) in drawing

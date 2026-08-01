@@ -36,6 +36,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -46,6 +47,8 @@ from pathlib import Path
 from typing import NoReturn
 from urllib.parse import quote
 from xml.parsers.expat import ExpatError
+
+import cibicon
 
 __version__ = "1.4.0"
 
@@ -916,6 +919,12 @@ def find_tart() -> str:
         raise Failure("the vm variant needs Apple silicon; use the container variant instead")
     path = shutil.which("tart")
     if not path:
+        # Homebrew's directories are put on PATH by a shell profile, and plenty of
+        # ways of running cib have no shell: a Dock click runs with PATH set to
+        # /usr/bin:/bin:/usr/sbin:/sbin and nothing else.
+        for known in ("/opt/homebrew/bin/tart", "/usr/local/bin/tart"):
+            if os.access(known, os.X_OK):
+                return known
         raise Failure("tart is not on PATH — install it with: brew install cirruslabs/cli/tart")
     return path
 
@@ -1787,24 +1796,6 @@ def cmd_vm_open(tart: str, vm: VmConfig) -> None:
 
 
 APPS_DIR = Path("~/Applications").expanduser()
-# Info.plist rather than a bare script: a plain executable double-clicks into a
-# Terminal window, and LaunchServices will not give it a Dock icon.
-ICON_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" \
-"http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleName</key><string>{name}</string>
-  <key>CFBundleDisplayName</key><string>{name}</string>
-  <key>CFBundleIdentifier</key><string>ch.sapn.chrome-in-a-box.{ident}</string>
-  <key>CFBundleExecutable</key><string>start</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>{version}</string>
-  <key>LSMinimumSystemVersion</key><string>13.0</string>
-  <key>NSHighResolutionCapable</key><true/>
-</dict>
-</plist>
-"""
 
 
 def launcher_command() -> str:
@@ -1823,8 +1814,8 @@ def launcher_command() -> str:
     # A virtualenv is the wrong thing to bake into a launcher meant to outlive the
     # shell that wrote it — the icon would break the day that project is cleaned up.
     # cib imports nothing outside the standard library, so the base interpreter the
-    # virtualenv was built on runs it just as well. /usr/bin/python3 is not an option:
-    # macOS still ships 3.9 there, and cib needs 3.10.
+    # virtualenv was built on runs it just as well. /usr/bin/python3 is not an
+    # option: macOS still ships 3.9 there, and cib needs 3.10.
     if sys.prefix != sys.base_prefix:
         base = Path(sys.base_prefix) / "bin" / "python3"
         if base.exists():
@@ -1841,27 +1832,117 @@ def cmd_vm_icon(tart: str, vm: VmConfig) -> None:
     """
     name = f"Chrome in a Box ({vm.name})" if vm.name != DEFAULT_VM_NAME else "Chrome in a Box"
     bundle = APPS_DIR / f"{name}.app"
-    macos = bundle / "Contents" / "MacOS"
-    macos.mkdir(parents=True, exist_ok=True)
-    (bundle / "Contents" / "Info.plist").write_text(
-        ICON_PLIST.format(name=name, ident=vm.name, version=__version__)
-    )
-    settings = "\n".join(
-        f"export {key}={shlex.quote(value)}"
+    settings = " ".join(
+        f"{key}={shlex.quote(value)}"
         for key, value in (("CIB_VM_NAME", vm.name), ("CIB_VM_VIEWER", vm.viewer))
     )
-    start = macos / "start"
-    start.write_text(
-        f"#!/bin/sh\n"
-        f"# Written by 'cib vm icon' {__version__}. Rerun it after moving cib.\n"
-        f"{settings}\n"
-        # Failures land in the Console rather than nowhere: a Dock launch has no
-        # terminal, so without this a broken start looks like nothing happening.
-        f"{launcher_command()} vm open 2>&1 | /usr/bin/logger -t chrome-in-a-box\n"
+    # AppleScript rather than a shell script as the bundle's executable. A script
+    # named in CFBundleExecutable is launched by LaunchServices and then simply does
+    # not run — no output, no error, nothing in the log. osacompile produces a real
+    # signed bundle around the AppleScript runner, which does.
+    #
+    # The timeout is generous because a cold start builds nothing but does wait for
+    # the guest to answer, and the default would give up first.
+    command = f"{settings} {launcher_command()} vm open"
+    script = (
+        f"with timeout of {GUEST_WAIT_SECS + 60} seconds\n"
+        f"  do shell script {applescript_string(command)}\n"
+        f"end timeout\n"
     )
-    start.chmod(0o755)
+    APPS_DIR.mkdir(parents=True, exist_ok=True)
+    # Removed first: osacompile refuses to overwrite a bundle it did not write, and
+    # leaving a half-updated one behind would keep launching the old settings.
+    shutil.rmtree(bundle, ignore_errors=True)
+    result = run("/usr/bin/osacompile", "-o", str(bundle), "-e", script, check=False, capture=True)
+    if result.returncode != 0:
+        raise Failure(f"could not write {bundle}: {(result.stderr or result.stdout).strip()}")
+    draw_icon(bundle)
     print(f"Wrote {bundle}")
     print("Drag it to the Dock to keep it there.")
+
+
+def draw_icon(bundle: Path) -> None:
+    """Give the launcher an icon that says what it opens.
+
+    Chrome's own icns stops at 256 px, so copying it leaves the Dock upscaling —
+    and it would be indistinguishable from the Chrome already on the machine,
+    which is the one thing this launcher is not. cibicon draws the name instead:
+    the browser coming up out of a cardboard box.
+    """
+    resources = bundle / "Contents" / "Resources"
+    if not resources.is_dir():
+        return
+    try:
+        with tempfile.TemporaryDirectory() as scratch:
+            _build_icns(resources / "applet.icns", Path(scratch))
+        # osacompile writes both CFBundleIconFile and CFBundleIconName, and on
+        # modern macOS the name wins — it resolves out of the asset catalog, where
+        # the AppleScript applet artwork lives. Replacing applet.icns alone then
+        # changes nothing at all, which is a confusing way to fail.
+        run(
+            "/usr/bin/plutil",
+            "-remove",
+            "CFBundleIconName",
+            str(bundle / "Contents" / "Info.plist"),
+            check=False,
+            capture=True,
+        )
+        (resources / "Assets.car").unlink(missing_ok=True)
+    except (OSError, Failure):
+        # Cosmetic. A launcher that works and looks plain beats refusing to write.
+        return
+    # Finder caches the icon against the bundle's modification date.
+    bundle.touch()
+
+
+# What macOS asks for. A missing size is not left blank — it is upscaled from
+# whichever one is nearest, which is what "the icon looks soft" turns out to mean.
+ICON_SIZES = (16, 32, 64, 128, 256, 512, 1024)
+
+
+def _build_icns(target: Path, scratch: Path) -> None:
+    """Rasterise the drawing at every size macOS wants, then pack it."""
+    source = scratch / "icon.pdf"
+    source.write_bytes(cibicon.pdf())
+    iconset = scratch / "cib.iconset"
+    iconset.mkdir()
+    for size in ICON_SIZES:
+        # Each size is named twice — 32 is both icon_32x32 and icon_16x16@2x — and
+        # iconutil wants the file present under both names.
+        names = [f"icon_{size}x{size}.png"]
+        if size > ICON_SIZES[0]:
+            half = size // 2
+            names.append(f"icon_{half}x{half}@2x.png")
+        scaled = iconset / names[0]
+        # Vector in, so every size is drawn rather than resampled from one bitmap.
+        run(
+            "/usr/bin/sips",
+            "-s",
+            "format",
+            "png",
+            "-z",
+            str(size),
+            str(size),
+            str(source),
+            "--out",
+            str(scaled),
+            check=False,
+            capture=True,
+        )
+        if not scaled.exists():
+            raise Failure(f"could not draw the icon at {size}px")
+        for extra in names[1:]:
+            shutil.copyfile(scaled, iconset / extra)
+    if run(
+        "/usr/bin/iconutil", "-c", "icns", "-o", str(target), str(iconset), check=False
+    ).returncode:
+        raise Failure(f"could not write {target}")
+
+
+def applescript_string(text: str) -> str:
+    """AppleScript has one escape and it is the backslash, applied to itself first."""
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
 
 
 def cmd_vm_ip(tart: str, vm: VmConfig) -> None:
