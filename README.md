@@ -379,10 +379,12 @@ settings file is actually there, because ignoring one silently is the same as th
 setting not working.
 
 `CIB_VM_VIEWER` picks how you look at the guest. `window` (the default) is tart's
-own window. `vnc` opens no window at all: tart serves the screen over VNC and
-prints an address for it, which `cib vm viewer` reprints. That address carries a
-password tart generates per run, so it is worth nothing once the guest restarts —
-and a guest started without the address being captured cannot be reached at all.
+own window. `vnc` opens no window at all: tart's `--vnc` is not a VNC server of
+its own, it turns on macOS Screen Sharing inside the guest and prints an address
+for it, which `cib vm viewer` reprints. That address carries the guest account's
+own password — the same one that unlocks its screen and answers for `sudo`, not
+something generated per run and not something that expires. Handle it like the
+password it is.
 
 **Chrome's** downloads in the guest land in `~/Downloads/chrome-vm` on the host.
 The folder is shared into the VM and Chrome is pointed at it through its own

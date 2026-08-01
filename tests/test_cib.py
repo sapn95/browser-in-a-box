@@ -298,8 +298,13 @@ def test_down_removes_the_container(calls):
 
 
 def test_ensure_desktop_clears_a_stale_profile_lock_and_sets_the_mode():
-    assert "Singleton*" in cib.DESKTOP_SCRIPT
-    assert 'xrandr -s "$RES"' in cib.DESKTOP_SCRIPT
+    script = cib.desktop_script(cibbrowsers.BROWSERS["chrome"])
+    assert "Singleton*" in script
+    assert 'xrandr -s "$RES"' in script
+    # Firefox leaves a different pair behind, and never a Singleton.
+    firefox = cib.desktop_script(cibbrowsers.BROWSERS["firefox"])
+    assert ".parentlock" in firefox
+    assert "Singleton" not in firefox
 
 
 def test_ensure_desktop_warns_instead_of_failing(monkeypatch, capsys):
@@ -768,7 +773,7 @@ def test_the_template_drives_setup_assistant_and_keeps_gatekeeper():
 def test_the_desktop_follows_the_window_unless_a_size_is_forced():
     # ?resize=remote asks KasmVNC to match the client; pinning a mode would fight it.
     assert "resize=remote" in cib.Config().url
-    assert 'if [ -n "$RES" ]' in cib.DESKTOP_SCRIPT
+    assert 'if [ -n "$RES" ]' in cib.desktop_script(cibbrowsers.BROWSERS["chrome"])
 
 
 def test_an_empty_resolution_passes_preflight():
@@ -2167,66 +2172,106 @@ def test_the_two_keyboard_defaults_are_the_same_fact_twice():
     assert (cibpatch.Keyboard().layout_id, cibpatch.Keyboard().name) == cib.DEFAULT_KEYBOARD
 
 
-def _run_desktop_script(home, resolution: str, chrome_running: bool):
-    """Execute DESKTOP_SCRIPT the way the engine does, with recording fakes."""
+def _run_desktop_script(
+    home,
+    resolution: str,
+    browser: str = "chrome",
+    already_running: bool = False,
+    starts: bool = True,
+):
+    """Execute desktop_script the way the engine does, with recording fakes.
+
+    The pgrep fake answers the way the real one would: nothing is running until a
+    launch has been recorded, unless `starts` says the browser is one that cannot
+    run in this image at all — which is the case the script has to report.
+    """
     bin_dir = home / "fakebin"
     bin_dir.mkdir(parents=True, exist_ok=True)
     (bin_dir / "xrandr").write_text(f'#!/bin/sh\necho "$@" >> {home}/xrandr.log\n')
-    (bin_dir / "pgrep").write_text(f"#!/bin/sh\nexit {0 if chrome_running else 1}\n")
+    if already_running:
+        answer = "exit 0\n"
+    elif starts:
+        answer = f"[ -f {home}/launch.log ] && exit 0\nexit 1\n"
+    else:
+        answer = "exit 1\n"
+    (bin_dir / "pgrep").write_text(f"#!/bin/sh\n{answer}")
     (bin_dir / "nohup").write_text(f'#!/bin/sh\necho "$@" >> {home}/launch.log\n')
-    for name in ("xrandr", "pgrep", "nohup"):
+    # Faked as well, so a test never reads or waits on a real /tmp/<browser>.log.
+    (bin_dir / "tail").write_text('#!/bin/sh\necho "(tail $*)"\n')
+    for name in ("xrandr", "pgrep", "nohup", "tail"):
         (bin_dir / name).chmod(0o755)
-    subprocess.run(  # noqa: S603
-        ["/bin/sh", "-c", cib.DESKTOP_SCRIPT],
+    # Shortened, or the failure case would sit out the full production wait.
+    original_wait = cib.LAUNCH_WAIT_SECS
+    cib.LAUNCH_WAIT_SECS = 1
+    try:
+        script = cib.desktop_script(cibbrowsers.BROWSERS[browser])
+    finally:
+        cib.LAUNCH_WAIT_SECS = original_wait
+    result = subprocess.run(  # noqa: S603
+        ["/bin/sh", "-c", script],
         env={"HOME": str(home), "RES": resolution, "PATH": f"{bin_dir}:/usr/bin:/bin"},
         capture_output=True,
         text=True,
         check=False,
     )
-    # Chrome is launched with `&`, so the shell returns before the child has run.
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and not (home / "launch.log").exists():
-        if chrome_running:
-            break  # nothing will ever be launched, so do not wait the full timeout
-        time.sleep(0.02)
-    if chrome_running:
-        time.sleep(0.2)  # long enough for a launch that should not happen to appear
 
     def read(name: str) -> str:
         path = home / name
         return path.read_text() if path.exists() else ""
 
-    return read("xrandr.log"), read("launch.log")
+    return read("xrandr.log"), read("launch.log"), result.stderr
 
 
-def test_the_desktop_script_launches_chrome_on_its_own_profile():
-    # Only ever string-grepped before, so a wrong profile directory (Chrome starts
-    # on a throwaway profile) or a missing display would have passed.
+@pytest.mark.parametrize("key", ["chrome", "chromium", "firefox"])
+def test_the_desktop_script_launches_the_browser_the_image_actually_holds(key):
+    # It was Chrome's binary on all three images, so this passed for one of them and
+    # started nothing at all for the other two.
     import tempfile
 
+    browser = cibbrowsers.BROWSERS[key]
     with tempfile.TemporaryDirectory() as tmp:
-        mode, launch = _run_desktop_script(Path(tmp), "1920x1200", chrome_running=False)
+        mode, launch, stderr = _run_desktop_script(Path(tmp), "1920x1200", browser=key)
     assert "-s 1920x1200" in mode
-    assert cib.CHROME_BIN in launch
-    assert f"--user-data-dir={cib.PROFILE_DIR}" in launch
-    assert "--no-sandbox" in launch
+    assert browser.container_bin in launch
+    assert stderr == ""
+    if browser.settings == "firefox":
+        # Firefox rejects both of these, and would have opened them as file names.
+        assert "--user-data-dir" not in launch
+        assert "--no-sandbox" not in launch
+    else:
+        assert f"--user-data-dir={cib.KASM_HOME}/{browser.container_profile}" in launch
+        assert "--no-sandbox" in launch
 
 
-def test_the_desktop_script_does_not_start_a_second_chrome():
+def test_the_desktop_script_does_not_start_a_second_browser():
     import tempfile
 
     with tempfile.TemporaryDirectory() as tmp:
-        _, launch = _run_desktop_script(Path(tmp), "1920x1200", chrome_running=True)
-    assert launch == "", "a second Chrome over a live one loses the first one's tabs"
+        _, launch, _ = _run_desktop_script(Path(tmp), "1920x1200", already_running=True)
+    assert launch == "", "a second browser over a live one loses the first one's tabs"
 
 
 def test_the_desktop_script_skips_xrandr_when_no_mode_was_asked_for():
     import tempfile
 
     with tempfile.TemporaryDirectory() as tmp:
-        mode, launch = _run_desktop_script(Path(tmp), "", chrome_running=False)
+        mode, launch, _ = _run_desktop_script(Path(tmp), "")
     assert mode == "", "an empty CIB_RESOLUTION means follow the browser window"
-    assert cib.CHROME_BIN in launch
+    assert cibbrowsers.BROWSERS["chrome"].container_bin in launch
+
+
+def test_the_desktop_script_reports_a_browser_that_never_came_up():
+    # `nohup ... &` exits 0 the moment the shell forks, so a browser that is not in
+    # the image at all used to be a silent success: a black desktop, and cib saying
+    # everything was fine. ensure_desktop warns on any output, so saying it here is
+    # what makes it visible.
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        _, launch, stderr = _run_desktop_script(Path(tmp), "", browser="firefox", starts=False)
+    assert launch != "", "it still has to try before it complains"
+    assert "Firefox did not start" in stderr
+    assert "firefox.log" in stderr, "the log it wrote is the first thing to look at"
 
 
 @pytest.mark.parametrize(
@@ -3239,6 +3284,67 @@ def test_the_templates_key_provisioner_writes_what_ssh_will_look_for(tmp_path):
     assert (home / ".ssh/authorized_keys").read_text().strip() == "ssh-ed25519 AAAAPUB cib"
 
 
+def _template_command(needle: str, **values: str) -> str:
+    """One provisioner line from the packer template, as the guest's shell sees it."""
+    template = (Path(cib.__file__).resolve().parent / "packer" / "browser-vm.pkr.hcl").read_text()
+    line = next(ln for ln in template.splitlines() if needle in ln).strip()
+    command = line.removesuffix(",").strip('"').replace("\\\\n", "\\n")
+    for name, value in values.items():
+        command = command.replace(f"${{var.{name}}}", value)
+    return command
+
+
+def test_the_template_refuses_to_build_a_guest_with_no_key(tmp_path):
+    # An empty key used to build fine: `printf '%s\n' ''` writes a newline, so the
+    # file exists, is not empty, and passed every size test on it — leaving a guest
+    # that cib can never reach and a build that said it went well.
+    command = _template_command("test -n '${var.authorized_key}'", authorized_key="")
+    result = subprocess.run(  # noqa: S603
+        ["/bin/sh", "-c", command], capture_output=True, text=True, check=False
+    )
+    assert result.returncode != 0, "an empty authorized_key has to stop the build"
+    assert "could never log in" in result.stdout + result.stderr
+
+
+def test_the_template_checks_the_key_by_content_rather_than_by_size(tmp_path):
+    command = _template_command("grep -q '[^[:space:]]' ~/.ssh/authorized_keys")
+    ssh_dir = tmp_path / ".ssh"
+    ssh_dir.mkdir()
+    # Exactly what the old printf left behind for an empty key.
+    (ssh_dir / "authorized_keys").write_text("\n")
+    result = subprocess.run(  # noqa: S603
+        ["/bin/sh", "-c", command],
+        env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0, "a file holding one newline holds no key"
+    (ssh_dir / "authorized_keys").write_text("ssh-ed25519 AAAAPUB cib\n")
+    assert (
+        subprocess.run(  # noqa: S603
+            ["/bin/sh", "-c", command],
+            env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"},
+            capture_output=True,
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
+def test_the_template_narrows_the_host_key_before_it_holds_anything():
+    # `printf ... > /tmp/host_key` creates it 0644 and the install that narrows it
+    # runs later, so the private key was readable by every local user in between.
+    # cib.py opens with the mode for exactly this reason; this path did not.
+    template = (Path(cib.__file__).resolve().parent / "packer" / "browser-vm.pkr.hcl").read_text()
+    lines = template.splitlines()
+    narrow = next(
+        i for i, ln in enumerate(lines) if "install -m 0600 /dev/null /tmp/host_key" in ln
+    )
+    write = next(i for i, ln in enumerate(lines) if "host_private_key}' > /tmp/host_key" in ln)
+    assert narrow < write, "the mode has to be set before there is anything to read"
+
+
 def test_up_mounts_the_profile_volume_where_the_image_keeps_it(calls, monkeypatch):
     # Drop the -v, or let the container path drift from /home/kasm-user, and the
     # profile stops persisting while `box down` still promises it is kept.
@@ -3253,9 +3359,11 @@ def test_up_mounts_the_profile_volume_where_the_image_keeps_it(calls, monkeypatc
     # never the drift the comment above names.
     argv = [a for call in calls for a in call]
     assert argv[argv.index("-v") + 1] == f"{cfg.volume}:/home/kasm-user"
-    assert cib.PROFILE_DIR.startswith("/home/kasm-user/"), (
-        "the profile has to live under what is mounted, or it stops persisting"
-    )
+    assert cib.KASM_HOME == "/home/kasm-user"
+    for browser in cibbrowsers.expand(cibbrowsers.ALL):
+        assert browser.container_profile and not browser.container_profile.startswith("/"), (
+            f"{browser.key}: the profile has to live under what is mounted, or it stops persisting"
+        )
 
 
 def test_the_selected_layout_wins_over_the_merely_enabled_ones(monkeypatch):
@@ -3927,7 +4035,38 @@ def test_a_yaml_boolean_survives_as_the_string_the_rest_of_cib_reads(tmp_path, m
     config = tmp_path / "cib.yaml"
     config.write_text("box:\n  force: yes\n")
     monkeypatch.setenv("CIB_CONFIG", str(config))
-    assert cib.load_config()["CIB_FORCE"] == "true"
+    settings = cib.load_config()
+    assert settings["CIB_FORCE"] == "true"
+    # Stopping at the load is what let this pass for a key that did nothing:
+    # env_flag read os.environ directly, so the file's value was parsed, stored and
+    # never looked at again.
+    monkeypatch.setattr(cib, "CONFIG", settings)
+    assert cib.env_flag("CIB_FORCE") is True
+
+
+def test_every_yes_no_setting_can_be_written_in_the_settings_file(tmp_path, monkeypatch):
+    # CIB_FORCE and CIB_VM_PACKER are the two, and neither reached its reader.
+    config = tmp_path / "cib.yaml"
+    config.write_text("box:\n  force: 1\nvm:\n  packer: true\n")
+    monkeypatch.setenv("CIB_CONFIG", str(config))
+    monkeypatch.setattr(cib, "CONFIG", cib.load_config())
+    assert cib.env_flag("CIB_FORCE") is True
+    assert cib.env_flag("CIB_VM_PACKER") is True
+    assert cib.env_flag("CIB_NOT_SET_ANYWHERE") is False
+    # And the environment still wins, the same way it does for every other setting.
+    monkeypatch.setenv("CIB_VM_PACKER", "0")
+    assert cib.env_flag("CIB_VM_PACKER") is False
+
+
+def test_the_engine_can_be_named_in_the_settings_file(tmp_path, monkeypatch):
+    config = tmp_path / "cib.yaml"
+    config.write_text("box:\n  engine: docker\n")
+    monkeypatch.setenv("CIB_CONFIG", str(config))
+    monkeypatch.setattr(cib, "CONFIG", cib.load_config())
+    monkeypatch.setattr(
+        cib.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "docker" else None
+    )
+    assert cib.find_engine() == "/usr/bin/docker"
 
 
 def test_no_settings_file_is_normal_and_silent(tmp_path, monkeypatch):
@@ -3942,6 +4081,56 @@ def test_no_settings_file_is_normal_and_silent(tmp_path, monkeypatch):
 macos_only = pytest.mark.skipif(sys.platform != "darwin", reason="needs macOS tooling")
 
 
+def test_the_launcher_names_the_interpreter_instead_of_trusting_the_path(tmp_path, monkeypatch):
+    # A Dock launch gets almost none of a login shell's PATH, so `env python3`
+    # resolves against /usr/bin — where an unconfigured Mac has a stub that opens
+    # the "install command line tools" dialog instead of running anything.
+    script = tmp_path / "cib.py"
+    script.touch()
+    monkeypatch.setattr(sys, "argv", [str(script)])
+    monkeypatch.setattr(sys, "executable", "/opt/python/bin/python3")
+    monkeypatch.setattr(sys, "prefix", "/opt/python")
+    monkeypatch.setattr(sys, "base_prefix", "/opt/python")
+    assert cib.launcher_command() == f"/opt/python/bin/python3 {shlex.quote(str(script.resolve()))}"
+
+
+def test_the_launcher_does_not_bake_in_a_virtualenv(tmp_path, monkeypatch):
+    # Never exercised before: under pytest sys.argv[0] is the runner, which has no
+    # .py suffix, so launcher_command returned at the frozen-build branch and the
+    # icon test happily baked pytest's own path into the bundle it asserted on.
+    base = tmp_path / "base"
+    (base / "bin").mkdir(parents=True)
+    (base / "bin" / "python3").touch()
+    script = tmp_path / "cib.py"
+    script.touch()
+    monkeypatch.setattr(sys, "argv", [str(script)])
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "throwaway" / "bin" / "python3"))
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / "throwaway"))
+    monkeypatch.setattr(sys, "base_prefix", str(base))
+    command = cib.launcher_command()
+    # The icon has to outlive the shell that wrote it, and cib imports nothing
+    # outside the standard library, so the base interpreter runs it just as well.
+    assert command.startswith(shlex.quote(str(base / "bin" / "python3")))
+    assert "throwaway" not in command
+
+
+def test_a_virtualenv_that_names_a_base_which_is_gone_falls_back(tmp_path, monkeypatch):
+    script = tmp_path / "cib.py"
+    script.touch()
+    monkeypatch.setattr(sys, "argv", [str(script)])
+    monkeypatch.setattr(sys, "executable", "/venv/bin/python3")
+    monkeypatch.setattr(sys, "prefix", "/venv")
+    monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "no-such-base"))
+    assert cib.launcher_command().startswith("/venv/bin/python3 ")
+
+
+def test_a_frozen_build_is_its_own_interpreter(tmp_path, monkeypatch):
+    binary = tmp_path / "cib"
+    binary.touch()
+    monkeypatch.setattr(sys, "argv", [str(binary)])
+    assert cib.launcher_command() == shlex.quote(str(binary.resolve()))
+
+
 @macos_only
 def test_the_icon_is_a_real_app_bundle_rather_than_a_script(tmp_path, monkeypatch):
     """A shell script named in CFBundleExecutable is launched and then does not run.
@@ -3950,6 +4139,10 @@ def test_the_icon_is_a_real_app_bundle_rather_than_a_script(tmp_path, monkeypatc
     — so the failure is invisible. osacompile builds a real signed bundle.
     """
     monkeypatch.setattr(cib, "APPS_DIR", tmp_path / "Applications")
+    # cib.py, not pytest: sys.argv[0] under pytest is the runner, and a bundle
+    # pointing at that is not the launcher anyone would ever get.
+    entry = Path(cib.__file__).resolve()
+    monkeypatch.setattr(sys, "argv", [str(entry)])
     cib.cmd_vm_icon("tart", cib.VmConfig())
     bundle = tmp_path / "Applications" / "Google Chrome in a Box.app"
     assert (bundle / "Contents" / "MacOS" / "applet").exists()
@@ -3962,6 +4155,7 @@ def test_the_icon_is_a_real_app_bundle_rather_than_a_script(tmp_path, monkeypatc
     # shell's environment, so a CIB_VM_NAME set in a profile would open another VM.
     assert "CIB_VM_NAME=chrome-vm" in compiled
     assert "vm open" in compiled
+    assert str(entry) in compiled, "the bundle has to invoke cib, not whatever ran it"
 
 
 @macos_only
@@ -4115,6 +4309,48 @@ def test_every_browser_is_pointed_at_the_shared_downloads_folder(key):
     """The whole point of the share is that what you download lands on the host."""
     script = cib.guest_install_script("pw", browser=cibbrowsers.BROWSERS[key])
     assert cib.GUEST_SHARE in script
+
+
+def test_the_install_script_refuses_the_all_sentinel():
+    # `all` is a mode, not a browser: its row carries no app name, so browser.app is
+    # "/Applications" itself — and this script does `rm -rf` on it before installing.
+    # install_browsers expands the choice first, so nothing reaches this today; the
+    # guard is what keeps the next call site from finding out the hard way.
+    with pytest.raises(cib.Failure) as failure:
+        cib.guest_install_script("pw", browser=cibbrowsers.BROWSERS[cibbrowsers.ALL])
+    assert "expand" in str(failure.value)
+
+
+def test_installing_every_browser_leaves_all_of_them_in_the_dock():
+    # -array replaces the row. One script per browser meant each pass threw the
+    # previous browser out again, so the Dock held whichever was installed last —
+    # and re-running with -array-add alone would instead stack duplicates.
+    first = cib.guest_install_script("pw", browser=cibbrowsers.BROWSERS["chrome"], first=True)
+    later = cib.guest_install_script("pw", browser=cibbrowsers.BROWSERS["firefox"], first=False)
+    assert "persistent-apps -array \\" in first, "the first pass clears Apple's suite out"
+    assert "persistent-apps -array-add \\" in later, "the rest add themselves to it"
+
+
+def test_only_the_first_browser_of_a_run_is_made_the_default():
+    first = cib.guest_install_script("pw", browser=cibbrowsers.BROWSERS["chrome"], first=True)
+    later = cib.guest_install_script("pw", browser=cibbrowsers.BROWSERS["chromium"], first=False)
+    firefox = cib.guest_install_script("pw", browser=cibbrowsers.BROWSERS["firefox"], first=False)
+    assert "--make-default-browser" in first
+    assert "--make-default-browser" not in later
+    assert "--setDefaultBrowser" not in firefox
+
+
+def test_installing_all_browsers_asks_exactly_one_of_them_to_be_the_default(monkeypatch):
+    # The wiring, not just the flag: every pass used to ask, so the default ended up
+    # being whichever browser the table happens to list last.
+    scripts: list[str] = []
+    monkeypatch.setattr(cib, "host_time_zone", lambda: ("Europe/Zurich", "Zurich"))
+    monkeypatch.setattr(cib, "guest_ssh", lambda vm, ip, script: scripts.append(script) or 0)
+    assert cib.install_browsers(cib.VmConfig(browser=cibbrowsers.ALL), "10.0.0.9", "pw") == 0
+    assert len(scripts) == len(cibbrowsers.expand(cibbrowsers.ALL))
+    asked = [s for s in scripts if "--make-default-browser" in s or "--setDefaultBrowser" in s]
+    assert len(asked) == 1
+    assert sum("persistent-apps -array \\" in s for s in scripts) == 1
 
 
 def test_firefox_gets_a_profiles_ini_and_chromium_does_not():

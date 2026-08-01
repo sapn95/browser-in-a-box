@@ -218,9 +218,19 @@ build {
       # generated itself — so both are installed here, exactly as the offline path
       # installs them. Without this, the `cib vm setup` this build tells you to run
       # next can never connect.
+      # Refused here rather than checked afterwards: `printf '%s\n' ''` writes a
+      # newline, so the file is never empty and every size test on it passes. A
+      # build that got no key would have finished and handed over a guest nothing
+      # can log into.
+      "test -n '${var.authorized_key}' || { echo 'no authorized_key was passed; cib could never log in to this guest'; exit 1; }",
+      "test -n '${var.host_private_key}' || { echo 'no host_private_key was passed; cib could not verify this guest'; exit 1; }",
       "mkdir -p ~/.ssh && chmod 700 ~/.ssh",
       "printf '%s\\n' '${var.authorized_key}' > ~/.ssh/authorized_keys",
       "chmod 600 ~/.ssh/authorized_keys",
+      # 0600 before there is anything to read, not after: the private key spent the
+      # gap between the printf and the install world-readable. Same fix as cib.py
+      # makes with os.open, which this path missed.
+      "install -m 0600 /dev/null /tmp/host_key",
       "printf '%s' '${var.host_private_key}' > /tmp/host_key",
       "printf '%s\\n' '${var.host_public_key}' > /tmp/host_key.pub",
       "echo '${var.password}' | sudo -S install -m 0600 -o root -g wheel /tmp/host_key /etc/ssh/ssh_host_ed25519_key",
@@ -236,7 +246,9 @@ build {
       # Chrome and the clipboard agent are installed by 'cib vm setup', the same
       # way the offline path installs them — there is no second copy here to
       # drift out of step.
-      "test -s ~/.ssh/authorized_keys",
+      # Content, not size: the newline printf writes makes an empty key a non-empty
+      # file, and `test -s` called that installed.
+      "grep -q '[^[:space:]]' ~/.ssh/authorized_keys || { echo 'authorized_keys holds no key'; exit 1; }",
       # Not `sudo -n true || ...`: whenever sudo happened not to need a password
       # the first half succeeded and the check itself was never run, so a host key
       # that failed to install still reported a successful build.
