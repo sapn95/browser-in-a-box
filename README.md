@@ -23,8 +23,8 @@ A browser can end up locked down by policy — password manager off, autofill of
 settings greyed out behind an "administrator" badge. That is fine for work, but it
 also applies to everything else you do in that browser.
 
-This runs a **separate** Chrome in a guest — a Linux container, or a macOS VM.
-Host browser policy does not reach into a guest, so that Chrome is unmanaged: the
+This runs a **separate** browser in a guest — a Linux container, or a macOS VM.
+Host browser policy does not reach into a guest, so that browser is unmanaged: the
 built-in password manager, autofill and account sync all work normally. Nothing on
 the host is modified, disabled or worked around — it is simply a second browser
 that happens to live in a box.
@@ -119,7 +119,7 @@ flowchart LR
 
 Since macOS 15, Apple supports signing a guest VM into an Apple Account, so iCloud
 Keychain — and therefore passkeys — sync into it. The guest was never enrolled in
-any MDM, so its Chrome reads no managed policy. It has no Secure Enclave of its own
+any MDM, so the browser in it reads no managed policy. It has no Secure Enclave of its own
 and no Touch ID, so passkey use asks for the account password instead of a finger.
 
 The VM is started with **bridged** networking, so it gets an address from the real
@@ -235,7 +235,7 @@ that is running perfectly well, and the only way back in rewrites the account.
 
 | Command          | What it does                                             |
 | ---------------- | -------------------------------------------------------- |
-| `bib box up`     | start the container, wait for the desktop, launch Chrome |
+| `bib box up`     | start the container, wait for the desktop, launch the browser |
 | `bib box down`   | stop and remove the container (profile is kept)          |
 | `bib box open`   | open the web UI in your browser                          |
 | `bib box status` | show container state                                     |
@@ -248,10 +248,10 @@ The macOS VM variant (Apple silicon):
 
 | Command           | What it does                                     |
 | ----------------- | ------------------------------------------------ |
-| `bib vm create`   | build it, start it, install Chrome — one command |
+| `bib vm create`   | build it, start it, install the browser — one command |
 | `bib vm prepare`  | redo just the offline preparation of a built VM  |
 | `bib vm up`       | start it again — a window opens, shell blocks    |
-| `bib vm setup`    | redo just the Chrome install, over SSH           |
+| `bib vm setup`    | redo just the browser install, over SSH         |
 | `bib vm open`     | start it if stopped, then show its screen        |
 | `bib vm icon`     | write a clickable app into `~/Applications`      |
 | `bib vm password` | print the generated guest password               |
@@ -291,8 +291,9 @@ build, because sudo forgets a credential in about five minutes and the build tak
 thirty to sixty. If the patch step still fails, `bib vm prepare` redoes just it,
 without rebuilding the VM.
 
-Chrome **is** part of `vm create`: it builds the VM, starts it, waits for SSH and
-installs Chrome and the clipboard agent, all from the one command. `bib vm setup`
+The browser **is** part of `vm create`: it builds the VM, starts it, waits for SSH
+and installs whatever `BIB_BROWSER` names, plus the clipboard agent, all from the
+one command. `bib vm setup`
 exists to redo only that last step against a guest that is already up.
 
 Every write onto the guest's disk is one Apple could change, so `BIB_VM_PACKER=1`
@@ -341,7 +342,7 @@ Clipboard sharing between host and guest is not a flag: it needs
 the guest, which `vm setup` installs.
 
 `up` is idempotent: if the container is already serving it just re-applies the
-resolution and revives Chrome, so your tabs survive. `BIB_FORCE=1` recreates it
+resolution and revives the browser, so your tabs survive. `BIB_FORCE=1` recreates it
 instead, which is what you need after changing the image or an environment setting.
 
 Overridable: `BIB_PORT`, `BIB_RESOLUTION`, `BIB_WAIT_SECS`, `BIB_ENGINE`,
@@ -421,11 +422,11 @@ own password — the same one that unlocks its screen and answers for `sudo`, no
 something generated per run and not something that expires. Handle it like the
 password it is.
 
-**Chrome's** downloads in the guest land in `~/Downloads/browser-vm` on the host.
-The folder is shared into the VM and Chrome is pointed at it through its own
+**The browser's** downloads in the guest land in `~/Downloads/browser-vm` on the
+host. The folder is shared into the VM and the browser is pointed at it through its own
 settings. Point it elsewhere with `BIB_VM_SHARE`.
 
-Only Chrome. Replacing the guest's `~/Downloads` with a symlink would make every
+Only the browser. Replacing the guest's `~/Downloads` with a symlink would make every
 app follow, but macOS refuses: TCC protects Downloads, Desktop and Documents, and
 renaming one over SSH fails with `Operation not permitted` however much root you
 have. Other apps in the guest save to the guest's own `~/Downloads`, where a link
@@ -530,8 +531,10 @@ into Google Password Manager (Chrome ships no importer).
   secret scan, and the unit tests on Python 3.10 and 3.14 with a coverage floor,
   everything Python inside a UBI10 container, plus a smoke job
   that boots the real container and asserts the UI answers 200 (not 401, which would
-  mean the login prompt is back), Chrome is running, and the desktop really is at
-  1920x1200. Every job has a timeout.
+  mean the login prompt is back), the browser is running, and the desktop really is
+  at 1920x1200. On every push that is Chrome; the weekly run and `workflow_dispatch`
+  do all three, because a smoke test that only ever started Chrome is how the box
+  came to run Chrome whatever browser was asked for. Every job has a timeout.
 
 ## Licence
 
