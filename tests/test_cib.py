@@ -39,7 +39,7 @@ def isolate_secrets(tmp_path, monkeypatch):
     secrets_dir.mkdir(parents=True)
     monkeypatch.setattr(cib.Path, "home", classmethod(lambda cls: home))
     # Derived, not a hand-written list of names. The list version held CREDENTIALS,
-    # VM_KEY, VM_HOST_KEY and KNOWN_HOSTS but not LAST_IP, which was added later —
+    # VM_KEY, VM_HOST_KEY and KNOWN_HOSTS but not the remembered address, added later —
     # so the suite wrote its 10.0.0.9 test constant into a live VM's real
     # vm-last-ip. Anything added tomorrow is covered without a person remembering.
     for name, value in list(vars(cib).items()):
@@ -665,7 +665,7 @@ def test_an_interactive_shell_keeps_this_terminals_stdin(credentials, monkeypatc
 def credentials():
     # Nothing is redirected here. isolate_secrets is autouse and has already moved
     # every module-level path under SECRETS into this test's own directory; a second
-    # hand-written list of names beside it is what let LAST_IP slip through once.
+    # hand-written list of names beside it is what let the state file slip through once.
     # Stand-ins rather than real ssh-keygen output: these tests replace `run`, so a
     # real keygen would never happen. ensure_vm_keys() then only rewrites
     # known_hosts, which is the part they care about.
@@ -697,7 +697,7 @@ def test_no_module_level_path_still_points_at_the_real_home(tmp_path):
     # Non-vacuous: there are paths of this shape, and they were moved rather than
     # simply absent.
     assert cib.SECRETS.is_relative_to(tmp_path)
-    assert cib.LAST_IP.is_relative_to(tmp_path)
+    assert cib.STATE.is_relative_to(tmp_path)
 
 
 def test_the_guest_password_is_generated_once_and_remembered(credentials):
@@ -1045,14 +1045,14 @@ def test_a_detached_start_records_what_tart_printed(tmp_path, isolate_secrets):
 def test_deleting_the_vm_takes_the_remembered_address_with_it(tmp_path, monkeypatch):
     """A list of names left vm-last-ip behind, and the next build inherited it."""
     cib.SECRETS.mkdir(parents=True, exist_ok=True)
-    cib.LAST_IP.write_text("10.0.0.9\n")
+    cib.write_state(last_ip="10.0.0.9")
     cib.CREDENTIALS.write_text("secret\n")
     monkeypatch.setattr("builtins.input", lambda _: "y")
     monkeypatch.setattr(
         cib, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="", stderr="")
     )
     cib.cmd_vm_delete("tart", cib.VmConfig())
-    assert not cib.LAST_IP.exists()
+    assert not cib.STATE.exists()
     assert not cib.CREDENTIALS.exists()
 
 
@@ -3805,7 +3805,7 @@ def test_the_address_the_guest_last_answered_on_is_remembered(credentials, monke
         cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="10.0.0.9\n")
     )
     assert cib.vm_ip("tart", cib.VmConfig()) == "10.0.0.9"
-    assert cib.LAST_IP.read_text().strip() == "10.0.0.9"
+    assert cib.read_state()["last_ip"] == "10.0.0.9"
 
     monkeypatch.setattr(cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=""))
     monkeypatch.setattr(cib, "guest_answers", lambda ip: ip == "10.0.0.9")
@@ -3815,8 +3815,7 @@ def test_the_address_the_guest_last_answered_on_is_remembered(credentials, monke
 def test_a_remembered_address_that_answers_nothing_is_not_used(credentials, monkeypatch):
     # A guest that has really gone needs the error, not an address that will time
     # out on every command after it.
-    cib.LAST_IP.parent.mkdir(parents=True, exist_ok=True)
-    cib.LAST_IP.write_text("10.0.0.9\n")
+    cib.write_state(last_ip="10.0.0.9")
     monkeypatch.setattr(cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=""))
     monkeypatch.setattr(cib, "guest_answers", lambda ip: False)
     with pytest.raises(cib.Failure, match="cib vm status"):
@@ -4003,3 +4002,53 @@ def test_the_drawing_uses_both_the_browser_and_the_box():
         assert cibicon._fill(colour) in drawing
     assert cibicon._fill(cibicon.CARTON_FACE) in drawing
     assert cibicon._fill(cibicon.CARTON_FLAP) in drawing
+
+
+def test_opening_a_running_guest_brings_its_window_forward(tmp_path, monkeypatch, calls):
+    """Otherwise a click on the launcher does nothing whenever the VM is already up.
+
+    Which is most of the time, and it reads as the launcher being broken.
+    """
+    bundle = tmp_path / "tart.app"
+    binary = bundle / "Contents" / "MacOS" / "tart"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("")
+    monkeypatch.setattr(cib, "vm_running", lambda tart, vm: True)
+    cib.cmd_vm_open(str(binary), cib.VmConfig())
+    assert ["/usr/bin/open", "-a", str(bundle)] in calls
+
+
+def test_a_tart_outside_an_app_bundle_is_left_alone(tmp_path, monkeypatch, calls):
+    # A bare binary has no bundle, so there is nothing for `open -a` to activate
+    # and passing it one would be an error rather than a no-op.
+    binary = tmp_path / "bin" / "tart"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("")
+    monkeypatch.setattr(cib, "vm_running", lambda tart, vm: True)
+    cib.cmd_vm_open(str(binary), cib.VmConfig())
+    assert not any(call[:2] == ["/usr/bin/open", "-a"] for call in calls)
+
+
+def test_the_state_file_says_what_each_value_is(tmp_path):
+    """It replaced a directory of bare values — vm-last-ip held an address and
+    nothing else, so the only way to know what it was for was to read the source."""
+    cib.write_state(last_ip="10.0.0.5")
+    written = cib.STATE.read_text()
+    assert "last_ip: 10.0.0.5" in written
+    assert written.startswith("#"), "no line saying where the file came from"
+    assert cib.read_state()["last_ip"] == "10.0.0.5"
+
+
+def test_updating_one_value_keeps_the_others(tmp_path):
+    cib.write_state(last_ip="10.0.0.5", something_else="kept")
+    cib.write_state(last_ip="10.0.0.6")
+    assert cib.read_state() == {"last_ip": "10.0.0.6", "something_else": "kept"}
+
+
+def test_the_old_remembered_address_is_carried_into_the_state_file(tmp_path):
+    """Losing it costs a guest that arp has forgotten, which is the case it is for."""
+    cib.SECRETS.mkdir(parents=True, exist_ok=True)
+    (cib.SECRETS / "vm-last-ip").write_text("10.0.0.9\n")
+    cib.migrate_flat_secrets()
+    assert cib.read_state()["last_ip"] == "10.0.0.9"
+    assert not (cib.SECRETS / "vm-last-ip").exists()

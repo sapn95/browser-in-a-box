@@ -622,13 +622,13 @@ CREDENTIALS = SECRETS / "vm-credentials"
 VM_KEY = SECRETS / "vm-key"
 VM_HOST_KEY = SECRETS / "vm-host-key"
 KNOWN_HOSTS = SECRETS / "vm-known-hosts"
-# The address the guest last answered on. arp forgets an idle guest and
-# `tart ip --wait` cannot make it remember, so this is the fallback.
-LAST_IP = SECRETS / "vm-last-ip"
-# With CIB_VM_VIEWER=vnc, tart prints the Screen Sharing URL on stdout as it starts,
-# and its password is generated fresh for every run. A detached start has no terminal
-# to print it on, so tart's output is kept here and the URL copied out of it.
-BOOT_LOG = SECRETS / "vm-boot-log"
+# What cib knows about this guest that is not a secret. One labelled file rather
+# than a directory of bare values: vm-last-ip held "192.168.1.56" and nothing else,
+# so the only way to know what it was for was to read the source.
+STATE = SECRETS / "state.yaml"
+# tart's own output from a detached start, kept because that start has no terminal
+# to print on and a failure would otherwise leave nothing to read.
+BOOT_LOG = SECRETS / "tart-boot.log"
 
 
 PATCHER = Path(__file__).resolve().parent / "cibpatch.py"
@@ -835,6 +835,17 @@ def migrate_flat_secrets() -> None:
         if old.is_file() and not current.exists():
             current.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             old.replace(current)
+    # The remembered address used to be a file of its own holding a bare value, and
+    # for one release there was a vm-vnc-url beside it that nothing reads any more.
+    # Carried over rather than dropped: losing it costs a guest that arp has
+    # forgotten, which is the one case the whole thing exists for.
+    previous = SECRETS / "vm-last-ip"
+    if previous.is_file():
+        if not STATE.exists():
+            write_state(last_ip=previous.read_text().strip())
+        previous.unlink()
+    for stale in ("vm-vnc-url", "vm-boot-log"):
+        (SECRETS / stale).unlink(missing_ok=True)
 
 
 def _keygen(path: Path, comment: str) -> None:
@@ -1679,10 +1690,37 @@ def guest_answers(ip: str, port: int = 22) -> bool:
         return probe.connect_ex((ip, port)) == 0
 
 
+def read_state() -> dict[str, str]:
+    """What cib remembers about this guest, or nothing if it has never run.
+
+    Parsed here rather than through PyYAML: cib writes this file itself and writes
+    only flat `key: value` lines, and state has to work on the bare-checkout path
+    where PyYAML may not be installed at all.
+    """
+    if not STATE.exists():
+        return {}
+    remembered = {}
+    for line in STATE.read_text(errors="replace").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        key, sep, value = stripped.partition(":")
+        if sep:
+            remembered[key.strip()] = value.strip()
+    return remembered
+
+
+def write_state(**changes: str) -> None:
+    """Update named keys, leaving the rest of the file alone."""
+    remembered = read_state() | {key: value for key, value in changes.items() if value}
+    STATE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    body = "".join(f"{key}: {value}\n" for key, value in sorted(remembered.items()))
+    STATE.write_text("# Written by cib. Safe to delete — everything here is rediscovered.\n" + body)
+
+
 def remember_ip(ip: str) -> None:
     """Keep the address, so a guest arp has forgotten can still be reached."""
-    LAST_IP.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    LAST_IP.write_text(ip + "\n")
+    write_state(last_ip=ip)
 
 
 def vm_ip(tart: str, vm: VmConfig) -> str:
@@ -1707,7 +1745,7 @@ def vm_ip(tart: str, vm: VmConfig) -> str:
     # The host's arp table forgets a guest that has been quiet, and `tart ip --wait`
     # only re-reads that table — it sends nothing that would repopulate it. The
     # guest is usually still there on the address it last answered on.
-    remembered = LAST_IP.read_text().strip() if LAST_IP.exists() else ""
+    remembered = read_state().get("last_ip", "")
     if remembered and guest_answers(remembered):
         return remembered
     # Not "past Setup Assistant": the offline path never shows one, so naming it
@@ -1789,10 +1827,27 @@ def cmd_vm_open(tart: str, vm: VmConfig) -> None:
         boot = start_detached(tart, vm)
         wait_for_guest(tart, vm, boot)
     if vm.viewer != "vnc":
-        # tart's own window is the view, and starting it is all there is to do.
-        print(f"{vm.name!r} is running; its window is open.")
+        raise_window(tart)
+        print(f"{vm.name!r} is running; its window is in front.")
         return
     run("/usr/bin/open", screen_address(tart, vm))
+
+
+def raise_window(tart: str) -> None:
+    """Bring tart's window forward, since the guest is usually already running.
+
+    Without this a click on the launcher does nothing visible whenever the VM is
+    up — which is most of the time, and reads as the launcher being broken. `open
+    -a` on a bundle that is already running activates it rather than starting a
+    second copy, so this is safe to call unconditionally.
+    """
+    binary = Path(tart).resolve()
+    # .../tart.app/Contents/MacOS/tart, so the bundle is three levels up. A tart
+    # installed as a bare binary has no bundle and nothing to activate.
+    bundle = binary.parents[2] if len(binary.parents) > 2 else None
+    if bundle is None or bundle.suffix != ".app":
+        return
+    run("/usr/bin/open", "-a", str(bundle), check=False, capture=True)
 
 
 APPS_DIR = Path("~/Applications").expanduser()
