@@ -3278,92 +3278,101 @@ def test_the_patcher_turns_the_key_paths_it_is_given_into_key_material(monkeypat
     assert seen["keys"].host_public.strip() == "ssh-ed25519 AAAAHOST guest"
 
 
-def test_the_templates_key_provisioner_writes_what_ssh_will_look_for(tmp_path):
-    # Grepping the template for "authorized_keys" passes even if the provisioner
-    # writes it somewhere sshd never reads.
-    import re as _re
-
-    template = (Path(cib.__file__).resolve().parent / "packer" / "browser-vm.pkr.hcl").read_text()
-    lines = _re.findall(
-        r'^\s*"(mkdir -p ~/\.ssh.*?|printf .*?authorized_keys)",\s*$', template, _re.M
-    )
-    assert lines, "the key provisioner is no longer where it was"
-    home = tmp_path / "home"
-    home.mkdir()
-    # HCL escapes its strings, so what packer hands the shell is the unescaped
-    # form: `printf '%s\\n'` in the template is `printf '%s\n'` in the guest.
-    script = "\n".join(
-        ln.replace("\\\\n", "\\n").replace("${var.authorized_key}", "ssh-ed25519 AAAAPUB cib")
-        for ln in lines
-    )
-    subprocess.run(  # noqa: S603
-        ["/bin/sh", "-e", "-c", script],
-        env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
-        check=True,
-        capture_output=True,
-    )
-    assert (home / ".ssh/authorized_keys").read_text().strip() == "ssh-ed25519 AAAAPUB cib"
+def _template() -> str:
+    return (Path(cib.__file__).resolve().parent / "packer" / "browser-vm.pkr.hcl").read_text()
 
 
 def _template_command(needle: str, **values: str) -> str:
     """One provisioner line from the packer template, as the guest's shell sees it."""
-    template = (Path(cib.__file__).resolve().parent / "packer" / "browser-vm.pkr.hcl").read_text()
-    line = next(ln for ln in template.splitlines() if needle in ln).strip()
+    line = next(ln for ln in _template().splitlines() if needle in ln).strip()
     command = line.removesuffix(",").strip('"').replace("\\\\n", "\\n")
     for name, value in values.items():
         command = command.replace(f"${{var.{name}}}", value)
     return command
 
 
+def test_the_templates_key_provisioner_writes_what_ssh_will_look_for():
+    # Grepping the template for "authorized_keys" passes even if the provisioner
+    # writes it somewhere sshd never reads. `~` is not expanded by an upload, so the
+    # destination has to name the account's real home.
+    template = _template()
+    assert 'destination = "/Users/${var.username}/.ssh/authorized_keys"' in template
+    assert 'destination = "/Users/${var.username}/.ssh/host_key"' in template
+
+
+def test_the_template_never_interpolates_key_material_into_a_command():
+    # A key whose comment holds a single quote would close the quoting of an inline
+    # command, and the rest of it would run as shell. The file provisioner never
+    # goes near a shell, so the content cannot be mistaken for instructions.
+    for line in _template().splitlines():
+        if not line.strip().startswith('"'):
+            continue  # a file provisioner's content = , not an inline command
+        for name in ("authorized_key", "host_private_key", "host_public_key"):
+            assert f"${{var.{name}}}" not in line, f"{name} is interpolated into: {line.strip()}"
+
+
 def test_the_template_refuses_to_build_a_guest_with_no_key(tmp_path):
     # An empty key used to build fine: `printf '%s\n' ''` writes a newline, so the
     # file exists, is not empty, and passed every size test on it — leaving a guest
-    # that cib can never reach and a build that said it went well.
-    command = _template_command("test -n '${var.authorized_key}'", authorized_key="")
-    result = subprocess.run(  # noqa: S603
-        ["/bin/sh", "-c", command], capture_output=True, text=True, check=False
-    )
-    assert result.returncode != 0, "an empty authorized_key has to stop the build"
-    assert "could never log in" in result.stdout + result.stderr
-
-
-def test_the_template_checks_the_key_by_content_rather_than_by_size(tmp_path):
-    command = _template_command("grep -q '[^[:space:]]' ~/.ssh/authorized_keys")
+    # that cib can never reach and a build that said it went well. The upload adds
+    # that same newline, so the check has to be on the content.
+    command = _template_command("grep -q '[^[:space:]]' ~/.ssh/authorized_keys || { echo 'no")
     ssh_dir = tmp_path / ".ssh"
     ssh_dir.mkdir()
-    # Exactly what the old printf left behind for an empty key.
+
+    def run_guard(cmd: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(  # noqa: S603
+            ["/bin/sh", "-c", cmd],
+            env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    # Exactly what an empty authorized_key is uploaded as.
     (ssh_dir / "authorized_keys").write_text("\n")
-    result = subprocess.run(  # noqa: S603
-        ["/bin/sh", "-c", command],
-        env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"},
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    result = run_guard(command)
     assert result.returncode != 0, "a file holding one newline holds no key"
+    assert "could never log in" in result.stdout + result.stderr
     (ssh_dir / "authorized_keys").write_text("ssh-ed25519 AAAAPUB cib\n")
-    assert (
-        subprocess.run(  # noqa: S603
+    assert run_guard(command).returncode == 0
+
+
+def test_the_template_refuses_to_build_a_guest_with_no_host_key(tmp_path):
+    # Without it cib cannot tell the guest apart from anything else answering on
+    # that address, and the build would still report success.
+    command = _template_command("test -s ~/.ssh/host_key ||")
+    (tmp_path / ".ssh").mkdir()
+    (tmp_path / ".ssh/host_key").write_text("")
+
+    def run_guard() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(  # noqa: S603
             ["/bin/sh", "-c", command],
             env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"},
             capture_output=True,
+            text=True,
             check=False,
-        ).returncode
-        == 0
-    )
+        )
+
+    result = run_guard()
+    assert result.returncode != 0
+    assert "could not verify" in result.stdout + result.stderr
+    (tmp_path / ".ssh/host_key").write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n")
+    assert run_guard().returncode == 0
 
 
-def test_the_template_narrows_the_host_key_before_it_holds_anything():
-    # `printf ... > /tmp/host_key` creates it 0644 and the install that narrows it
-    # runs later, so the private key was readable by every local user in between.
-    # cib.py opens with the mode for exactly this reason; this path did not.
-    template = (Path(cib.__file__).resolve().parent / "packer" / "browser-vm.pkr.hcl").read_text()
-    lines = template.splitlines()
-    narrow = next(
-        i for i, ln in enumerate(lines) if "install -m 0600 /dev/null /tmp/host_key" in ln
-    )
-    write = next(i for i, ln in enumerate(lines) if "host_private_key}' > /tmp/host_key" in ln)
-    assert narrow < write, "the mode has to be set before there is anything to read"
+def test_the_template_never_stages_the_private_key_where_others_can_read_it():
+    # It used to go through /tmp: `printf ... > /tmp/host_key` creates it 0644, and
+    # the install that narrows it to 0600 runs later, so every local user could read
+    # the private key in between. An upload cannot be given a mode — it can be put
+    # somewhere unreadable instead, which is what the 0700 ~/.ssh above is for.
+    lines = _template().splitlines()
+    for line in lines:
+        if "host_key" in line:
+            assert "tmp" not in line, f"the private key goes through a shared directory: {line}"
+    narrow = next(i for i, ln in enumerate(lines) if "install -d -m 0700 ~/.ssh" in ln)
+    upload = next(i for i, ln in enumerate(lines) if '.ssh/host_key"' in ln)
+    assert narrow < upload, "the directory has to be private before the key lands in it"
 
 
 def test_up_mounts_the_profile_volume_where_the_image_keeps_it(calls, monkeypatch):
