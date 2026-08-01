@@ -2196,9 +2196,14 @@ def _run_desktop_script(
         answer = "exit 1\n"
     (bin_dir / "pgrep").write_text(f"#!/bin/sh\n{answer}")
     (bin_dir / "nohup").write_text(f'#!/bin/sh\necho "$@" >> {home}/launch.log\n')
-    # Faked as well, so a test never reads or waits on a real /tmp/<browser>.log.
+    # Recorded rather than performed: the lock paths are the container's absolute
+    # ones, so a real rm here would reach outside the temporary directory — and
+    # what the removal was asked to delete is worth asserting anyway.
+    (bin_dir / "rm").write_text(f'#!/bin/sh\necho "$@" >> {home}/rm.log\n')
+    # Faked as well, so a test never reads a real log — and CIB_LOG below keeps the
+    # script from creating one in the host's /tmp in the first place.
     (bin_dir / "tail").write_text('#!/bin/sh\necho "(tail $*)"\n')
-    for name in ("xrandr", "pgrep", "nohup", "tail"):
+    for name in ("xrandr", "pgrep", "nohup", "rm", "tail"):
         (bin_dir / name).chmod(0o755)
     # Shortened, or the failure case would sit out the full production wait.
     original_wait = cib.LAUNCH_WAIT_SECS
@@ -2209,7 +2214,12 @@ def _run_desktop_script(
         cib.LAUNCH_WAIT_SECS = original_wait
     result = subprocess.run(  # noqa: S603
         ["/bin/sh", "-c", script],
-        env={"HOME": str(home), "RES": resolution, "PATH": f"{bin_dir}:/usr/bin:/bin"},
+        env={
+            "HOME": str(home),
+            "RES": resolution,
+            "CIB_LOG": str(home / f"{browser}.log"),
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
+        },
         capture_output=True,
         text=True,
         check=False,
@@ -2219,7 +2229,12 @@ def _run_desktop_script(
         path = home / name
         return path.read_text() if path.exists() else ""
 
-    return read("xrandr.log"), read("launch.log"), result.stderr
+    return SimpleNamespace(
+        mode=read("xrandr.log"),
+        launch=read("launch.log"),
+        removed=read("rm.log"),
+        stderr=result.stderr,
+    )
 
 
 @pytest.mark.parametrize("key", ["chrome", "chromium", "firefox"])
@@ -2230,34 +2245,40 @@ def test_the_desktop_script_launches_the_browser_the_image_actually_holds(key):
 
     browser = cibbrowsers.BROWSERS[key]
     with tempfile.TemporaryDirectory() as tmp:
-        mode, launch, stderr = _run_desktop_script(Path(tmp), "1920x1200", browser=key)
-    assert "-s 1920x1200" in mode
-    assert browser.container_bin in launch
-    assert stderr == ""
+        run = _run_desktop_script(Path(tmp), "1920x1200", browser=key)
+    assert "-s 1920x1200" in run.mode
+    assert browser.container_bin in run.launch
+    assert run.stderr == ""
+    profile = f"{cib.KASM_HOME}/{browser.container_profile}"
     if browser.settings == "firefox":
         # Firefox rejects both of these, and would have opened them as file names.
-        assert "--user-data-dir" not in launch
-        assert "--no-sandbox" not in launch
+        assert "--user-data-dir" not in run.launch
+        assert "--no-sandbox" not in run.launch
+        # Its stale lock is a pair of files inside the profile, never a Singleton.
+        assert f"{profile}/*/.parentlock" in run.removed
+        assert "Singleton" not in run.removed
     else:
-        assert f"--user-data-dir={cib.KASM_HOME}/{browser.container_profile}" in launch
-        assert "--no-sandbox" in launch
+        assert f"--user-data-dir={profile}" in run.launch
+        assert "--no-sandbox" in run.launch
+        assert f"{profile}/Singleton*" in run.removed
 
 
 def test_the_desktop_script_does_not_start_a_second_browser():
     import tempfile
 
     with tempfile.TemporaryDirectory() as tmp:
-        _, launch, _ = _run_desktop_script(Path(tmp), "1920x1200", already_running=True)
-    assert launch == "", "a second browser over a live one loses the first one's tabs"
+        run = _run_desktop_script(Path(tmp), "1920x1200", already_running=True)
+    assert run.launch == "", "a second browser over a live one loses the first one's tabs"
+    assert run.removed == "", "and its live profile lock is not something to delete"
 
 
 def test_the_desktop_script_skips_xrandr_when_no_mode_was_asked_for():
     import tempfile
 
     with tempfile.TemporaryDirectory() as tmp:
-        mode, launch, _ = _run_desktop_script(Path(tmp), "")
-    assert mode == "", "an empty CIB_RESOLUTION means follow the browser window"
-    assert cibbrowsers.BROWSERS["chrome"].container_bin in launch
+        run = _run_desktop_script(Path(tmp), "")
+    assert run.mode == "", "an empty CIB_RESOLUTION means follow the browser window"
+    assert cibbrowsers.BROWSERS["chrome"].container_bin in run.launch
 
 
 def test_the_desktop_script_reports_a_browser_that_never_came_up():
@@ -2268,10 +2289,10 @@ def test_the_desktop_script_reports_a_browser_that_never_came_up():
     import tempfile
 
     with tempfile.TemporaryDirectory() as tmp:
-        _, launch, stderr = _run_desktop_script(Path(tmp), "", browser="firefox", starts=False)
-    assert launch != "", "it still has to try before it complains"
-    assert "Firefox did not start" in stderr
-    assert "firefox.log" in stderr, "the log it wrote is the first thing to look at"
+        run = _run_desktop_script(Path(tmp), "", browser="firefox", starts=False)
+    assert run.launch != "", "it still has to try before it complains"
+    assert "Firefox did not start" in run.stderr
+    assert "firefox.log" in run.stderr, "the log it wrote is the first thing to look at"
 
 
 @pytest.mark.parametrize(
