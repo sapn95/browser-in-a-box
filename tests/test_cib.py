@@ -3785,15 +3785,14 @@ def test_a_guest_that_dies_while_starting_is_not_waited_out(isolate_secrets, mon
     class _Died(_FakeBoot):
         returncode = 3
 
-        @property
-        def stderr(self):
-            import io
-
-            return io.StringIO("bridged networking failed")
-
         def poll(self):
             return 3
 
+    # Through the log, not a pipe. tart's stderr is redirected into the boot log
+    # now, because a pipe nobody drains blocks tart at 64 KiB and then SIGPIPEs it
+    # dead the moment cib exits — which killed the guest this test is about.
+    cib.BOOT_LOG.parent.mkdir(parents=True, exist_ok=True)
+    cib.BOOT_LOG.write_text("Downloading...\nbridged networking failed\n")
     monkeypatch.setattr(cib.time, "sleep", lambda s: None)
     with pytest.raises(cib.Failure, match="bridged networking failed"):
         isolate_secrets.wait_for_guest("tart", cib.VmConfig(), _Died())
@@ -4238,3 +4237,44 @@ def test_the_built_icns_differs_per_browser_not_just_the_drawing(tmp_path):
         cib._build_icns(target, scratch, browser.palette, browser.mark)
         built[key] = target.read_bytes()
     assert len(set(built.values())) == len(built), "the launchers all look the same"
+
+
+def test_the_tart_bundle_is_found_through_homebrews_shim(tmp_path):
+    """The layout on every machine that followed the README.
+
+    `brew install cirruslabs/cli/tart` puts a bash shim at bin/tart, so resolving
+    the binary ends somewhere no parent is a bundle at all — the real one is a
+    sibling of that bin, under libexec. The earlier test built .app/Contents/MacOS
+    by hand, a shape Homebrew's tart does not have, and passed while the guard it
+    covers did nothing on real installs.
+    """
+    prefix = tmp_path / "Cellar" / "tart" / "2.32.1"
+    shim = prefix / "bin" / "tart"
+    shim.parent.mkdir(parents=True)
+    shim.write_text('#!/bin/bash\nexec .../tart.app/Contents/MacOS/tart "$@"\n')
+    bundle = prefix / "libexec" / "tart.app"
+    (bundle / "Contents" / "MacOS").mkdir(parents=True)
+    assert cib.tart_bundle(str(shim)) == bundle
+
+
+def test_a_bare_tart_binary_has_no_bundle_to_activate(tmp_path):
+    binary = tmp_path / "bin" / "tart"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("")
+    assert cib.tart_bundle(str(binary)) is None
+
+
+def test_a_detached_guest_survives_writing_to_stderr_after_cib_exits(tmp_path, isolate_secrets):
+    """A pipe nobody drains is not a detach.
+
+    tart blocks once 64 KiB of diagnostics fill it, and when cib exits the read
+    end closes so the next write is a SIGPIPE. Either one kills the guest that
+    start_new_session was added to keep alive.
+    """
+    noisy = tmp_path / "faketart"
+    # More than a pipe buffer holds, so a pipe would block rather than finish.
+    noisy.write_text("#!/bin/sh\nawk 'BEGIN{for(i=0;i<3000;i++)print \"diagnostic line\"}' >&2\n")
+    noisy.chmod(0o755)
+    boot = isolate_secrets.start_detached(str(noisy), cib.VmConfig())
+    assert boot.wait(timeout=30) == 0, "tart blocked writing to a pipe nobody reads"
+    assert "diagnostic line" in cib.BOOT_LOG.read_text()

@@ -1381,7 +1381,11 @@ def start_detached(tart: str, vm: VmConfig) -> subprocess.Popen[str]:
         return subprocess.Popen(  # noqa: S603
             [tart, *vm_run_args(vm)],
             stdout=log,
-            stderr=subprocess.PIPE,
+            # Into the same file, not a pipe. A pipe nobody drains kills the guest
+            # twice over: tart blocks once 64 KiB of diagnostics have filled it, and
+            # when cib exits the read end closes and the next write is a SIGPIPE. The
+            # detach this function is named for does not survive either.
+            stderr=subprocess.STDOUT,
             text=True,
             # The detach this function is named for. Without a session of its own the
             # guest is still in the caller's process group, so it takes the SIGHUP
@@ -1406,12 +1410,19 @@ def screen_url(vm: VmConfig, ip: str) -> str:
     return f"vnc://{vm.user}:{quote(guest_password(), safe='')}@{ip}"
 
 
+def boot_log_tail(lines: int = 5) -> str:
+    """The end of what tart said, for a failure with no terminal to have said it on."""
+    if not BOOT_LOG.exists():
+        return ""
+    return " / ".join(BOOT_LOG.read_text(errors="replace").split("\n")[-lines:]).strip(" /")
+
+
 def wait_for_guest(tart: str, vm: VmConfig, boot: subprocess.Popen[str]) -> str:
     """Wait until the guest answers on the network, or say why it never did."""
     deadline = time.monotonic() + GUEST_WAIT_SECS
     while time.monotonic() < deadline:
         if boot.poll() is not None:
-            detail = (boot.stderr.read() or "").strip() if boot.stderr else ""
+            detail = boot_log_tail()
             raise Failure(
                 f"{vm.name!r} stopped while it was starting (tart exit {boot.returncode})"
                 + (f": {detail}" if detail else "")
@@ -1966,13 +1977,28 @@ def raise_window(tart: str) -> None:
     -a` on a bundle that is already running activates it rather than starting a
     second copy, so this is safe to call unconditionally.
     """
-    binary = Path(tart).resolve()
-    # .../tart.app/Contents/MacOS/tart, so the bundle is three levels up. A tart
-    # installed as a bare binary has no bundle and nothing to activate.
-    bundle = binary.parents[2] if len(binary.parents) > 2 else None
-    if bundle is None or bundle.suffix != ".app":
+    bundle = tart_bundle(tart)
+    if bundle is None:
         return
     run("/usr/bin/open", "-a", str(bundle), check=False, capture=True)
+
+
+def tart_bundle(tart: str) -> Path | None:
+    """tart's .app, which is not where resolving the binary lands you.
+
+    Homebrew's `tart` is a bash shim, so resolve() ends at Cellar/tart/<v>/bin/tart
+    and no parent of it is a bundle at all. The real one is a sibling of that bin,
+    under libexec. Walking up and checking both shapes covers the shim, a direct
+    bundle path, and a bare binary with no bundle to activate.
+    """
+    binary = Path(tart).resolve()
+    for parent in binary.parents:
+        if parent.suffix == ".app":
+            return parent
+        nested = parent / "libexec" / "tart.app"
+        if nested.is_dir():
+            return nested
+    return None
 
 
 APPS_DIR = Path("~/Applications").expanduser()
