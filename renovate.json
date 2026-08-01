@@ -19,13 +19,13 @@
   ],
   "customManagers": [
     {
-      "description": "Keep the pinned kasmweb/chrome tag in bib.py up to date",
+      "description": "Keep the pinned kasmweb tags in bibbrowsers.py up to date. One row per browser now: the single DEFAULT_IMAGE this used to match was removed by the per-browser split, and the manager kept matching nothing.",
       "customType": "regex",
       "managerFilePatterns": [
-        "/^bib\\.py$/"
+        "/^bibbrowsers\\.py$/"
       ],
       "matchStrings": [
-        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\nDEFAULT_IMAGE = \"docker\\.io/kasmweb/chrome:(?<currentValue>[^\"]+)\""
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\n\\s*image=\"docker\\.io/(?:[^\":]+):(?<currentValue>[^\"]+)\""
       ]
     },
     {
