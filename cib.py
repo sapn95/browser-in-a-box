@@ -210,6 +210,15 @@ class Config:
     # CIB_IMAGE still wins, for a fork or a pinned digest — but the default now
     # follows the browser rather than being Chrome's whatever CIB_BROWSER says.
     image: str = field(default_factory=lambda: _env("CIB_IMAGE", chosen_browser().image))
+
+    def __post_init__(self) -> None:
+        if self.browser == cibbrowsers.ALL:
+            raise Failure(
+                "CIB_BROWSER=all is a VM mode: a container image serves exactly one "
+                "browser, and there is no image with three. Use 'cib vm' for that, or "
+                "name one browser here."
+            )
+
     name: str = field(default_factory=lambda: _env("CIB_NAME", "chrome-in-a-box"))
     volume: str = field(default_factory=lambda: _env("CIB_VOLUME", "chrome-in-a-box-profile"))
     port: int = field(default_factory=lambda: _env_int("CIB_PORT", "6901"))
@@ -603,6 +612,7 @@ class VmConfig:
     ipsw: str = field(default_factory=lambda: _env("CIB_VM_IPSW", "latest"))
     # "window" is tart's own, which cannot go full screen or scale. "vnc" hands the
     # display to macOS Screen Sharing, which does both.
+    browser: str = field(default_factory=lambda: chosen_browser().key)
     viewer: str = field(default_factory=lambda: _env("CIB_VM_VIEWER", "window"))
     # Sends Cmd+Space, Cmd+Tab and the rest to the guest while its window has focus,
     # instead of to whatever on the host has registered them. Off by default: it is
@@ -1116,7 +1126,7 @@ def _create_offline(tart: str, vm: VmConfig) -> None:
     # the fallback is empty for exactly the user who ran one command and walked away.
     remember_ip(ip)
     print(f"Installing Chrome, the clipboard agent and downloads on {vm.user}@{ip} ...")
-    if guest_ssh(vm, ip, guest_install_script(password, host_time_zone()[0])) != 0:
+    if install_browsers(vm, ip, password) != 0:
         raise Failure(
             f"the guest at {ip} is up but the install failed (see above). It is still "
             "running: 'cib vm setup' retries just this part."
@@ -1532,6 +1542,23 @@ def _first_run_settings(browser: cibbrowsers.Browser) -> str:
             f' > {profile}/../"Local State"',
         ]
     )
+
+
+def install_browsers(vm: VmConfig, ip: str, password: str) -> int:
+    """Run the install once per browser the choice covers.
+
+    A loop rather than one script that installs three: the script is idempotent —
+    it says "already installed" and moves on — so running it again is cheap, and
+    keeping it single-browser is what stops it growing a second dimension of
+    conditionals nobody can read.
+    """
+    zone = host_time_zone()[0]
+    for browser in cibbrowsers.expand(vm.browser):
+        print(f"Installing {browser.label} on {vm.user}@{ip} ...")
+        failed = guest_ssh(vm, ip, guest_install_script(password, zone, browser))
+        if failed:
+            return failed
+    return 0
 
 
 def guest_install_script(
@@ -2097,7 +2124,7 @@ def cmd_vm_setup(tart: str, vm: VmConfig) -> None:
     """Finish the guest from here: everything after Setup Assistant."""
     ip = vm_ip(tart, vm)
     print(f"Installing Chrome on {vm.user}@{ip} ...")
-    if guest_ssh(vm, ip, guest_install_script(guest_password(), host_time_zone()[0])) != 0:
+    if install_browsers(vm, ip, guest_password()) != 0:
         raise Failure(
             f"installing Chrome on the guest at {ip} failed (see above). The offline "
             "build turns Remote Login on and installs cib's key; if the connection "

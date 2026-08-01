@@ -125,6 +125,28 @@ BROWSERS = {
     ),
 }
 
+ALL = "all"
+# Not a browser: a mode. Only the VM can hold it, because a container image serves
+# exactly one browser and there is no Kasm image with three.
+BROWSERS[ALL] = Browser(
+    key=ALL,
+    label="every browser",
+    app_name="",
+    executable="",
+    archive="",
+    url="",
+    mark="globe",
+    palette=((0.851, 0.918, 1.0), (0, 0, 0), (0, 0, 0), (0.141, 0.361, 0.620)),
+)
+
+
+def expand(key: str) -> list[Browser]:
+    """The browsers a choice means. Everything but `all` means just itself."""
+    if key == ALL:
+        return [browser for name, browser in BROWSERS.items() if name != ALL]
+    return [BROWSERS[key]]
+
+
 DEFAULT_BROWSER = "chrome"
 
 

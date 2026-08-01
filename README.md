@@ -302,7 +302,12 @@ to pin the guest to one version).
 
 ### Which browser
 
-`CIB_BROWSER` picks it: `chrome` (the default), `firefox` or `chromium`. It
+`CIB_BROWSER` picks it: `chrome` (the default), `firefox`, `chromium` — or `all`,
+which is a **VM-only** mode that installs all three side by side. The container
+cannot do `all`: one image serves one browser, and there is no image with three.
+Its launcher wears a globe under a net rather than any one browser's mark.
+
+For a single browser it
 applies to both variants — the container serves the matching Kasm image, and the
 VM downloads and configures that browser instead. The launcher `cib vm icon`
 writes gets the browser's own colours, so three of them side by side in the Dock
