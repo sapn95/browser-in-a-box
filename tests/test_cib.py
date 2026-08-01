@@ -4219,3 +4219,22 @@ def test_a_failing_browser_stops_the_rest(monkeypatch):
     monkeypatch.setattr(cib, "guest_ssh", lambda vm, ip, script=None: 1)
     monkeypatch.setattr(cib, "host_time_zone", lambda: ("Europe/Zurich", "Zurich"))
     assert cib.install_browsers(cib.VmConfig(), "10.0.0.5", "pw") == 1
+
+
+@macos_only
+def test_the_built_icns_differs_per_browser_not_just_the_drawing(tmp_path):
+    """The drawing took a palette and the thing that packs it threw it away.
+
+    Every launcher wore Chrome's wheel. The earlier test called cibicon.pdf
+    directly, so it passed while the path that actually writes the icon did not
+    use either argument — which is why this one goes through _build_icns.
+    """
+    built = {}
+    for key in ("chrome", "firefox", cibbrowsers.ALL):
+        browser = cibbrowsers.BROWSERS[key]
+        scratch = tmp_path / key
+        scratch.mkdir()
+        target = scratch / "applet.icns"
+        cib._build_icns(target, scratch, browser.palette, browser.mark)
+        built[key] = target.read_bytes()
+    assert len(set(built.values())) == len(built), "the launchers all look the same"
