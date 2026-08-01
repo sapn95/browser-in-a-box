@@ -19,20 +19,20 @@
   ],
   "customManagers": [
     {
-      "description": "Keep the pinned kasmweb/chrome tag in cib.py up to date",
+      "description": "Keep the pinned kasmweb/chrome tag in bib.py up to date",
       "customType": "regex",
       "managerFilePatterns": [
-        "/^cib\\.py$/"
+        "/^bib\\.py$/"
       ],
       "matchStrings": [
         "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\nDEFAULT_IMAGE = \"docker\\.io/kasmweb/chrome:(?<currentValue>[^\"]+)\""
       ]
     },
     {
-      "description": "Keep the pinned tart-guest-agent version in cib.py up to date. It is the only pin: the packer template no longer installs the agent.",
+      "description": "Keep the pinned tart-guest-agent version in bib.py up to date. It is the only pin: the packer template no longer installs the agent.",
       "customType": "regex",
       "managerFilePatterns": [
-        "/^cib\\.py$/"
+        "/^bib\\.py$/"
       ],
       "matchStrings": [
         "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\nGUEST_AGENT_VERSION = \"(?<currentValue>[^\"]+)\""

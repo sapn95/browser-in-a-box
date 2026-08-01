@@ -1,4 +1,4 @@
-"""Tests for cib.py.
+"""Tests for bib.py.
 
 Nothing here touches a real container engine: `run` is replaced with a recorder,
 so the actual command construction is asserted instead of being described.
@@ -22,9 +22,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import cib
-import cibbrowsers
-import cibicon
+import bib
+import bibbrowsers
+import bibicon
 
 
 @pytest.fixture(autouse=True)
@@ -37,23 +37,23 @@ def isolate_secrets(tmp_path, monkeypatch):
     hold for every test, including ones written later.
     """
     home = tmp_path / "isolated-home"
-    secrets_dir = home / ".config" / "browser-in-a-box" / "chrome-vm"
+    secrets_dir = home / ".config" / "browser-in-a-box" / "browser-vm"
     secrets_dir.mkdir(parents=True)
-    monkeypatch.setattr(cib.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(bib.Path, "home", classmethod(lambda cls: home))
     # Derived, not a hand-written list of names. The list version held CREDENTIALS,
     # VM_KEY, VM_HOST_KEY and KNOWN_HOSTS but not the remembered address, added later —
     # so the suite wrote its 10.0.0.9 test constant into a live VM's real
     # vm-last-ip. Anything added tomorrow is covered without a person remembering.
-    for name, value in list(vars(cib).items()):
-        if isinstance(value, Path) and value.parent == cib.SECRETS:
-            monkeypatch.setattr(cib, name, secrets_dir / value.name)
-    monkeypatch.setattr(cib, "SECRETS", secrets_dir)
+    for name, value in list(vars(bib).items()):
+        if isinstance(value, Path) and value.parent == bib.SECRETS:
+            monkeypatch.setattr(bib, name, secrets_dir / value.name)
+    monkeypatch.setattr(bib, "SECRETS", secrets_dir)
     # And no test may start a real VM. start_detached uses subprocess.Popen
-    # directly, so a test that replaces only `cib.run` would spawn tart for real and
+    # directly, so a test that replaces only `bib.run` would spawn tart for real and
     # then sit in wait_for_guest for five minutes. Tests that care replace these.
-    real = SimpleNamespace(start_detached=cib.start_detached, wait_for_guest=cib.wait_for_guest)
-    monkeypatch.setattr(cib, "start_detached", lambda tart, vm: _FakeBoot())
-    monkeypatch.setattr(cib, "wait_for_guest", lambda tart, vm, boot: "192.168.1.50")
+    real = SimpleNamespace(start_detached=bib.start_detached, wait_for_guest=bib.wait_for_guest)
+    monkeypatch.setattr(bib, "start_detached", lambda tart, vm: _FakeBoot())
+    monkeypatch.setattr(bib, "wait_for_guest", lambda tart, vm, boot: "192.168.1.50")
     # Handed back, so the two tests that exercise the real ones can ask for them
     # rather than reaching around the guard.
     return real
@@ -61,13 +61,13 @@ def isolate_secrets(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
-    """cib is configured by CIB_* variables, so a developer who actually uses the
+    """bib is configured by BIB_* variables, so a developer who actually uses the
     tool would otherwise fail its tests."""
     # The settings file is read once at import, from the real home. Left alone, a
-    # developer who actually configured cib would be testing their own settings —
+    # developer who actually configured bib would be testing their own settings —
     # the same way a hand-written path list once let tests reach real secrets.
-    monkeypatch.setattr(cib, "CONFIG", {})
-    for name in [k for k in os.environ if k.startswith("CIB_")]:
+    monkeypatch.setattr(bib, "CONFIG", {})
+    for name in [k for k in os.environ if k.startswith("BIB_")]:
         monkeypatch.delenv(name, raising=False)
 
 
@@ -86,8 +86,8 @@ def calls(monkeypatch):
         recorded_env.append(env)
         return subprocess.CompletedProcess([engine, *args], 0, stdout="", stderr="")
 
-    monkeypatch.setattr(cib, "run", fake_run)
-    monkeypatch.setattr(cib, "find_engine", lambda: "podman")
+    monkeypatch.setattr(bib, "run", fake_run)
+    monkeypatch.setattr(bib, "find_engine", lambda: "podman")
     recorded.env = recorded_env
     return recorded
 
@@ -100,8 +100,8 @@ def flat(calls: list[list[str]]) -> str:
 
 
 def test_defaults_are_the_values_the_container_needs():
-    cfg = cib.Config()
-    assert len(cfg.password) >= cib.MIN_PASSWORD_LEN
+    cfg = bib.Config()
+    assert len(cfg.password) >= bib.MIN_PASSWORD_LEN
     assert cfg.resolution == ""  # dynamic: the desktop follows the browser window
     assert cfg.port == 6901
     cfg.check()
@@ -118,112 +118,158 @@ def test_defaults_are_the_values_the_container_needs():
     ],
 )
 def test_settings_that_kill_the_container_are_rejected(field, value, expected):
-    with pytest.raises(cib.Failure, match=expected):
-        cib.Config(**{field: value}).check()
+    with pytest.raises(bib.Failure, match=expected):
+        bib.Config(**{field: value}).check()
 
 
 def test_every_browser_image_is_pinned_to_a_version():
     # A floating :latest turns "it worked yesterday" into a coin toss, and a broken
     # image would arrive without a commit anywhere to point at.
     # expand(), not BROWSERS: "all" is a VM mode, not a browser, and has no image.
-    for browser in cibbrowsers.expand(cibbrowsers.ALL):
+    for browser in bibbrowsers.expand(bibbrowsers.ALL):
         assert ":latest" not in browser.image, browser.key
         assert browser.image.startswith(f"docker.io/kasmweb/{browser.key}:"), browser.key
 
 
 def test_an_unknown_browser_is_refused_by_name(monkeypatch):
-    monkeypatch.setenv("CIB_BROWSER", "safari")
-    with pytest.raises(cib.Failure, match="chrome, chromium, firefox"):
-        cib.chosen_browser()
+    monkeypatch.setenv("BIB_BROWSER", "safari")
+    with pytest.raises(bib.Failure, match="chrome, chromium, firefox"):
+        bib.chosen_browser()
 
 
 def test_the_jpeg_quality_stays_in_the_range_kasmvnc_accepts():
     # DynamicQualityMax=10 makes Xvnc exit with a fatal error.
     for key in ("DynamicQualityMin", "DynamicQualityMax"):
-        value = int(cib.VNC_OPTIONS.split(f"{key}=")[1].split()[0])
+        value = int(bib.VNC_OPTIONS.split(f"{key}=")[1].split()[0])
         assert 0 <= value <= 9
 
 
 def test_the_login_prompt_stays_disabled():
-    assert "-DisableBasicAuth=1" in cib.VNC_OPTIONS
+    assert "-DisableBasicAuth=1" in bib.VNC_OPTIONS
 
 
 # --- engine resolution --------------------------------------------------------
 
 
 def test_engine_prefers_podman(monkeypatch):
-    monkeypatch.delenv("CIB_ENGINE", raising=False)
-    monkeypatch.setattr(cib.shutil, "which", lambda name: f"/usr/bin/{name}")
-    assert cib.find_engine() == "/usr/bin/podman"
+    monkeypatch.delenv("BIB_ENGINE", raising=False)
+    monkeypatch.setattr(bib.shutil, "which", lambda name: f"/usr/bin/{name}")
+    assert bib.find_engine() == "/usr/bin/podman"
 
 
 def test_engine_falls_back_to_docker(monkeypatch):
-    monkeypatch.delenv("CIB_ENGINE", raising=False)
+    monkeypatch.delenv("BIB_ENGINE", raising=False)
     monkeypatch.setattr(
-        cib.shutil, "which", lambda name: "/usr/bin/docker" if name == "docker" else None
+        bib.shutil, "which", lambda name: "/usr/bin/docker" if name == "docker" else None
     )
-    assert cib.find_engine() == "/usr/bin/docker"
+    assert bib.find_engine() == "/usr/bin/docker"
 
 
 def test_an_unusable_engine_override_fails_loudly(monkeypatch):
-    monkeypatch.setenv("CIB_ENGINE", "nope")
-    monkeypatch.setattr(cib.shutil, "which", lambda name: None)
-    with pytest.raises(cib.Failure, match="not on PATH"):
-        cib.find_engine()
+    monkeypatch.setenv("BIB_ENGINE", "nope")
+    monkeypatch.setattr(bib.shutil, "which", lambda name: None)
+    with pytest.raises(bib.Failure, match="not on PATH"):
+        bib.find_engine()
 
 
 def test_no_engine_at_all_fails_loudly(monkeypatch):
-    monkeypatch.delenv("CIB_ENGINE", raising=False)
-    monkeypatch.setattr(cib.shutil, "which", lambda name: None)
-    with pytest.raises(cib.Failure, match="need podman or docker"):
-        cib.find_engine()
+    monkeypatch.delenv("BIB_ENGINE", raising=False)
+    monkeypatch.setattr(bib.shutil, "which", lambda name: None)
+    with pytest.raises(bib.Failure, match="need podman or docker"):
+        bib.find_engine()
 
 
 # --- up -----------------------------------------------------------------------
 
 
 def test_up_binds_the_ui_to_localhost_only(calls, monkeypatch):
-    monkeypatch.setattr(cib, "container_running", lambda *a: False)
-    monkeypatch.setattr(cib, "wait_for_ui", lambda *a: None)
-    monkeypatch.setattr(cib, "ensure_desktop", lambda *a: True)
-    cib.cmd_up("podman", cib.Config())
+    monkeypatch.setattr(bib, "container_running", lambda *a: False)
+    monkeypatch.setattr(bib, "wait_for_ui", lambda *a: None)
+    monkeypatch.setattr(bib, "ensure_desktop", lambda *a: True)
+    bib.cmd_up("podman", bib.Config())
     assert "-p 127.0.0.1:6901:6901" in flat(calls)
 
 
 def test_up_asks_for_a_bridge_network(calls, monkeypatch):
     # kasm's startup script waits forever for a veth; rootless podman's default
     # network namespace has none, so the desktop never comes up without this.
-    monkeypatch.setattr(cib, "container_running", lambda *a: False)
-    monkeypatch.setattr(cib, "wait_for_ui", lambda *a: None)
-    monkeypatch.setattr(cib, "ensure_desktop", lambda *a: True)
-    cib.cmd_up("podman", cib.Config())
+    monkeypatch.setattr(bib, "container_running", lambda *a: False)
+    monkeypatch.setattr(bib, "wait_for_ui", lambda *a: None)
+    monkeypatch.setattr(bib, "ensure_desktop", lambda *a: True)
+    bib.cmd_up("podman", bib.Config())
     assert "--network bridge" in flat(calls)
 
 
 def test_up_reuses_a_healthy_container(calls, monkeypatch):
-    monkeypatch.delenv("CIB_FORCE", raising=False)
-    monkeypatch.setattr(cib, "container_running", lambda *a: True)
-    monkeypatch.setattr(cib, "ui_is_up", lambda *a: True)
-    monkeypatch.setattr(cib, "ensure_desktop", lambda *a: True)
-    cib.cmd_up("podman", cib.Config())
+    monkeypatch.delenv("BIB_FORCE", raising=False)
+    monkeypatch.setattr(bib, "container_running", lambda *a: True)
+    monkeypatch.setattr(bib, "serves_requested_browser", lambda *a: True)
+    monkeypatch.setattr(bib, "ui_is_up", lambda *a: True)
+    monkeypatch.setattr(bib, "ensure_desktop", lambda *a: True)
+    bib.cmd_up("podman", bib.Config())
     assert "run -d" not in flat(calls)
     assert "rm -f" not in flat(calls)
 
 
-def test_cib_force_recreates_a_healthy_container(calls, monkeypatch):
-    monkeypatch.setenv("CIB_FORCE", "1")
-    monkeypatch.setattr(cib, "container_running", lambda *a: True)
-    monkeypatch.setattr(cib, "ui_is_up", lambda *a: True)
-    monkeypatch.setattr(cib, "wait_for_ui", lambda *a: None)
-    monkeypatch.setattr(cib, "ensure_desktop", lambda *a: True)
-    cib.cmd_up("podman", cib.Config())
+def test_a_container_serving_another_browser_is_not_reused(calls, monkeypatch):
+    # `bib box up`, then `BIB_BROWSER=firefox bib box up`. The container's name does
+    # not carry the browser and its UI answers either way, so this took the reuse
+    # branch and printed "Already running" over a Chrome the user had not asked for.
+    monkeypatch.delenv("BIB_FORCE", raising=False)
+    monkeypatch.setattr(bib, "container_running", lambda *a: True)
+    monkeypatch.setattr(bib, "serves_requested_browser", lambda *a: False)
+    monkeypatch.setattr(bib, "ui_is_up", lambda *a: True)
+    monkeypatch.setattr(bib, "wait_for_ui", lambda *a: None)
+    monkeypatch.setattr(bib, "ensure_desktop", lambda *a: True)
+    monkeypatch.setenv("BIB_BROWSER", "firefox")
+    bib.cmd_up("podman", bib.Config())
+    recorded = flat(calls)
+    assert "rm -f" in recorded
+    assert "run -d" in recorded
+    assert bibbrowsers.BROWSERS["firefox"].image in recorded
+
+
+def test_bib_force_recreates_a_healthy_container(calls, monkeypatch):
+    monkeypatch.setenv("BIB_FORCE", "1")
+    monkeypatch.setattr(bib, "container_running", lambda *a: True)
+    # True, so that BIB_FORCE is the only thing left that can cause the recreate.
+    monkeypatch.setattr(bib, "serves_requested_browser", lambda *a: True)
+    monkeypatch.setattr(bib, "ui_is_up", lambda *a: True)
+    monkeypatch.setattr(bib, "wait_for_ui", lambda *a: None)
+    monkeypatch.setattr(bib, "ensure_desktop", lambda *a: True)
+    bib.cmd_up("podman", bib.Config())
     assert "run -d" in flat(calls)
 
 
+@pytest.mark.parametrize(
+    "container_id,image_id,image_rc,expected",
+    [
+        ("sha256:aaa", "sha256:aaa", 0, True),
+        ("sha256:aaa", "sha256:bbb", 0, False),
+        # The wanted image is not pulled yet: not what was asked for, and recreating
+        # is what pulls it.
+        ("sha256:aaa", "", 125, False),
+        # Neither inspect said anything. Two empty strings are equal, and without a
+        # guard that read as "the same image".
+        ("", "", 0, False),
+    ],
+)
+def test_the_running_image_is_compared_by_id(
+    monkeypatch, container_id, image_id, image_rc, expected
+):
+    def fake_run(engine, *args, check=True, capture=False, env=None):
+        if args[0] == "image":
+            return subprocess.CompletedProcess([], image_rc, stdout=image_id + "\n", stderr="")
+        return subprocess.CompletedProcess([], 0, stdout=container_id + "\n", stderr="")
+
+    monkeypatch.setattr(bib, "run", fake_run)
+    assert bib.serves_requested_browser("podman", bib.Config()) is expected
+
+
 def test_up_rejects_a_bad_setting_before_touching_the_engine(calls, monkeypatch):
-    monkeypatch.setenv("CIB_PASSWORD", "abc")
-    with pytest.raises(cib.Failure):
-        cib.cmd_up("podman", cib.Config())
+    monkeypatch.setenv("BIB_PASSWORD", "abc")
+    with pytest.raises(bib.Failure):
+        bib.cmd_up("podman", bib.Config())
     assert calls == []
 
 
@@ -231,55 +277,55 @@ def test_up_rejects_a_bad_setting_before_touching_the_engine(calls, monkeypatch)
 
 
 def test_wait_for_ui_returns_once_the_ui_answers(monkeypatch):
-    monkeypatch.setattr(cib, "ui_status", lambda cfg: 200)
-    cib.wait_for_ui("podman", cib.Config())
+    monkeypatch.setattr(bib, "ui_status", lambda cfg: 200)
+    bib.wait_for_ui("podman", bib.Config())
 
 
 def test_wait_for_ui_reports_a_returning_login_prompt(monkeypatch):
-    monkeypatch.setattr(cib, "ui_status", lambda cfg: 401)
-    with pytest.raises(cib.Failure, match="asking for a login"):
-        cib.wait_for_ui("podman", cib.Config())
+    monkeypatch.setattr(bib, "ui_status", lambda cfg: 401)
+    with pytest.raises(bib.Failure, match="asking for a login"):
+        bib.wait_for_ui("podman", bib.Config())
 
 
 def test_wait_for_ui_reports_a_container_that_died_at_boot(calls, monkeypatch):
-    monkeypatch.setattr(cib, "ui_status", lambda cfg: None)
-    monkeypatch.setattr(cib, "container_running", lambda *a: False)
-    with pytest.raises(cib.Failure, match="exited during boot"):
-        cib.wait_for_ui("podman", cib.Config())
+    monkeypatch.setattr(bib, "ui_status", lambda cfg: None)
+    monkeypatch.setattr(bib, "container_running", lambda *a: False)
+    with pytest.raises(bib.Failure, match="exited during boot"):
+        bib.wait_for_ui("podman", bib.Config())
 
 
 def test_wait_for_ui_gives_up_after_the_deadline(monkeypatch):
-    monkeypatch.setattr(cib, "ui_status", lambda cfg: None)
-    monkeypatch.setattr(cib, "container_running", lambda *a: True)
-    monkeypatch.setattr(cib.time, "sleep", lambda seconds: None)
-    with pytest.raises(cib.Failure, match="did not come up within 0s"):
-        cib.wait_for_ui("podman", cib.Config(wait_secs=0))
+    monkeypatch.setattr(bib, "ui_status", lambda cfg: None)
+    monkeypatch.setattr(bib, "container_running", lambda *a: True)
+    monkeypatch.setattr(bib.time, "sleep", lambda seconds: None)
+    with pytest.raises(bib.Failure, match="did not come up within 0s"):
+        bib.wait_for_ui("podman", bib.Config(wait_secs=0))
 
 
 # --- the remaining commands ---------------------------------------------------
 
 
 def test_logs_does_not_follow_by_default(calls):
-    cib.cmd_logs("podman", cib.Config())
+    bib.cmd_logs("podman", bib.Config())
     assert "logs --tail 200 browser-in-a-box" in flat(calls)
     assert "-f" not in flat(calls)
 
 
 def test_logs_follows_when_asked(calls):
-    cib.cmd_logs("podman", cib.Config(), follow=True)
+    bib.cmd_logs("podman", bib.Config(), follow=True)
     assert "logs -f browser-in-a-box" in flat(calls)
 
 
 def test_reset_needs_confirmation(calls, monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", lambda prompt: "n")
-    cib.cmd_reset("podman", cib.Config())
+    bib.cmd_reset("podman", bib.Config())
     assert "volume rm" not in flat(calls)
     assert "Cancelled." in capsys.readouterr().out
 
 
 def test_reset_deletes_the_volume_when_confirmed(calls, monkeypatch):
     monkeypatch.setattr("builtins.input", lambda prompt: "y")
-    cib.cmd_reset("podman", cib.Config())
+    bib.cmd_reset("podman", bib.Config())
     assert "volume rm browser-in-a-box-profile" in flat(calls)
 
 
@@ -288,21 +334,21 @@ def test_reset_treats_a_closed_stdin_as_no(calls, monkeypatch):
         raise EOFError
 
     monkeypatch.setattr("builtins.input", raise_eof)
-    cib.cmd_reset("podman", cib.Config())
+    bib.cmd_reset("podman", bib.Config())
     assert "volume rm" not in flat(calls)
 
 
 def test_down_removes_the_container(calls):
-    cib.cmd_down("podman", cib.Config())
+    bib.cmd_down("podman", bib.Config())
     assert "rm -f browser-in-a-box" in flat(calls)
 
 
 def test_ensure_desktop_clears_a_stale_profile_lock_and_sets_the_mode():
-    script = cib.desktop_script(cibbrowsers.BROWSERS["chrome"])
+    script = bib.desktop_script(bibbrowsers.BROWSERS["chrome"])
     assert "Singleton*" in script
     assert 'xrandr -s "$RES"' in script
     # Firefox leaves a different pair behind, and never a Singleton.
-    firefox = cib.desktop_script(cibbrowsers.BROWSERS["firefox"])
+    firefox = bib.desktop_script(bibbrowsers.BROWSERS["firefox"])
     assert ".parentlock" in firefox
     assert "Singleton" not in firefox
 
@@ -313,8 +359,8 @@ def test_ensure_desktop_warns_instead_of_failing(monkeypatch, capsys):
             [engine, *args], 1, stdout="", stderr="no such container"
         )
 
-    monkeypatch.setattr(cib, "run", failing_run)
-    assert cib.ensure_desktop("podman", cib.Config()) is False
+    monkeypatch.setattr(bib, "run", failing_run)
+    assert bib.ensure_desktop("podman", bib.Config()) is False
     assert "warning" in capsys.readouterr().err
 
 
@@ -322,29 +368,29 @@ def test_ensure_desktop_warns_instead_of_failing(monkeypatch, capsys):
 
 
 def test_the_vm_variant_refuses_on_a_non_mac(monkeypatch):
-    monkeypatch.setattr(cib.platform, "system", lambda: "Linux")
-    with pytest.raises(cib.Failure, match="needs macOS"):
-        cib.find_tart()
+    monkeypatch.setattr(bib.platform, "system", lambda: "Linux")
+    with pytest.raises(bib.Failure, match="needs macOS"):
+        bib.find_tart()
 
 
 def test_the_vm_variant_refuses_on_intel(monkeypatch):
-    monkeypatch.setattr(cib.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(cib.platform, "machine", lambda: "x86_64")
-    with pytest.raises(cib.Failure, match="Apple silicon"):
-        cib.find_tart()
+    monkeypatch.setattr(bib.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(bib.platform, "machine", lambda: "x86_64")
+    with pytest.raises(bib.Failure, match="Apple silicon"):
+        bib.find_tart()
 
 
 def test_a_missing_tart_points_at_the_install_command(monkeypatch):
-    monkeypatch.setattr(cib.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(cib.platform, "machine", lambda: "arm64")
-    monkeypatch.setattr(cib.shutil, "which", lambda name: None)
+    monkeypatch.setattr(bib.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(bib.platform, "machine", lambda: "arm64")
+    monkeypatch.setattr(bib.shutil, "which", lambda name: None)
     # Not on PATH and not at either Homebrew prefix. The fallback exists because a
     # Dock click has no shell profile and so no /opt/homebrew on PATH — but it must
     # not turn "tart is not installed" into a silent success on a machine that has
     # a stale binary at one of those paths.
-    monkeypatch.setattr(cib.os, "access", lambda path, mode: False)
-    with pytest.raises(cib.Failure, match="brew install"):
-        cib.find_tart()
+    monkeypatch.setattr(bib.os, "access", lambda path, mode: False)
+    with pytest.raises(bib.Failure, match="brew install"):
+        bib.find_tart()
 
 
 def test_tart_is_found_at_the_homebrew_prefix_when_path_is_bare(monkeypatch):
@@ -353,37 +399,37 @@ def test_tart_is_found_at_the_homebrew_prefix_when_path_is_bare(monkeypatch):
     The clickable app failed with "tart is not on PATH" on a machine where tart
     was plainly installed, because a shell profile is what puts Homebrew there.
     """
-    monkeypatch.setattr(cib.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(cib.platform, "machine", lambda: "arm64")
-    monkeypatch.setattr(cib.shutil, "which", lambda name: None)
-    monkeypatch.setattr(cib.os, "access", lambda path, mode: path == "/opt/homebrew/bin/tart")
-    assert cib.find_tart() == "/opt/homebrew/bin/tart"
+    monkeypatch.setattr(bib.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(bib.platform, "machine", lambda: "arm64")
+    monkeypatch.setattr(bib.shutil, "which", lambda name: None)
+    monkeypatch.setattr(bib.os, "access", lambda path, mode: path == "/opt/homebrew/bin/tart")
+    assert bib.find_tart() == "/opt/homebrew/bin/tart"
 
 
 def test_vm_up_refuses_before_create(calls, monkeypatch):
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
-    with pytest.raises(cib.Failure, match="vm create"):
-        cib.cmd_vm_up("tart", cib.VmConfig())
+    monkeypatch.setattr(bib, "vm_exists", lambda *a, **k: False)
+    with pytest.raises(bib.Failure, match="vm create"):
+        bib.cmd_vm_up("tart", bib.VmConfig())
 
 
 def test_vm_delete_needs_confirmation(calls, monkeypatch):
     monkeypatch.setattr("builtins.input", lambda prompt: "n")
-    cib.cmd_vm_delete("tart", cib.VmConfig())
+    bib.cmd_vm_delete("tart", bib.VmConfig())
     assert "delete" not in flat(calls)
 
 
 def test_vm_delete_removes_the_vm_when_confirmed(calls, monkeypatch):
     monkeypatch.setattr("builtins.input", lambda prompt: "y")
-    cib.cmd_vm_delete("tart", cib.VmConfig())
-    assert "delete chrome-vm" in flat(calls)
+    bib.cmd_vm_delete("tart", bib.VmConfig())
+    assert "delete browser-vm" in flat(calls)
 
 
 def test_every_vm_action_is_reachable_from_the_cli(monkeypatch):
-    parser = cib.build_parser()
-    action = next(a for a in parser._actions if isinstance(a, cib.argparse._SubParsersAction))
+    parser = bib.build_parser()
+    action = next(a for a in parser._actions if isinstance(a, bib.argparse._SubParsersAction))
     vm_parser = action.choices["vm"]
     choices = next(a.choices for a in vm_parser._actions if a.dest == "action")
-    assert set(choices) == set(cib.VM_ACTIONS)
+    assert set(choices) == set(bib.VM_ACTIONS)
 
 
 # --- cli ----------------------------------------------------------------------
@@ -391,71 +437,71 @@ def test_every_vm_action_is_reachable_from_the_cli(monkeypatch):
 
 def test_unknown_command_is_rejected():
     with pytest.raises(SystemExit) as excinfo:
-        cib.main(["frobnicate"])
+        bib.main(["frobnicate"])
     assert excinfo.value.code != 0
 
 
 def test_bare_invocation_prints_help_and_fails(capsys):
-    assert cib.main([]) == 2
+    assert bib.main([]) == 2
     assert "box" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("argv", [["frobnicate"], ["box"], ["box", "frobnicate"], ["vm", "nope"]])
 def test_unusable_invocations_are_rejected(argv):
     with pytest.raises(SystemExit) as excinfo:
-        cib.main(argv)
+        bib.main(argv)
     assert excinfo.value.code != 0
 
 
-@pytest.mark.parametrize("action", sorted(cib.BOX_ACTIONS))
+@pytest.mark.parametrize("action", sorted(bib.BOX_ACTIONS))
 def test_every_box_action_dispatches(action, monkeypatch):
-    monkeypatch.setattr(cib, "find_engine", lambda: "podman")
+    monkeypatch.setattr(bib, "find_engine", lambda: "podman")
     called = []
-    monkeypatch.setitem(cib.BOX_ACTIONS, action, lambda *a, **k: called.append(action))
+    monkeypatch.setitem(bib.BOX_ACTIONS, action, lambda *a, **k: called.append(action))
     if action == "logs":
-        monkeypatch.setattr(cib, "cmd_logs", lambda *a, **k: called.append(action))
-    assert cib.main(["box", action]) == 0
+        monkeypatch.setattr(bib, "cmd_logs", lambda *a, **k: called.append(action))
+    assert bib.main(["box", action]) == 0
     assert called == [action]
 
 
-@pytest.mark.parametrize("action", sorted(cib.VM_ACTIONS))
+@pytest.mark.parametrize("action", sorted(bib.VM_ACTIONS))
 def test_every_vm_action_dispatches(action, monkeypatch):
-    monkeypatch.setattr(cib, "find_tart", lambda: "tart")
+    monkeypatch.setattr(bib, "find_tart", lambda: "tart")
     called = []
-    monkeypatch.setitem(cib.VM_ACTIONS, action, lambda *a, **k: called.append(action))
-    assert cib.main(["vm", action]) == 0
+    monkeypatch.setitem(bib.VM_ACTIONS, action, lambda *a, **k: called.append(action))
+    assert bib.main(["vm", action]) == 0
     assert called == [action]
 
 
 def test_the_readme_documents_every_command_the_cli_registers():
-    # `cib vm viewer` was registered and left out of the table for two releases. A
+    # `bib vm viewer` was registered and left out of the table for two releases. A
     # list maintained by hand beside a dict is a list that drifts.
-    readme = (Path(cib.__file__).resolve().parent / "README.md").read_text()
-    for variant, actions in (("box", cib.BOX_ACTIONS), ("vm", cib.VM_ACTIONS)):
+    readme = (Path(bib.__file__).resolve().parent / "README.md").read_text()
+    for variant, actions in (("box", bib.BOX_ACTIONS), ("vm", bib.VM_ACTIONS)):
         for action in actions:
-            assert f"`cib {variant} {action}`" in readme, f"cib {variant} {action} is undocumented"
+            assert f"`bib {variant} {action}`" in readme, f"bib {variant} {action} is undocumented"
 
 
 def test_the_help_names_both_variants_and_their_trade_off(capsys):
     with pytest.raises(SystemExit):
-        cib.main(["--help"])
+        bib.main(["--help"])
     out = capsys.readouterr().out
-    assert "cib box" in out and "cib vm" in out
+    assert "bib box" in out and "bib vm" in out
     assert "iCloud Keychain" in out
     assert "Touch ID" in out
 
 
 def test_follow_reaches_the_logs_command(monkeypatch):
-    monkeypatch.setattr(cib, "find_engine", lambda: "podman")
+    monkeypatch.setattr(bib, "find_engine", lambda: "podman")
     seen = {}
-    monkeypatch.setattr(cib, "cmd_logs", lambda e, c, follow=False: seen.update(follow=follow))
-    cib.main(["box", "logs", "-f"])
+    monkeypatch.setattr(bib, "cmd_logs", lambda e, c, follow=False: seen.update(follow=follow))
+    bib.main(["box", "logs", "-f"])
     assert seen == {"follow": True}
 
 
 def test_failures_are_reported_without_a_traceback(monkeypatch, capsys):
-    monkeypatch.setattr(cib, "find_engine", lambda: (_ for _ in ()).throw(cib.Failure("boom")))
-    assert cib.main(["box", "status"]) == 1
+    monkeypatch.setattr(bib, "find_engine", lambda: (_ for _ in ()).throw(bib.Failure("boom")))
+    assert bib.main(["box", "status"]) == 1
     assert "error: boom" in capsys.readouterr().err
 
 
@@ -463,7 +509,7 @@ def test_failures_are_reported_without_a_traceback(monkeypatch, capsys):
 
 
 def _formula() -> str:
-    return (Path(__file__).resolve().parents[1] / "Formula" / "cib.rb").read_text()
+    return (Path(__file__).resolve().parents[1] / "Formula" / "bib.rb").read_text()
 
 
 def _updater():
@@ -501,7 +547,7 @@ def test_the_formula_updater_is_idempotent():
 
 
 def test_the_formula_updater_rejects_a_bad_checksum(tmp_path):
-    formula = tmp_path / "cib.rb"
+    formula = tmp_path / "bib.rb"
     formula.write_text(_formula())
     with pytest.raises(SystemExit, match="no valid sha256"):
         _updater().main(["2.3.4", str(formula), "macos-arm64=nope"])
@@ -513,28 +559,28 @@ def test_the_formula_updater_rejects_a_bad_checksum(tmp_path):
 def test_the_vm_uses_bridged_networking_by_default():
     # Shared networking hands out a vmnet gateway that does not always answer DNS,
     # which leaves the guest with an address but no name resolution.
-    args = cib.vm_run_args(cib.VmConfig())
+    args = bib.vm_run_args(bib.VmConfig())
     assert "--net-bridged=en0" in args
-    assert args[-1] == "chrome-vm"
+    assert args[-1] == "browser-vm"
 
 
 def test_the_vm_network_mode_and_interface_are_overridable(monkeypatch):
-    monkeypatch.setenv("CIB_VM_INTERFACE", "en1")
-    assert "--net-bridged=en1" in cib.vm_run_args(cib.VmConfig())
-    monkeypatch.setenv("CIB_VM_NET", "shared")
-    args = cib.vm_run_args(cib.VmConfig())
+    monkeypatch.setenv("BIB_VM_INTERFACE", "en1")
+    assert "--net-bridged=en1" in bib.vm_run_args(bib.VmConfig())
+    monkeypatch.setenv("BIB_VM_NET", "shared")
+    args = bib.vm_run_args(bib.VmConfig())
     assert not any(a.startswith("--net-") for a in args)
-    monkeypatch.setenv("CIB_VM_NET", "host")
-    assert "--net-host" in cib.vm_run_args(cib.VmConfig())
+    monkeypatch.setenv("BIB_VM_NET", "host")
+    assert "--net-host" in bib.vm_run_args(bib.VmConfig())
 
 
 def test_a_failed_bridged_start_explains_the_alternatives(monkeypatch):
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: True)
+    monkeypatch.setattr(bib, "vm_exists", lambda *a, **k: True)
     monkeypatch.setattr(
-        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="")
+        bib, "run", lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="")
     )
-    with pytest.raises(cib.Failure, match="CIB_VM_NET=shared"):
-        cib.cmd_vm_up("tart", cib.VmConfig())
+    with pytest.raises(bib.Failure, match="BIB_VM_NET=shared"):
+        bib.cmd_vm_up("tart", bib.VmConfig())
 
 
 # --- taking the guest over from here ------------------------------------------
@@ -549,20 +595,20 @@ def resolving(monkeypatch):
         recorded.append([engine, *args])
         return subprocess.CompletedProcess([engine, *args], 0, stdout="192.168.1.50\n", stderr="")
 
-    monkeypatch.setattr(cib, "run", fake_run)
+    monkeypatch.setattr(bib, "run", fake_run)
     return recorded
 
 
 def test_a_bridged_guest_is_resolved_by_arp(resolving):
     # Bridged guests get their address from the real network, so tart's default
     # DHCP-lease resolver has nothing to read.
-    assert cib.vm_ip("tart", cib.VmConfig()) == "192.168.1.50"
-    assert "ip --resolver arp --wait 60 chrome-vm" in flat(resolving)
+    assert bib.vm_ip("tart", bib.VmConfig()) == "192.168.1.50"
+    assert "ip --resolver arp --wait 60 browser-vm" in flat(resolving)
 
 
 def test_a_shared_guest_is_resolved_by_dhcp(resolving, monkeypatch):
-    monkeypatch.setenv("CIB_VM_NET", "shared")
-    cib.vm_ip("tart", cib.VmConfig())
+    monkeypatch.setenv("BIB_VM_NET", "shared")
+    bib.vm_ip("tart", bib.VmConfig())
     assert "--resolver dhcp" in flat(resolving)
 
 
@@ -570,12 +616,12 @@ def test_an_unresolvable_guest_is_reported_clearly(monkeypatch):
     # Not "past Setup Assistant": the default path never shows one, so naming it
     # sent people looking for a screen that does not exist.
     monkeypatch.setattr(
-        cib,
+        bib,
         "run",
         lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="no such VM"),
     )
-    with pytest.raises(cib.Failure, match="cib vm status") as caught:
-        cib.vm_ip("tart", cib.VmConfig())
+    with pytest.raises(bib.Failure, match="bib vm status") as caught:
+        bib.vm_ip("tart", bib.VmConfig())
     assert "Setup Assistant" not in str(caught.value)
     assert "no such VM" in str(caught.value), "tart's own reason must reach the user"
 
@@ -584,54 +630,54 @@ def test_the_ssh_command_verifies_the_host_key_it_planted(credentials):
     # It used to be StrictHostKeyChecking=no against /dev/null, which accepts any
     # peer answering on the guest's address — and the script sent over that
     # connection carries the guest's password for sudo.
-    cmd = cib.ssh_command(cib.VmConfig(), "192.168.1.50")
+    cmd = bib.ssh_command(bib.VmConfig(), "192.168.1.50")
     assert cmd[0].endswith("ssh")
     assert "StrictHostKeyChecking=yes" in cmd
     assert "StrictHostKeyChecking=no" not in cmd
-    assert f"UserKnownHostsFile={cib.KNOWN_HOSTS}" in cmd
+    assert f"UserKnownHostsFile={bib.KNOWN_HOSTS}" in cmd
     assert "PasswordAuthentication=no" in cmd
-    assert cmd[cmd.index("-i") + 1] == str(cib.VM_KEY)
+    assert cmd[cmd.index("-i") + 1] == str(bib.VM_KEY)
     assert cmd[-1] == "admin@192.168.1.50"
 
 
 def test_the_known_hosts_entry_pins_the_guests_key_at_any_address(credentials):
     # The guest's address changes with every lease, and this file is used for
     # nothing but connections to that one guest, so a wildcard is the pin.
-    cib.ensure_vm_keys()
-    entry = cib.KNOWN_HOSTS.read_text().strip()
+    bib.ensure_vm_keys()
+    entry = bib.KNOWN_HOSTS.read_text().strip()
     assert entry.startswith("* ssh-ed25519 ")
-    assert entry.endswith(cib.VM_HOST_KEY.with_suffix(".pub").read_text().strip())
+    assert entry.endswith(bib.VM_HOST_KEY.with_suffix(".pub").read_text().strip())
 
 
 def test_the_keys_are_generated_once_and_kept(tmp_path, monkeypatch):
-    # Regenerating them would lock cib out of the guest it already built.
-    monkeypatch.setattr(cib, "VM_KEY", tmp_path / "vm-key")
-    monkeypatch.setattr(cib, "VM_HOST_KEY", tmp_path / "vm-host-key")
-    monkeypatch.setattr(cib, "KNOWN_HOSTS", tmp_path / "vm-known-hosts")
-    cib.ensure_vm_keys()  # real ssh-keygen
+    # Regenerating them would lock bib out of the guest it already built.
+    monkeypatch.setattr(bib, "VM_KEY", tmp_path / "vm-key")
+    monkeypatch.setattr(bib, "VM_HOST_KEY", tmp_path / "vm-host-key")
+    monkeypatch.setattr(bib, "KNOWN_HOSTS", tmp_path / "vm-known-hosts")
+    bib.ensure_vm_keys()  # real ssh-keygen
     assert (tmp_path / "vm-key").exists()
     first = (tmp_path / "vm-key").read_bytes()
     assert (tmp_path / "vm-key.pub").read_text().startswith("ssh-ed25519 ")
-    cib.ensure_vm_keys()
+    bib.ensure_vm_keys()
     assert (tmp_path / "vm-key").read_bytes() == first
 
 
 def test_a_keygen_that_produced_nothing_is_reported(tmp_path, monkeypatch):
-    monkeypatch.setattr(cib, "VM_KEY", tmp_path / "vm-key")
-    monkeypatch.setattr(cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0))
-    with pytest.raises(cib.Failure, match="did not produce"):
-        cib.ensure_vm_keys()
+    monkeypatch.setattr(bib, "VM_KEY", tmp_path / "vm-key")
+    monkeypatch.setattr(bib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0))
+    with pytest.raises(bib.Failure, match="did not produce"):
+        bib.ensure_vm_keys()
 
 
 def test_the_ssh_user_is_overridable(monkeypatch):
-    monkeypatch.setenv("CIB_VM_USER", "sapn")
-    assert cib.ssh_command(cib.VmConfig(), "10.0.0.1")[-1] == "sapn@10.0.0.1"
+    monkeypatch.setenv("BIB_VM_USER", "sapn")
+    assert bib.ssh_command(bib.VmConfig(), "10.0.0.1")[-1] == "sapn@10.0.0.1"
 
 
 def test_setup_installs_chrome_and_is_idempotent():
-    assert "googlechrome.dmg" in cib.guest_install_script("pw")
-    assert "already installed" in cib.guest_install_script("pw")
-    assert cib.guest_install_script("pw").startswith("set -eu")
+    assert "googlechrome.dmg" in bib.guest_install_script("pw")
+    assert "already installed" in bib.guest_install_script("pw")
+    assert bib.guest_install_script("pw").startswith("set -eu")
 
 
 def test_setup_points_at_prepare_not_at_a_switch_it_already_turned_on(
@@ -639,47 +685,47 @@ def test_setup_points_at_prepare_not_at_a_switch_it_already_turned_on(
 ):
     # The offline build enables Remote Login itself, so telling the user to go and
     # turn it on sent them looking for a setting that is already set.
-    cib.guest_password(create=True)
-    monkeypatch.setattr(cib, "vm_ip", lambda *a, **k: "192.168.1.50")
-    monkeypatch.setattr(cib, "guest_ssh", lambda *a, **k: 255)
-    with pytest.raises(cib.Failure, match="cib vm prepare") as caught:
-        cib.cmd_vm_setup("tart", cib.VmConfig())
+    bib.guest_password(create=True)
+    monkeypatch.setattr(bib, "vm_ip", lambda *a, **k: "192.168.1.50")
+    monkeypatch.setattr(bib, "guest_ssh", lambda *a, **k: 255)
+    with pytest.raises(bib.Failure, match="bib vm prepare") as caught:
+        bib.cmd_vm_setup("tart", bib.VmConfig())
     assert "turn on" not in str(caught.value)
 
 
 def test_setup_passes_the_install_script_to_the_guest(credentials, monkeypatch):
     seen = {}
-    password = cib.guest_password(create=True)
-    monkeypatch.setattr(cib, "vm_ip", lambda *a, **k: "192.168.1.50")
+    password = bib.guest_password(create=True)
+    monkeypatch.setattr(bib, "vm_ip", lambda *a, **k: "192.168.1.50")
     monkeypatch.setattr(
-        cib, "guest_ssh", lambda vm, ip, script=None: seen.update(script=script) or 0
+        bib, "guest_ssh", lambda vm, ip, script=None: seen.update(script=script) or 0
     )
-    cib.cmd_vm_setup("tart", cib.VmConfig())
+    bib.cmd_vm_setup("tart", bib.VmConfig())
     # The generated password has to reach the guest: sshd runs this with no tty and
     # no cached credential, so sudo there can only be fed one.
-    assert seen["script"] == cib.guest_install_script(password, cib.host_time_zone()[0])
+    assert seen["script"] == bib.guest_install_script(password, bib.host_time_zone()[0])
     assert password in seen["script"]
 
 
 def test_the_guest_password_never_reaches_a_process_list(credentials):
     # `ssh host "<script>"` would put the whole script, password included, in this
     # host's argv. It is read on stdin instead.
-    password = cib.guest_password(create=True)
-    script = cib.guest_install_script(password)
-    argv = cib.ssh_command(cib.VmConfig(), "192.168.1.50", script)
+    password = bib.guest_password(create=True)
+    script = bib.guest_install_script(password)
+    argv = bib.ssh_command(bib.VmConfig(), "192.168.1.50", script)
     assert password not in " ".join(argv)
     assert argv[-2:] == ["/bin/sh", "-s"]
 
 
 def test_an_interactive_shell_keeps_this_terminals_stdin(credentials, monkeypatch):
-    # 'cib vm ssh' has no script; feeding it one would close stdin immediately.
+    # 'bib vm ssh' has no script; feeding it one would close stdin immediately.
     seen = {}
     monkeypatch.setattr(
-        cib.subprocess,
+        bib.subprocess,
         "run",
         lambda cmd, **kw: seen.update(cmd=cmd, kw=kw) or subprocess.CompletedProcess(cmd, 0),
     )
-    cib.guest_ssh(cib.VmConfig(), "192.168.1.50")
+    bib.guest_ssh(bib.VmConfig(), "192.168.1.50")
     assert seen["kw"]["input"] is None
     assert "-s" not in seen["cmd"]
 
@@ -695,16 +741,16 @@ def credentials():
     # Stand-ins rather than real ssh-keygen output: these tests replace `run`, so a
     # real keygen would never happen. ensure_vm_keys() then only rewrites
     # known_hosts, which is the part they care about.
-    for key in (cib.VM_KEY, cib.VM_HOST_KEY):
+    for key in (bib.VM_KEY, bib.VM_HOST_KEY):
         key.write_text(f"PRIVATE {key.name}\n")
-        key.with_suffix(".pub").write_text(f"ssh-ed25519 AAAAC3Nz-{key.name} cib\n")
-    return cib.CREDENTIALS
+        key.with_suffix(".pub").write_text(f"ssh-ed25519 AAAAC3Nz-{key.name} bib\n")
+    return bib.CREDENTIALS
 
 
 def test_no_module_level_path_still_points_at_the_real_home(tmp_path):
     """The guard has to cover paths nobody has written yet.
 
-    Twice now a path added to cib.py was not added to the fixture, and the suite
+    Twice now a path added to bib.py was not added to the fixture, and the suite
     wrote into the real ~/.config/browser-in-a-box — the second time replacing a
     live VM's remembered address with 10.0.0.9. This fails the moment a new
     module-level path escapes, instead of waiting for a user to notice.
@@ -712,40 +758,40 @@ def test_no_module_level_path_still_points_at_the_real_home(tmp_path):
     # Not Path.home(): isolate_secrets patches that, so it would return the fake one
     # and every path would look safe. os.path.expanduser reads HOME, untouched here.
     # PATCHER and PACKER_TEMPLATE are deliberately not covered: they are read-only
-    # paths into the installed package, and cib never writes to them.
+    # paths into the installed package, and bib never writes to them.
     real = Path(os.path.expanduser("~")) / ".config" / "browser-in-a-box"
     escaped = [
         name
-        for name, value in vars(cib).items()
+        for name, value in vars(bib).items()
         if isinstance(value, Path) and (value == real or real in value.parents)
     ]
     assert escaped == [], f"these still point at the real secrets directory: {escaped}"
     # Non-vacuous: there are paths of this shape, and they were moved rather than
     # simply absent.
-    assert cib.SECRETS.is_relative_to(tmp_path)
-    assert cib.STATE.is_relative_to(tmp_path)
+    assert bib.SECRETS.is_relative_to(tmp_path)
+    assert bib.STATE.is_relative_to(tmp_path)
 
 
 def test_the_guest_password_is_generated_once_and_remembered(credentials):
-    first = cib.guest_password(create=True)
+    first = bib.guest_password(create=True)
     assert len(first) >= 20
-    assert cib.guest_password() == first
+    assert bib.guest_password() == first
     assert credentials.stat().st_mode & 0o777 == 0o600
 
 
 def test_asking_for_a_password_before_the_build_says_so(credentials):
-    with pytest.raises(cib.Failure, match="build the VM first"):
-        cib.guest_password()
+    with pytest.raises(bib.Failure, match="build the VM first"):
+        bib.guest_password()
 
 
 def test_create_drives_packer_with_the_generated_password(calls, credentials, monkeypatch):
-    monkeypatch.setenv("CIB_VM_PACKER", "1")  # this covers the fallback path
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
-    monkeypatch.setattr(cib, "find_packer", lambda: "packer")
-    cib.cmd_vm_create("tart", cib.VmConfig())
+    monkeypatch.setenv("BIB_VM_PACKER", "1")  # this covers the fallback path
+    monkeypatch.setattr(bib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(bib, "find_packer", lambda: "packer")
+    bib.cmd_vm_create("tart", bib.VmConfig())
     out = flat(calls)
     assert "packer build" in out
-    assert str(cib.PACKER_TEMPLATE) in out
+    assert str(bib.PACKER_TEMPLATE) in out
     # The password travels in the environment, never in argv.
     assert "password=" not in out
     assert any(
@@ -755,13 +801,13 @@ def test_create_drives_packer_with_the_generated_password(calls, credentials, mo
 
 
 def test_a_missing_packer_points_at_the_install_command(monkeypatch):
-    monkeypatch.setattr(cib.shutil, "which", lambda name: None)
-    with pytest.raises(cib.Failure, match="brew install hashicorp/tap/packer"):
-        cib.find_packer()
+    monkeypatch.setattr(bib.shutil, "which", lambda name: None)
+    with pytest.raises(bib.Failure, match="brew install hashicorp/tap/packer"):
+        bib.find_packer()
 
 
 def test_the_template_drives_setup_assistant_and_keeps_gatekeeper():
-    template = (Path(__file__).resolve().parents[1] / cib.PACKER_TEMPLATE).read_text()
+    template = (Path(__file__).resolve().parents[1] / bib.PACKER_TEMPLATE).read_text()
     assert "boot_command" in template
     # The region is typed on a US layout during setup; the Swiss layout is applied
     # afterwards, by name and with an integer id (a string id is ignored).
@@ -781,12 +827,12 @@ def test_the_template_drives_setup_assistant_and_keeps_gatekeeper():
 
 def test_the_desktop_follows_the_window_unless_a_size_is_forced():
     # ?resize=remote asks KasmVNC to match the client; pinning a mode would fight it.
-    assert "resize=remote" in cib.Config().url
-    assert 'if [ -n "$RES" ]' in cib.desktop_script(cibbrowsers.BROWSERS["chrome"])
+    assert "resize=remote" in bib.Config().url
+    assert 'if [ -n "$RES" ]' in bib.desktop_script(bibbrowsers.BROWSERS["chrome"])
 
 
 def test_an_empty_resolution_passes_preflight():
-    cib.Config(resolution="").check()
+    bib.Config(resolution="").check()
 
 
 # --- what the review found ----------------------------------------------------
@@ -795,26 +841,26 @@ def test_an_empty_resolution_passes_preflight():
 @pytest.mark.parametrize(
     ("name", "value", "expected"),
     [
-        ("CIB_PORT", "abc", "whole number"),
-        ("CIB_VM_MEMORY", "8g", "whole number"),
-        ("CIB_VM_DISK", "abc", "whole number"),
-        ("CIB_VM_CPUS", "0", "at least 2"),
-        ("CIB_VM_MEMORY", "512", "at least 4096"),
+        ("BIB_PORT", "abc", "whole number"),
+        ("BIB_VM_MEMORY", "8g", "whole number"),
+        ("BIB_VM_DISK", "abc", "whole number"),
+        ("BIB_VM_CPUS", "0", "at least 2"),
+        ("BIB_VM_MEMORY", "512", "at least 4096"),
     ],
 )
 def test_a_bad_numeric_setting_is_an_error_not_a_traceback(name, value, expected, monkeypatch):
     monkeypatch.setenv(name, value)
-    with pytest.raises(cib.Failure, match=expected):
-        cib.Config() if name == "CIB_PORT" else cib.VmConfig()
+    with pytest.raises(bib.Failure, match=expected):
+        bib.Config() if name == "BIB_PORT" else bib.VmConfig()
 
 
 def test_memory_is_rounded_up_not_truncated(calls, credentials, monkeypatch):
-    monkeypatch.setenv("CIB_VM_PACKER", "1")  # this covers the fallback path
+    monkeypatch.setenv("BIB_VM_PACKER", "1")  # this covers the fallback path
     # 8000 MB is 8 GB worth of intent; truncating gives the guest 7.
-    monkeypatch.setenv("CIB_VM_MEMORY", "8000")
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
-    monkeypatch.setattr(cib, "find_packer", lambda: "packer")
-    cib.cmd_vm_create("tart", cib.VmConfig())
+    monkeypatch.setenv("BIB_VM_MEMORY", "8000")
+    monkeypatch.setattr(bib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(bib, "find_packer", lambda: "packer")
+    bib.cmd_vm_create("tart", bib.VmConfig())
     assert "memory_gb=8" in flat(calls)
 
 
@@ -825,7 +871,7 @@ def test_the_generated_password_avoids_layout_dependent_characters(credentials):
     forbidden = set("yzYZ-_/")
     for _ in range(200):
         credentials.unlink(missing_ok=True)
-        password = cib.guest_password(create=True)
+        password = bib.guest_password(create=True)
         assert len(password) >= 20
         assert not (set(password) & forbidden), password
 
@@ -833,8 +879,8 @@ def test_the_generated_password_avoids_layout_dependent_characters(credentials):
 def test_an_empty_credentials_file_is_not_treated_as_a_password(credentials):
     credentials.parent.mkdir(parents=True, exist_ok=True)
     credentials.write_text("  \n")
-    with pytest.raises(cib.Failure, match="build the VM first"):
-        cib.guest_password()
+    with pytest.raises(bib.Failure, match="build the VM first"):
+        bib.guest_password()
 
 
 def test_the_password_file_is_never_briefly_world_readable(credentials, monkeypatch):
@@ -847,47 +893,47 @@ def test_the_password_file_is_never_briefly_world_readable(credentials, monkeypa
         return real_open(path, flags, mode, **kwargs)
 
     monkeypatch.setattr(os, "open", spy)
-    cib.guest_password(create=True)
+    bib.guest_password(create=True)
     assert seen["mode"] == 0o600
 
 
 def test_an_unknown_network_mode_is_rejected(monkeypatch):
-    monkeypatch.setenv("CIB_VM_NET", "bridge")  # a typo for "bridged"
-    with pytest.raises(cib.Failure, match="CIB_VM_NET must be"):
-        cib.vm_run_args(cib.VmConfig())
+    monkeypatch.setenv("BIB_VM_NET", "bridge")  # a typo for "bridged"
+    with pytest.raises(bib.Failure, match="BIB_VM_NET must be"):
+        bib.vm_run_args(bib.VmConfig())
 
 
 def test_a_user_name_cannot_become_an_ssh_option(monkeypatch):
-    monkeypatch.setenv("CIB_VM_USER", "-oProxyCommand=touch /tmp/pwn")
-    with pytest.raises(cib.Failure, match="not a usable account name"):
-        cib.ssh_command(cib.VmConfig(), "192.168.1.50")
+    monkeypatch.setenv("BIB_VM_USER", "-oProxyCommand=touch /tmp/pwn")
+    with pytest.raises(bib.Failure, match="not a usable account name"):
+        bib.ssh_command(bib.VmConfig(), "192.168.1.50")
 
 
 def test_follow_is_rejected_where_it_means_nothing(monkeypatch):
-    monkeypatch.setattr(cib, "find_engine", lambda: "podman")
-    assert cib.main(["box", "status", "-f"]) == 1
+    monkeypatch.setattr(bib, "find_engine", lambda: "podman")
+    assert bib.main(["box", "status", "-f"]) == 1
 
 
 def test_create_runs_packer_init_first(calls, credentials, monkeypatch):
-    monkeypatch.setenv("CIB_VM_PACKER", "1")  # this covers the fallback path
+    monkeypatch.setenv("BIB_VM_PACKER", "1")  # this covers the fallback path
     # Without it, every first-time user hits "Did you run packer init".
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
-    monkeypatch.setattr(cib, "find_packer", lambda: "packer")
-    cib.cmd_vm_create("tart", cib.VmConfig())
+    monkeypatch.setattr(bib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(bib, "find_packer", lambda: "packer")
+    bib.cmd_vm_create("tart", bib.VmConfig())
     out = flat(calls)
     assert out.index("packer init") < out.index("packer build")
 
 
 def test_the_template_is_resolved_next_to_the_module_not_the_cwd():
-    # Otherwise `cib vm create` only works from a checkout, in the right directory.
-    assert cib.PACKER_TEMPLATE.is_absolute()
-    assert cib.PACKER_TEMPLATE.parent.parent == Path(cib.__file__).resolve().parent
+    # Otherwise `bib vm create` only works from a checkout, in the right directory.
+    assert bib.PACKER_TEMPLATE.is_absolute()
+    assert bib.PACKER_TEMPLATE.parent.parent == Path(bib.__file__).resolve().parent
 
 
 def test_the_guest_shares_a_host_folder_for_downloads(tmp_path, monkeypatch):
     # Downloads should land on the host, not inside the VM's disk image.
-    monkeypatch.setenv("CIB_VM_SHARE", str(tmp_path / "dl"))
-    args = cib.vm_run_args(cib.VmConfig())
+    monkeypatch.setenv("BIB_VM_SHARE", str(tmp_path / "dl"))
+    args = bib.vm_run_args(bib.VmConfig())
     assert f"--dir=downloads:{tmp_path / 'dl'}" in args
     assert (tmp_path / "dl").is_dir()  # created if missing, so tart does not fail
 
@@ -951,18 +997,18 @@ def _run_guest_script(
     for name, body_text in (override_bin or {}).items():
         (bin_dir / name).write_text(body_text)
         (bin_dir / name).chmod(0o755)
-    share = Path(cib.GUEST_SHARE)
+    share = Path(bib.GUEST_SHARE)
     body = script.replace(str(share), str(home / "share"))
     # Per browser, not hard-coded to Chrome: the point of running the script at all
     # is that it works for whichever one it was rendered for.
-    chosen = browser or cibbrowsers.BROWSERS["chrome"]
+    chosen = browser or bibbrowsers.BROWSERS["chrome"]
     # Through shlex.quote, because that is what the script did: it only adds quotes
     # when the path needs them, so Chrome's is quoted and Firefox's is not.
     body = body.replace(shlex.quote(chosen.binary), "true")
     body = body.replace(shlex.quote(chosen.app), shlex.quote(str(home / "browser.app")))
     body = body.replace(chosen.app, str(home / "browser.app"))
-    body = body.replace(cib.AGENT_BIN, str(home / "agent"))
-    body = body.replace(cib.AGENT_PLIST_PATH, str(home / "agent.plist"))
+    body = body.replace(bib.AGENT_BIN, str(home / "agent"))
+    body = body.replace(bib.AGENT_PLIST_PATH, str(home / "agent.plist"))
     # launchctl needs a real session to talk to, which an ssh-less test does not
     # have; record the calls instead so they can be asserted.
     (bin_dir / "launchctl").write_text(
@@ -992,7 +1038,7 @@ def test_the_guest_script_fails_when_the_agent_did_not_end_up_executable(tmp_pat
     # and the one thing `test -x` is there to catch.
     limp = '#!/bin/sh\nfor dst in "$@"; do :; done\nmkdir -p "$(dirname "$dst")"\n: > "$dst"\n'
     result = _run_guest_script(
-        cib.guest_install_script("pw"),
+        bib.guest_install_script("pw"),
         tmp_path,
         share_exists=True,
         override_bin={"install": limp},
@@ -1007,7 +1053,7 @@ def test_ssh_never_offers_another_key_or_falls_back_to_a_password(tmp_path):
     guest that has forgotten our key prompts for a password instead of failing —
     and the script sent over that connection carries the guest's password.
     """
-    options = cib.ssh_options()
+    options = bib.ssh_options()
     for expected in (
         "IdentitiesOnly=yes",
         "PasswordAuthentication=no",
@@ -1016,19 +1062,19 @@ def test_ssh_never_offers_another_key_or_falls_back_to_a_password(tmp_path):
         "StrictHostKeyChecking=yes",
     ):
         assert expected in options, f"{expected} is no longer passed to ssh"
-    assert str(cib.VM_KEY) in options
-    assert f"UserKnownHostsFile={cib.KNOWN_HOSTS}" in options
+    assert str(bib.VM_KEY) in options
+    assert f"UserKnownHostsFile={bib.KNOWN_HOSTS}" in options
 
 
 def test_the_screen_address_carries_the_account_password(tmp_path, credentials):
     """Screen Sharing prompts otherwise, for a generated 24-character password.
 
     tart's --vnc is not a VNC server of its own — it opens macOS Screen Sharing at
-    the guest — so the credential here is the guest account's, and cib is the only
+    the guest — so the credential here is the guest account's, and bib is the only
     thing that knows it.
     """
-    cib.CREDENTIALS.write_text("pa/ss word\n")
-    url = cib.screen_url(cib.VmConfig(user="admin"), "10.0.0.5")
+    bib.CREDENTIALS.write_text("pa/ss word\n")
+    url = bib.screen_url(bib.VmConfig(user="admin"), "10.0.0.5")
     # Percent-encoded, or a password with a slash or a space silently truncates the
     # address into something that points somewhere else.
     assert url == "vnc://admin:pa%2Fss%20word@10.0.0.5"
@@ -1040,11 +1086,11 @@ def test_the_screen_address_says_so_when_the_guest_is_not_sharing(tmp_path, monk
     Nothing on the host can turn it on, so the useful thing to do is say that
     rather than hand back an address that connects and immediately drops.
     """
-    monkeypatch.setattr(cib, "vm_running", lambda tart, vm: True)
-    monkeypatch.setattr(cib, "vm_ip", lambda tart, vm: "10.0.0.5")
-    monkeypatch.setattr(cib, "guest_answers", lambda ip, port=22: False)
-    with pytest.raises(cib.Failure, match="System Settings"):
-        cib.screen_address("tart", cib.VmConfig(viewer="vnc"))
+    monkeypatch.setattr(bib, "vm_running", lambda tart, vm: True)
+    monkeypatch.setattr(bib, "vm_ip", lambda tart, vm: "10.0.0.5")
+    monkeypatch.setattr(bib, "guest_answers", lambda ip, port=22: False)
+    with pytest.raises(bib.Failure, match="System Settings"):
+        bib.screen_address("tart", bib.VmConfig(viewer="vnc"))
 
 
 def test_a_detached_start_leaves_the_callers_process_group(tmp_path, isolate_secrets):
@@ -1058,7 +1104,7 @@ def test_a_detached_start_leaves_the_callers_process_group(tmp_path, isolate_sec
     faketart = tmp_path / "faketart"
     faketart.write_text("#!/bin/sh\nsleep 30\n")
     faketart.chmod(0o755)
-    boot = isolate_secrets.start_detached(str(faketart), cib.VmConfig())
+    boot = isolate_secrets.start_detached(str(faketart), bib.VmConfig())
     try:
         assert os.getpgid(boot.pid) != os.getpgid(0)
     finally:
@@ -1071,74 +1117,74 @@ def test_a_detached_start_records_what_tart_printed(tmp_path, isolate_secrets):
     faketart = tmp_path / "faketart"
     faketart.write_text("#!/bin/sh\necho 'VNC server is running at vnc://a:b@10.0.0.5:5900'\n")
     faketart.chmod(0o755)
-    boot = isolate_secrets.start_detached(str(faketart), cib.VmConfig(viewer="vnc"))
+    boot = isolate_secrets.start_detached(str(faketart), bib.VmConfig(viewer="vnc"))
     boot.wait()
-    assert "vnc://a:b@10.0.0.5:5900" in cib.BOOT_LOG.read_text()
+    assert "vnc://a:b@10.0.0.5:5900" in bib.BOOT_LOG.read_text()
 
 
 def test_deleting_the_vm_takes_the_remembered_address_with_it(tmp_path, monkeypatch):
     """A list of names left vm-last-ip behind, and the next build inherited it."""
-    cib.SECRETS.mkdir(parents=True, exist_ok=True)
-    cib.write_state(last_ip="10.0.0.9")
-    cib.CREDENTIALS.write_text("secret\n")
+    bib.SECRETS.mkdir(parents=True, exist_ok=True)
+    bib.write_state(last_ip="10.0.0.9")
+    bib.CREDENTIALS.write_text("secret\n")
     monkeypatch.setattr("builtins.input", lambda _: "y")
     monkeypatch.setattr(
-        cib, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="", stderr="")
+        bib, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="", stderr="")
     )
-    cib.cmd_vm_delete("tart", cib.VmConfig())
-    assert not cib.STATE.exists()
-    assert not cib.CREDENTIALS.exists()
+    bib.cmd_vm_delete("tart", bib.VmConfig())
+    assert not bib.STATE.exists()
+    assert not bib.CREDENTIALS.exists()
 
 
 def test_the_guest_script_fails_when_the_share_is_missing(tmp_path):
-    # It used to warn, install Chrome, exit 0 — and cib then printed "Done".
+    # It used to warn, install Chrome, exit 0 — and bib then printed "Done".
     (tmp_path / "Downloads").mkdir()
-    result = _run_guest_script(cib.guest_install_script("pw"), tmp_path, share_exists=False)
+    result = _run_guest_script(bib.guest_install_script("pw"), tmp_path, share_exists=False)
     assert result.returncode != 0
     assert "not mounted" in result.stderr
 
 
 def test_a_share_path_with_a_colon_is_rejected(monkeypatch, tmp_path):
     # tart parses --dir as name:path:options, so a colon would silently mis-parse.
-    monkeypatch.setenv("CIB_VM_SHARE", str(tmp_path / "a:b"))
-    with pytest.raises(cib.Failure, match="colon"):
-        cib.vm_run_args(cib.VmConfig())
+    monkeypatch.setenv("BIB_VM_SHARE", str(tmp_path / "a:b"))
+    with pytest.raises(bib.Failure, match="colon"):
+        bib.vm_run_args(bib.VmConfig())
 
 
 def test_an_unusable_share_path_is_reported_not_raised(monkeypatch, tmp_path):
     blocker = tmp_path / "file"
     blocker.write_text("not a directory")
-    monkeypatch.setenv("CIB_VM_SHARE", str(blocker / "share"))
-    with pytest.raises(cib.Failure, match="cannot use"):
-        cib.vm_run_args(cib.VmConfig())
+    monkeypatch.setenv("BIB_VM_SHARE", str(blocker / "share"))
+    with pytest.raises(bib.Failure, match="cannot use"):
+        bib.vm_run_args(bib.VmConfig())
 
 
 def test_a_zero_resolution_is_rejected():
-    with pytest.raises(cib.Failure, match="must be positive"):
-        cib.Config(resolution="0x0").check()
+    with pytest.raises(bib.Failure, match="must be positive"):
+        bib.Config(resolution="0x0").check()
 
 
 def test_the_password_never_reaches_the_argument_list(calls, credentials, monkeypatch):
-    monkeypatch.setenv("CIB_VM_PACKER", "1")  # this covers the fallback path
+    monkeypatch.setenv("BIB_VM_PACKER", "1")  # this covers the fallback path
     # argv is world-readable while the build runs, and is printed on failure.
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
-    monkeypatch.setattr(cib, "find_packer", lambda: "packer")
-    cib.cmd_vm_create("tart", cib.VmConfig())
+    monkeypatch.setattr(bib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(bib, "find_packer", lambda: "packer")
+    bib.cmd_vm_create("tart", bib.VmConfig())
     assert credentials.read_text().strip() not in flat(calls)
 
 
 def test_the_template_no_longer_carries_a_second_copy_of_the_install():
     # It kept `--install-daemon=launchd` for three rounds after the guest script's
     # copy was fixed, because there were two copies. Chrome and the agent are now
-    # installed in one place, by 'cib vm setup', for both build paths.
-    template = (Path(cib.__file__).resolve().parent / "packer" / "browser-vm.pkr.hcl").read_text()
+    # installed in one place, by 'bib vm setup', for both build paths.
+    template = (Path(bib.__file__).resolve().parent / "packer" / "browser-vm.pkr.hcl").read_text()
     assert "--install-daemon" not in template
     assert "googlechrome.dmg" not in template
     assert "tart-guest-agent" not in template
 
 
-def test_the_template_installs_the_key_cib_will_connect_with():
-    template = (Path(cib.__file__).resolve().parent / "packer" / "browser-vm.pkr.hcl").read_text()
+def test_the_template_installs_the_key_bib_will_connect_with():
+    template = (Path(bib.__file__).resolve().parent / "packer" / "browser-vm.pkr.hcl").read_text()
     assert "authorized_keys" in template
     assert "ssh_host_ed25519_key" in template
     for name in ("authorized_key", "host_private_key", "host_public_key"):
@@ -1146,86 +1192,86 @@ def test_the_template_installs_the_key_cib_will_connect_with():
 
 
 def test_the_packer_path_generates_and_passes_the_keys(calls, credentials, monkeypatch):
-    # Without them the `cib vm setup` the build recommends could never connect.
-    monkeypatch.setenv("CIB_VM_PACKER", "1")
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
-    monkeypatch.setattr(cib, "find_packer", lambda: "/usr/bin/packer")
+    # Without them the `bib vm setup` the build recommends could never connect.
+    monkeypatch.setenv("BIB_VM_PACKER", "1")
+    monkeypatch.setattr(bib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(bib, "find_packer", lambda: "/usr/bin/packer")
     seen = {}
     monkeypatch.setattr(
-        cib,
+        bib,
         "run",
         lambda engine, *a, **k: (
             seen.update(env=k.get("env") or seen.get("env"))
             or subprocess.CompletedProcess([], 0, stdout="", stderr="")
         ),
     )
-    cib.cmd_vm_create("tart", cib.VmConfig())
+    bib.cmd_vm_create("tart", bib.VmConfig())
     env = seen["env"]
     assert env["PKR_VAR_authorized_key"].startswith("ssh-ed25519 ")
     assert env["PKR_VAR_host_private_key"]
     assert env["PKR_VAR_host_public_key"].startswith("ssh-ed25519 ")
-    assert cib.KNOWN_HOSTS.exists(), "the host key has to be pinned for cib to use it"
+    assert bib.KNOWN_HOSTS.exists(), "the host key has to be pinned for bib to use it"
 
 
 def test_an_already_running_vm_is_not_a_networking_failure(calls, monkeypatch):
     # tart exits non-zero for a VM that is already up; blaming the bridge for that
     # sent the user off to degrade their DNS for no reason.
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: True)
-    monkeypatch.setattr(cib, "vm_running", lambda *a, **k: True)
-    cib.cmd_vm_up("tart", cib.VmConfig())
+    monkeypatch.setattr(bib, "vm_exists", lambda *a, **k: True)
+    monkeypatch.setattr(bib, "vm_running", lambda *a, **k: True)
+    bib.cmd_vm_up("tart", bib.VmConfig())
     assert "run" not in flat(calls)
 
 
 def test_down_says_nothing_was_running_when_there_was_nothing(monkeypatch, capsys):
     # podman's `rm -f` exits 0 for a container that never existed.
     monkeypatch.setattr(
-        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="")
+        bib, "run", lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="")
     )
-    cib.cmd_down("podman", cib.Config())
+    bib.cmd_down("podman", bib.Config())
     assert "Not running." in capsys.readouterr().out
 
 
 def test_the_resolution_is_normalised_before_it_reaches_xrandr(calls, monkeypatch):
     # xrandr reads anything but lowercase <int>x<int> as a mode index.
-    monkeypatch.setenv("CIB_RESOLUTION", "1280 X 800")
-    cib.ensure_desktop("podman", cib.Config())
+    monkeypatch.setenv("BIB_RESOLUTION", "1280 X 800")
+    bib.ensure_desktop("podman", bib.Config())
     assert "RES=1280x800" in flat(calls)
 
 
 def test_a_non_zero_remote_shell_is_not_a_connection_failure(monkeypatch):
     # ssh passes the remote shell's exit status through; only 255 is ssh's own.
-    monkeypatch.setattr(cib, "vm_ip", lambda *a, **k: "192.168.1.50")
-    monkeypatch.setattr(cib, "guest_ssh", lambda *a, **k: 1)
-    cib.cmd_vm_ssh("tart", cib.VmConfig())  # must not raise
-    monkeypatch.setattr(cib, "guest_ssh", lambda *a, **k: 255)
-    with pytest.raises(cib.Failure, match="Remote Login"):
-        cib.cmd_vm_ssh("tart", cib.VmConfig())
+    monkeypatch.setattr(bib, "vm_ip", lambda *a, **k: "192.168.1.50")
+    monkeypatch.setattr(bib, "guest_ssh", lambda *a, **k: 1)
+    bib.cmd_vm_ssh("tart", bib.VmConfig())  # must not raise
+    monkeypatch.setattr(bib, "guest_ssh", lambda *a, **k: 255)
+    with pytest.raises(bib.Failure, match="Remote Login"):
+        bib.cmd_vm_ssh("tart", bib.VmConfig())
 
 
 def test_error_messages_name_commands_that_exist(monkeypatch):
-    # The CLI is variant-scoped now, so "cib logs" would be rejected by argparse.
-    source = Path(cib.__file__).read_text()
-    for stale in ("'cib logs'", "'cib up'", "'cib down'", "'cib status'"):
+    # The CLI is variant-scoped now, so "bib logs" would be rejected by argparse.
+    source = Path(bib.__file__).read_text()
+    for stale in ("'bib logs'", "'bib up'", "'bib down'", "'bib status'"):
         assert stale not in source, stale
 
 
 def test_the_release_archive_has_a_top_level_directory():
     # Otherwise `tar -xzf` scatters ~44 files into the current directory.
     workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/release.yml").read_text()
-    assert "tar -czf dist/cib-macos-arm64.tar.gz -C dist cib-macos-arm64" in workflow
-    assert '-C dist "cib-linux-${{ matrix.arch }}"' in workflow
+    assert "tar -czf dist/bib-macos-arm64.tar.gz -C dist bib-macos-arm64" in workflow
+    assert '-C dist "bib-linux-${{ matrix.arch }}"' in workflow
 
 
 # --- the offline guest patcher ------------------------------------------------
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import cibpatch  # noqa: E402
+import bibpatch  # noqa: E402
 
 
 def test_the_password_verifier_matches_what_macos_expects():
     import plistlib
 
-    blob = plistlib.loads(cibpatch.shadow_hash_data("hunter2"))
+    blob = plistlib.loads(bibpatch.shadow_hash_data("hunter2"))
     entry = blob["SALTED-SHA512-PBKDF2"]
     # Wrong parameters do not fail loudly; the account just refuses every password.
     assert entry["iterations"] == 50_000
@@ -1233,7 +1279,7 @@ def test_the_password_verifier_matches_what_macos_expects():
     assert len(entry["entropy"]) == 128
     # The verifier has to reach the record, under the name macOS reads: dropping it
     # leaves an account that refuses every password, and no other test noticed.
-    record = cibpatch.user_record(cibpatch.Account("admin", "hunter2"), "GUID")
+    record = bibpatch.user_record(bibpatch.Account("admin", "hunter2"), "GUID")
     assert list(record) == [
         "name",
         "realname",
@@ -1259,7 +1305,7 @@ def test_the_verifier_is_salted_differently_every_time():
     import plistlib
 
     salts = {
-        plistlib.loads(cibpatch.shadow_hash_data("same"))["SALTED-SHA512-PBKDF2"]["salt"]
+        plistlib.loads(bibpatch.shadow_hash_data("same"))["SALTED-SHA512-PBKDF2"]["salt"]
         for _ in range(5)
     }
     assert len(salts) == 5
@@ -1268,35 +1314,35 @@ def test_the_verifier_is_salted_differently_every_time():
 def test_kcpassword_is_padded_to_the_key_length():
     # Without the padding macOS reads past the end of the password.
     for password in ("a", "elevenchars", "exactly-eleven"):
-        assert len(cibpatch.kcpassword(password)) % len(cibpatch.KCPASSWORD_KEY) == 0
+        assert len(bibpatch.kcpassword(password)) % len(bibpatch.KCPASSWORD_KEY) == 0
 
 
 def test_kcpassword_round_trips():
-    key = cibpatch.KCPASSWORD_KEY
-    encoded = cibpatch.kcpassword("s3cret")
+    key = bibpatch.KCPASSWORD_KEY
+    encoded = bibpatch.kcpassword("s3cret")
     decoded = bytes(b ^ key[i % len(key)] for i, b in enumerate(encoded))
     assert decoded.startswith(b"s3cret\x00")
 
 
 def test_the_user_record_stores_every_value_as_a_list():
     # DirectoryService silently ignores a plain string here.
-    record = cibpatch.user_record(cibpatch.Account("admin", "pw"))
+    record = bibpatch.user_record(bibpatch.Account("admin", "pw"))
     assert all(isinstance(v, list) for v in record.values())
     assert record["name"] == ["admin"]
     assert record["uid"] == ["501"]
 
 
 def test_patching_a_directory_that_is_not_a_guest_volume_is_refused(tmp_path, monkeypatch):
-    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
-    with pytest.raises(cibpatch.PatchError, match="Data volume"):
-        cibpatch.patch(tmp_path, cibpatch.Account("admin", "pw"))
+    monkeypatch.setattr(bibpatch.os, "geteuid", lambda: 0)
+    with pytest.raises(bibpatch.PatchError, match="Data volume"):
+        bibpatch.patch(tmp_path, bibpatch.Account("admin", "pw"))
 
 
 def test_patching_without_a_first_boot_state_says_so(tmp_path, monkeypatch):
-    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(bibpatch.os, "geteuid", lambda: 0)
     (tmp_path / "private/var/db").mkdir(parents=True)
-    with pytest.raises(cibpatch.PatchError, match="booted once"):
-        cibpatch.patch(tmp_path, cibpatch.Account("admin", "pw"))
+    with pytest.raises(bibpatch.PatchError, match="booted once"):
+        bibpatch.patch(tmp_path, bibpatch.Account("admin", "pw"))
 
 
 class _FakeBoot:
@@ -1318,78 +1364,78 @@ class _FakeBoot:
 def _fake_guest_disk(monkeypatch, tmp_path):
     """A stand-in for ~/.tart/vms/<name>/disk.img, so nothing patches Path.exists
     globally — that would also make the credentials file look present."""
-    disk = tmp_path / ".tart" / "vms" / "chrome-vm" / "disk.img"
+    disk = tmp_path / ".tart" / "vms" / "browser-vm" / "disk.img"
     disk.parent.mkdir(parents=True, exist_ok=True)
     disk.touch()
-    monkeypatch.setattr(cib.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(bib.Path, "home", classmethod(lambda cls: tmp_path))
     return disk
 
 
 def test_create_prepares_the_guest_offline_by_default(calls, credentials, monkeypatch, tmp_path):
     # Typing into Setup Assistant is the fallback now, not the default.
     seen = {}
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
-    monkeypatch.setattr(cib.time, "sleep", lambda s: None)
+    monkeypatch.setattr(bib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(bib.time, "sleep", lambda s: None)
     _fake_guest_disk(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        cib.subprocess,
+        bib.subprocess,
         "Popen",
         lambda *a, **k: _FakeBoot(),
     )
     monkeypatch.setattr(
-        cib.subprocess,
+        bib.subprocess,
         "run",
         # Only the patcher: create now goes on to boot the guest and ssh into it, so
         # "the last call" is no longer the one under test.
         lambda cmd, **kw: (
             (
                 seen.update(cmd=cmd, stdin=kw.get("input"))
-                if any("cibpatch" in str(c) for c in cmd)
+                if any("bibpatch" in str(c) for c in cmd)
                 else None
             )
             or subprocess.CompletedProcess(cmd, 0)
         ),
     )
-    cib.cmd_vm_create("tart", cib.VmConfig())
+    bib.cmd_vm_create("tart", bib.VmConfig())
     out = flat(calls)
-    assert "create --from-ipsw=latest --disk-size=100 chrome-vm" in out
+    assert "create --from-ipsw=latest --disk-size=100 browser-vm" in out
     assert "packer" not in out
     # Only the patch runs as root, and the password goes in on stdin so it never
     # appears in the process list.
     assert seen["cmd"][0] == "/usr/bin/sudo"
-    assert "cibpatch.py" in " ".join(seen["cmd"])
+    assert "bibpatch.py" in " ".join(seen["cmd"])
     assert not any("password" in str(a) for a in seen["cmd"])
     assert seen["stdin"].strip() == credentials.read_text().strip()
 
 
 def test_the_packer_path_is_still_reachable(calls, credentials, monkeypatch):
-    monkeypatch.setenv("CIB_VM_PACKER", "1")
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
-    monkeypatch.setattr(cib, "find_packer", lambda: "packer")
-    cib.cmd_vm_create("tart", cib.VmConfig())
+    monkeypatch.setenv("BIB_VM_PACKER", "1")
+    monkeypatch.setattr(bib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(bib, "find_packer", lambda: "packer")
+    bib.cmd_vm_create("tart", bib.VmConfig())
     assert "packer build" in flat(calls)
 
 
 def test_a_failed_patch_names_the_fallback(calls, credentials, monkeypatch, tmp_path):
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
-    monkeypatch.setattr(cib.time, "sleep", lambda s: None)
+    monkeypatch.setattr(bib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(bib.time, "sleep", lambda s: None)
     _fake_guest_disk(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        cib.subprocess,
+        bib.subprocess,
         "Popen",
         lambda *a, **k: _FakeBoot(),
     )
 
     # The sudo probe must succeed so we reach the patch itself.
     monkeypatch.setattr(
-        cib.subprocess,
+        bib.subprocess,
         "run",
         lambda cmd, **kw: subprocess.CompletedProcess(
-            cmd, 1 if any("cibpatch" in str(c) for c in cmd) else 0
+            cmd, 1 if any("bibpatch" in str(c) for c in cmd) else 0
         ),
     )
-    with pytest.raises(cib.Failure, match="CIB_VM_PACKER=1"):
-        cib.cmd_vm_create("tart", cib.VmConfig())
+    with pytest.raises(bib.Failure, match="BIB_VM_PACKER=1"):
+        bib.cmd_vm_create("tart", bib.VmConfig())
 
 
 def _apfs_listing(store: str, volumes: list[dict]) -> bytes:
@@ -1410,11 +1456,11 @@ def test_the_data_volume_is_chosen_by_role_not_by_name(monkeypatch):
         ],
     )
     monkeypatch.setattr(
-        cibpatch.subprocess,
+        bibpatch.subprocess,
         "run",
         lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=listing, stderr=b""),
     )
-    assert cibpatch.data_volume("/dev/disk5") == "/dev/disk5s5"
+    assert bibpatch.data_volume("/dev/disk5") == "/dev/disk5s5"
 
 
 def test_a_disk_without_a_data_volume_is_reported(monkeypatch):
@@ -1422,12 +1468,12 @@ def test_a_disk_without_a_data_volume_is_reported(monkeypatch):
 
     empty = plistlib.dumps({"Containers": []})
     monkeypatch.setattr(
-        cibpatch.subprocess,
+        bibpatch.subprocess,
         "run",
         lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=empty, stderr=b""),
     )
-    with pytest.raises(cibpatch.PatchError, match="physical store"):
-        cibpatch.data_volume("/dev/disk9")
+    with pytest.raises(bibpatch.PatchError, match="physical store"):
+        bibpatch.data_volume("/dev/disk9")
 
 
 def test_group_membership_records_the_users_guid_not_the_groups(tmp_path):
@@ -1449,8 +1495,8 @@ def test_group_membership_records_the_users_guid_not_the_groups(tmp_path):
                 fh,
                 fmt=plistlib.FMT_BINARY,
             )
-    account = cibpatch.Account("admin", "pw")
-    cibpatch.add_to_group(root, "admin", account, "USER-GUID-1234")
+    account = bibpatch.Account("admin", "pw")
+    bibpatch.add_to_group(root, "admin", account, "USER-GUID-1234")
     with (groups / "admin.plist").open("rb") as fh:
         record = plistlib.load(fh)
     assert "USER-GUID-1234" in record["groupmembers"]
@@ -1468,9 +1514,9 @@ def test_the_account_and_its_group_entries_share_one_guid(tmp_path, monkeypatch)
     for name in ("admin", "staff"):
         with (groups / f"{name}.plist").open("wb") as fh:
             plistlib.dump({"users": [], "groupmembers": []}, fh, fmt=plistlib.FMT_BINARY)
-    monkeypatch.setattr(cibpatch.os, "chown", lambda *a: None)
-    account = cibpatch.Account("admin", "pw")
-    cibpatch.create_account(root, account)
+    monkeypatch.setattr(bibpatch.os, "chown", lambda *a: None)
+    account = bibpatch.Account("admin", "pw")
+    bibpatch.create_account(root, account)
     with (root / "private/var/db/dslocal/nodes/Default/users/admin.plist").open("rb") as fh:
         guid = plistlib.load(fh)["generateduid"][0]
     with (groups / "admin.plist").open("rb") as fh:
@@ -1486,20 +1532,20 @@ def test_the_container_is_found_through_its_physical_store(monkeypatch):
         [{"DeviceIdentifier": "disk11s2", "Name": "Data", "Roles": ["Data"]}],
     )
     monkeypatch.setattr(
-        cibpatch.subprocess,
+        bibpatch.subprocess,
         "run",
         lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=listing, stderr=b""),
     )
-    assert cibpatch.data_volume("/dev/disk10") == "/dev/disk11s2"
+    assert bibpatch.data_volume("/dev/disk10") == "/dev/disk11s2"
 
 
 def test_patching_without_root_says_so_instead_of_a_traceback(tmp_path, monkeypatch):
     # Writing dslocal and setting root ownership needs root; PermissionError is an
     # OSError, so it would have escaped the PatchError handler entirely.
     (tmp_path / "private/var/db").mkdir(parents=True)
-    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 501)
-    with pytest.raises(cibpatch.PatchError, match="needs root"):
-        cibpatch.patch(tmp_path, cibpatch.Account("admin", "pw"))
+    monkeypatch.setattr(bibpatch.os, "geteuid", lambda: 501)
+    with pytest.raises(bibpatch.PatchError, match="needs root"):
+        bibpatch.patch(tmp_path, bibpatch.Account("admin", "pw"))
 
 
 def test_the_home_tree_is_owned_after_every_file_exists(tmp_path, monkeypatch):
@@ -1507,8 +1553,8 @@ def test_the_home_tree_is_owned_after_every_file_exists(tmp_path, monkeypatch):
     # before that leaves those directories root-owned, and cfprefsd then silently
     # fails to write any preference the guest sets.
     chowned: list[str] = []
-    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g, **kw: chowned.append(str(p)))
+    monkeypatch.setattr(bibpatch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(bibpatch.os, "chown", lambda p, u, g, **kw: chowned.append(str(p)))
     root = tmp_path
     for sub in ("users", "groups"):
         (root / f"private/var/db/dslocal/nodes/Default/{sub}").mkdir(parents=True)
@@ -1518,7 +1564,7 @@ def test_the_home_tree_is_owned_after_every_file_exists(tmp_path, monkeypatch):
         path = root / f"private/var/db/dslocal/nodes/Default/groups/{name}.plist"
         with path.open("wb") as fh:
             plistlib.dump({"users": [], "groupmembers": []}, fh, fmt=plistlib.FMT_BINARY)
-    cibpatch.patch(root, cibpatch.Account("admin", "pw"))
+    bibpatch.patch(root, bibpatch.Account("admin", "pw"))
     prefs = root / "Users/admin/Library/Preferences"
     assert prefs.is_dir()
     assert str(prefs) in chowned, "the per-user preferences directory was never owned"
@@ -1529,79 +1575,79 @@ def test_the_data_volume_is_matched_on_its_real_name(monkeypatch):
     # display name.
     listing = _apfs_listing("disk9s2", [{"DeviceIdentifier": "disk10s2", "Name": "Data"}])
     monkeypatch.setattr(
-        cibpatch.subprocess,
+        bibpatch.subprocess,
         "run",
         lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=listing, stderr=b""),
     )
-    assert cibpatch.data_volume("/dev/disk9") == "/dev/disk10s2"
+    assert bibpatch.data_volume("/dev/disk9") == "/dev/disk10s2"
 
 
 def test_the_patcher_is_run_with_a_real_interpreter(calls, credentials, monkeypatch, tmp_path):
     # Under Nuitka sys.executable is the compiled binary, which cannot run a script.
-    monkeypatch.setenv("CIB_VM_PACKER", "0")
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
-    monkeypatch.setattr(cib.time, "sleep", lambda s: None)
+    monkeypatch.setenv("BIB_VM_PACKER", "0")
+    monkeypatch.setattr(bib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(bib.time, "sleep", lambda s: None)
     _fake_guest_disk(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        cib.subprocess,
+        bib.subprocess,
         "Popen",
         lambda *a, **k: _FakeBoot(),
     )
-    monkeypatch.setattr(cib.sys, "executable", "/opt/homebrew/bin/cib")  # a binary
-    monkeypatch.setattr(cib.shutil, "which", lambda n: "/usr/bin/python3")
+    monkeypatch.setattr(bib.sys, "executable", "/opt/homebrew/bin/bib")  # a binary
+    monkeypatch.setattr(bib.shutil, "which", lambda n: "/usr/bin/python3")
     seen = {}
     monkeypatch.setattr(
-        cib.subprocess,
+        bib.subprocess,
         "run",
         # Only the patcher: create now goes on to boot the guest and ssh into it, so
         # "the last call" is no longer the one under test.
         lambda cmd, **kw: (
-            (seen.update(cmd=cmd) if any("cibpatch" in str(c) for c in cmd) else None)
+            (seen.update(cmd=cmd) if any("bibpatch" in str(c) for c in cmd) else None)
             or subprocess.CompletedProcess(cmd, 0)
         ),
     )
-    cib.cmd_vm_create("tart", cib.VmConfig())
+    bib.cmd_vm_create("tart", bib.VmConfig())
     assert seen["cmd"][:2] == ["/usr/bin/sudo", "-n"]
     assert seen["cmd"][2] == "/usr/bin/python3"
-    assert not seen["cmd"][2].endswith("/cib")
+    assert not seen["cmd"][2].endswith("/bib")
 
 
 def test_a_missing_sudo_credential_is_named_before_anything_is_tried(
     credentials, monkeypatch, tmp_path
 ):
-    # sudo prompts on its own tty and cannot ask for anything when cib runs
+    # sudo prompts on its own tty and cannot ask for anything when bib runs
     # detached; that used to surface as a bare "preparing the guest failed".
     _fake_guest_disk(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        cib.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1)
+        bib.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1)
     )
-    with pytest.raises(cib.Failure, match="sudo -v"):
-        cib._prepare_guest(cib.VmConfig(), "pw")
+    with pytest.raises(bib.Failure, match="sudo -v"):
+        bib._prepare_guest(bib.VmConfig(), "pw")
 
 
 def test_prepare_can_be_retried_without_rebuilding(calls, credentials, monkeypatch, tmp_path):
     # Building takes half an hour; a failed patch must not cost that again.
-    cib.guest_password(create=True)  # as a real build would have left it
+    bib.guest_password(create=True)  # as a real build would have left it
     _fake_guest_disk(monkeypatch, tmp_path)
     seen = {}
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: True)
+    monkeypatch.setattr(bib, "vm_exists", lambda *a, **k: True)
     monkeypatch.setattr(
-        cib.subprocess,
+        bib.subprocess,
         "run",
         lambda cmd, **kw: (
-            (seen.update(cmd=cmd) if any("cibpatch" in str(c) for c in cmd) else None)
+            (seen.update(cmd=cmd) if any("bibpatch" in str(c) for c in cmd) else None)
             or subprocess.CompletedProcess(cmd, 0)
         ),
     )
-    cib.cmd_vm_prepare("tart", cib.VmConfig())
-    assert "cibpatch.py" in " ".join(seen["cmd"])
+    bib.cmd_vm_prepare("tart", bib.VmConfig())
+    assert "bibpatch.py" in " ".join(seen["cmd"])
     assert "create" not in flat(calls)
 
 
 def test_a_first_boot_that_never_happened_is_not_called_built(
     calls, credentials, monkeypatch, tmp_path
 ):
-    # Otherwise cib patches a guest that never booted and prints "Built."
+    # Otherwise bib patches a guest that never booted and prints "Built."
     import io
 
     class Died(_FakeBoot):
@@ -1611,61 +1657,61 @@ def test_a_first_boot_that_never_happened_is_not_called_built(
         def poll(self):
             return 2
 
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
-    monkeypatch.setattr(cib, "sudo_is_cached", lambda: True)
-    monkeypatch.setattr(cib, "find_guest_python", lambda: "/usr/bin/python3")
-    monkeypatch.setattr(cib.time, "sleep", lambda s: None)
-    monkeypatch.setattr(cib.subprocess, "Popen", lambda *a, **k: Died())
+    monkeypatch.setattr(bib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(bib, "sudo_is_cached", lambda: True)
+    monkeypatch.setattr(bib, "find_guest_python", lambda: "/usr/bin/python3")
+    monkeypatch.setattr(bib.time, "sleep", lambda s: None)
+    monkeypatch.setattr(bib.subprocess, "Popen", lambda *a, **k: Died())
     _fake_guest_disk(monkeypatch, tmp_path)
-    with pytest.raises(cib.Failure, match="exited immediately"):
-        cib.cmd_vm_create("tart", cib.VmConfig())
+    with pytest.raises(bib.Failure, match="exited immediately"):
+        bib.cmd_vm_create("tart", bib.VmConfig())
 
 
 @pytest.mark.parametrize("name", ["../../etc/pam.d/x", "-oProxyCommand=x", "My User", "/abs"])
 def test_a_dangerous_account_name_is_refused_before_root_runs(name, monkeypatch):
     # This value reaches a root-privileged patcher that builds paths from it.
-    monkeypatch.setenv("CIB_VM_USER", name)
-    with pytest.raises(cib.Failure, match="not a usable account name"):
-        cib.validate_vm_user(cib.VmConfig().user)
+    monkeypatch.setenv("BIB_VM_USER", name)
+    with pytest.raises(bib.Failure, match="not a usable account name"):
+        bib.validate_vm_user(bib.VmConfig().user)
 
 
 def test_the_patcher_refuses_a_dangerous_name_itself(tmp_path, monkeypatch):
     # The privileged half does not trust its caller either.
-    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
-    with pytest.raises(cibpatch.PatchError, match="refusing to use"):
-        cibpatch.patch(tmp_path, cibpatch.Account("../../etc/x", "pw"))
+    monkeypatch.setattr(bibpatch.os, "geteuid", lambda: 0)
+    with pytest.raises(bibpatch.PatchError, match="refusing to use"):
+        bibpatch.patch(tmp_path, bibpatch.Account("../../etc/x", "pw"))
 
 
 def test_the_disk_is_looked_for_where_tart_actually_puts_it(credentials, monkeypatch, tmp_path):
     # tart honours TART_HOME; looking under ~/.tart would miss the disk entirely.
     monkeypatch.setenv("TART_HOME", str(tmp_path / "elsewhere"))
-    disk = tmp_path / "elsewhere" / "vms" / "chrome-vm" / "disk.img"
+    disk = tmp_path / "elsewhere" / "vms" / "browser-vm" / "disk.img"
     disk.parent.mkdir(parents=True)
     disk.touch()
     monkeypatch.setattr(
-        cib.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1)
+        bib.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1)
     )
-    with pytest.raises(cib.Failure, match="sudo"):  # got past the disk lookup
-        cib._prepare_guest(cib.VmConfig(), "pw")
+    with pytest.raises(bib.Failure, match="sudo"):  # got past the disk lookup
+        bib._prepare_guest(bib.VmConfig(), "pw")
 
 
 def test_mount_failures_report_the_reason(monkeypatch):
     # diskutil writes its diagnosis to stderr; reporting stdout gave a bare colon.
     monkeypatch.setattr(
-        cibpatch.subprocess,
+        bibpatch.subprocess,
         "run",
         lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="Failed to find disk"),
     )
-    with pytest.raises(cibpatch.PatchError, match="Failed to find disk"):
-        cibpatch.mount("/dev/disk99s9")
+    with pytest.raises(bibpatch.PatchError, match="Failed to find disk"):
+        bibpatch.mount("/dev/disk99s9")
 
 
 def test_setup_installs_the_clipboard_agent_too():
-    # It used to be installed only by the packer path, while cib told the user that
+    # It used to be installed only by the packer path, while bib told the user that
     # `vm setup` had done it.
-    assert "tart-guest-agent" in cib.guest_install_script("pw")
-    assert cib.AGENT_PLIST_PATH in cib.guest_install_script("pw")
-    assert cib.GUEST_AGENT_VERSION in cib.guest_install_script("pw")
+    assert "tart-guest-agent" in bib.guest_install_script("pw")
+    assert bib.AGENT_PLIST_PATH in bib.guest_install_script("pw")
+    assert bib.GUEST_AGENT_VERSION in bib.guest_install_script("pw")
 
 
 def test_the_image_volume_is_attached_with_ownership(monkeypatch):
@@ -1676,14 +1722,14 @@ def test_the_image_volume_is_attached_with_ownership(monkeypatch):
     # flag name passed even when the value beside it was wrong.
     seen = {}
     monkeypatch.setattr(
-        cibpatch.subprocess,
+        bibpatch.subprocess,
         "run",
         lambda cmd, **kw: (
             seen.update(cmd=cmd)
             or subprocess.CompletedProcess(cmd, 0, stdout="/dev/disk9\n", stderr="")
         ),
     )
-    assert cibpatch.attach(Path("/x/disk.img")) == "/dev/disk9"
+    assert bibpatch.attach(Path("/x/disk.img")) == "/dev/disk9"
     cmd = seen["cmd"]
     assert cmd[cmd.index("-owners") + 1] == "on"
     assert "-nomount" in cmd
@@ -1694,7 +1740,7 @@ def test_owning_the_home_never_follows_a_link(tmp_path, monkeypatch):
     # following one here would let the guest steer a root chown at any host path.
     calls_seen: list[tuple] = []
     monkeypatch.setattr(
-        cibpatch.os,
+        bibpatch.os,
         "chown",
         lambda p, u, g, **kw: calls_seen.append((str(p), kw.get("follow_symlinks"))),
     )
@@ -1702,43 +1748,43 @@ def test_owning_the_home_never_follows_a_link(tmp_path, monkeypatch):
     home.mkdir(parents=True)
     (home / "real").write_text("x")
     (home / "escape").symlink_to("/etc")
-    cibpatch.own_home(tmp_path, cibpatch.Account("admin", "pw"))
+    bibpatch.own_home(tmp_path, bibpatch.Account("admin", "pw"))
     assert calls_seen, "nothing was owned"
     assert all(kw is False for _, kw in calls_seen), "a chown followed links"
     assert not any(path == "/etc" for path, _ in calls_seen)
 
 
 def test_a_symlinked_home_is_refused(tmp_path, monkeypatch):
-    monkeypatch.setattr(cibpatch.os, "chown", lambda *a, **k: None)
+    monkeypatch.setattr(bibpatch.os, "chown", lambda *a, **k: None)
     (tmp_path / "Users").mkdir()
     (tmp_path / "Users/admin").symlink_to("/")
-    with pytest.raises(cibpatch.PatchError, match="symlink"):
-        cibpatch.own_home(tmp_path, cibpatch.Account("admin", "pw"))
+    with pytest.raises(bibpatch.PatchError, match="symlink"):
+        bibpatch.own_home(tmp_path, bibpatch.Account("admin", "pw"))
 
 
 def test_the_disk_is_sized_when_it_is_created(calls, credentials, monkeypatch, tmp_path):
     # tart create installs macOS onto its default 50 GB disk; growing the image
     # afterwards leaves the partitions where the installer put them.
-    monkeypatch.setenv("CIB_VM_DISK", "120")
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
-    monkeypatch.setattr(cib.time, "sleep", lambda s: None)
-    monkeypatch.setattr(cib.subprocess, "Popen", lambda *a, **k: _FakeBoot())
+    monkeypatch.setenv("BIB_VM_DISK", "120")
+    monkeypatch.setattr(bib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(bib.time, "sleep", lambda s: None)
+    monkeypatch.setattr(bib.subprocess, "Popen", lambda *a, **k: _FakeBoot())
     _fake_guest_disk(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        cib.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0)
+        bib.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0)
     )
-    cib.cmd_vm_create("tart", cib.VmConfig())
+    bib.cmd_vm_create("tart", bib.VmConfig())
     out = flat(calls)
     assert "--disk-size=120" in out
-    assert "set chrome-vm --cpu" in out and "--disk-size" not in out.split("set chrome-vm")[1]
+    assert "set browser-vm --cpu" in out and "--disk-size" not in out.split("set browser-vm")[1]
 
 
 def test_prepare_refuses_a_running_guest(calls, credentials, monkeypatch):
     # Patching a mounted disk that the guest is also writing means two writers.
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: True)
-    monkeypatch.setattr(cib, "vm_running", lambda *a, **k: True)
-    with pytest.raises(cib.Failure, match="cib vm down"):
-        cib.cmd_vm_prepare("tart", cib.VmConfig())
+    monkeypatch.setattr(bib, "vm_exists", lambda *a, **k: True)
+    monkeypatch.setattr(bib, "vm_running", lambda *a, **k: True)
+    with pytest.raises(bib.Failure, match="bib vm down"):
+        bib.cmd_vm_prepare("tart", bib.VmConfig())
 
 
 # --- the guest's keyboard, which the offline path used never to set ------------
@@ -1761,11 +1807,11 @@ def test_the_guest_gets_the_hosts_keyboard_layout(monkeypatch):
     # The generated password is pasted, but everything typed in the guest afterwards
     # is typed by hand, and a guest left on U.S. moves the punctuation.
     monkeypatch.setattr(
-        cib.subprocess,
+        bib.subprocess,
         "run",
         lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout=_hitoolbox([_SWISS])),
     )
-    assert cib.host_keyboard_layout() == (19, "Swiss German")
+    assert bib.host_keyboard_layout() == (19, "Swiss German")
 
 
 def test_an_input_method_is_not_mistaken_for_a_keyboard_layout(monkeypatch):
@@ -1775,11 +1821,11 @@ def test_an_input_method_is_not_mistaken_for_a_keyboard_layout(monkeypatch):
         _SWISS,
     ]
     monkeypatch.setattr(
-        cib.subprocess,
+        bib.subprocess,
         "run",
         lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout=_hitoolbox(sources)),
     )
-    assert cib.host_keyboard_layout() == (19, "Swiss German")
+    assert bib.host_keyboard_layout() == (19, "Swiss German")
 
 
 @pytest.mark.parametrize(
@@ -1794,19 +1840,19 @@ def test_an_input_method_is_not_mistaken_for_a_keyboard_layout(monkeypatch):
 def test_an_unreadable_keyboard_preference_falls_back_to_us(monkeypatch, returncode, stdout):
     # Guessing a layout would be worse than the one macOS installs with.
     monkeypatch.setattr(
-        cib.subprocess,
+        bib.subprocess,
         "run",
         lambda cmd, **kw: subprocess.CompletedProcess(cmd, returncode, stdout=stdout),
     )
-    assert cib.host_keyboard_layout() == cib.DEFAULT_KEYBOARD
+    assert bib.host_keyboard_layout() == bib.DEFAULT_KEYBOARD
 
 
 def test_the_layout_is_written_where_the_guest_reads_it(tmp_path):
     # Selecting a layout that is not also enabled leaves the guest on U.S.
     import plistlib
 
-    cibpatch.set_keyboard_layout(
-        tmp_path, cibpatch.Account("admin", "pw"), cibpatch.Keyboard(19, "Swiss German")
+    bibpatch.set_keyboard_layout(
+        tmp_path, bibpatch.Account("admin", "pw"), bibpatch.Keyboard(19, "Swiss German")
     )
     path = tmp_path / "Users/admin/Library/Preferences/com.apple.HIToolbox.plist"
     record = plistlib.loads(path.read_bytes())
@@ -1816,17 +1862,17 @@ def test_the_layout_is_written_where_the_guest_reads_it(tmp_path):
 
 def test_the_hosts_layout_reaches_the_patcher(credentials, monkeypatch, tmp_path):
     _fake_guest_disk(monkeypatch, tmp_path)
-    monkeypatch.setattr(cib, "host_keyboard_layout", lambda: (19, "Swiss German"))
+    monkeypatch.setattr(bib, "host_keyboard_layout", lambda: (19, "Swiss German"))
     seen = {}
     monkeypatch.setattr(
-        cib.subprocess,
+        bib.subprocess,
         "run",
         lambda cmd, **kw: (
-            (seen.update(cmd=cmd) if any("cibpatch" in str(c) for c in cmd) else None)
+            (seen.update(cmd=cmd) if any("bibpatch" in str(c) for c in cmd) else None)
             or subprocess.CompletedProcess(cmd, 0)
         ),
     )
-    cib._prepare_guest(cib.VmConfig(), "pw")
+    bib._prepare_guest(bib.VmConfig(), "pw")
     cmd = seen["cmd"]
     assert cmd[cmd.index("--keyboard-id") + 1] == "19"
     assert cmd[cmd.index("--keyboard-name") + 1] == "Swiss German"
@@ -1835,15 +1881,15 @@ def test_the_hosts_layout_reaches_the_patcher(credentials, monkeypatch, tmp_path
 def test_patching_leaves_the_guest_on_the_layout_it_was_told(tmp_path, monkeypatch):
     import plistlib
 
-    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g, **kw: None)
+    monkeypatch.setattr(bibpatch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(bibpatch.os, "chown", lambda p, u, g, **kw: None)
     for sub in ("users", "groups"):
         (tmp_path / f"private/var/db/dslocal/nodes/Default/{sub}").mkdir(parents=True)
     for name in ("admin", "staff"):
         path = tmp_path / f"private/var/db/dslocal/nodes/Default/groups/{name}.plist"
         with path.open("wb") as fh:
             plistlib.dump({"users": [], "groupmembers": []}, fh, fmt=plistlib.FMT_BINARY)
-    cibpatch.patch(tmp_path, cibpatch.Account("admin", "pw"), cibpatch.Keyboard(19, "Swiss German"))
+    bibpatch.patch(tmp_path, bibpatch.Account("admin", "pw"), bibpatch.Keyboard(19, "Swiss German"))
     record = plistlib.loads(
         (tmp_path / "Users/admin/Library/Preferences/com.apple.HIToolbox.plist").read_bytes()
     )
@@ -1854,21 +1900,21 @@ def test_patching_leaves_the_guest_on_the_layout_it_was_told(tmp_path, monkeypat
 
 
 def test_the_guest_agent_is_pinned_in_exactly_one_place():
-    # It used to be pinned twice, in cib.py and in the packer template, with a test
+    # It used to be pinned twice, in bib.py and in the packer template, with a test
     # asserting the two agreed. The template no longer installs the agent at all,
     # so the twin — and the way it could drift — is gone.
-    root = Path(cib.__file__).resolve().parent
+    root = Path(bib.__file__).resolve().parent
     template = (root / "packer" / "browser-vm.pkr.hcl").read_text()
     assert "guest_agent_version" not in template
-    assert re.search(r'^GUEST_AGENT_VERSION = "[\d.]+"$', (root / "cib.py").read_text(), re.M)
+    assert re.search(r'^GUEST_AGENT_VERSION = "[\d.]+"$', (root / "bib.py").read_text(), re.M)
 
 
 def test_every_renovate_marker_anywhere_has_a_manager_that_matches_it():
-    # Generalised from cib.py alone: the packer template carries markers too, and a
+    # Generalised from bib.py alone: the packer template carries markers too, and a
     # marker with no manager reads as configured while updating nothing.
     import json
 
-    root = Path(cib.__file__).resolve().parent
+    root = Path(bib.__file__).resolve().parent
     config = json.loads((root / "renovate.json").read_text())
     by_file: dict[str, list[str]] = {}
     for manager in config["customManagers"]:
@@ -1876,7 +1922,7 @@ def test_every_renovate_marker_anywhere_has_a_manager_that_matches_it():
         by_file.setdefault(target, []).extend(manager["matchStrings"])
     marked = {
         str(path.relative_to(root))
-        for path in (root / "cib.py", root / "packer" / "browser-vm.pkr.hcl")
+        for path in (root / "bib.py", root / "packer" / "browser-vm.pkr.hcl")
         if "# renovate:" in path.read_text()
     }
     assert marked, "no renovate markers found at all — has the layout changed?"
@@ -1891,18 +1937,18 @@ def test_every_renovate_marker_anywhere_has_a_manager_that_matches_it():
         assert markers == covered, f"{name}: {markers - covered} matched by no manager"
 
 
-def test_every_renovate_marker_in_cib_has_a_manager_that_matches_it():
+def test_every_renovate_marker_in_bib_has_a_manager_that_matches_it():
     # A marker with no manager reads as configured and updates nothing: the
     # tart-guest-agent pin sat unmanaged behind one for seven review rounds.
     import json
 
-    root = Path(cib.__file__).resolve().parent
+    root = Path(bib.__file__).resolve().parent
     config = json.loads((root / "renovate.json").read_text())
-    source = (root / "cib.py").read_text()
+    source = (root / "bib.py").read_text()
     patterns = [
         pattern
         for manager in config["customManagers"]
-        if manager["managerFilePatterns"] == ["/^cib\\.py$/"]
+        if manager["managerFilePatterns"] == ["/^bib\\.py$/"]
         for pattern in manager["matchStrings"]
     ]
     # Renovate's regexes are JavaScript, where a named group is (?<name>...);
@@ -1918,9 +1964,9 @@ def test_every_renovate_marker_in_cib_has_a_manager_that_matches_it():
 def test_a_half_built_vm_is_pointed_at_prepare_not_only_at_up(capsys, monkeypatch):
     # 'vm up' on a VM whose preparation failed lands on Setup Assistant, which is
     # the one thing the offline path exists to avoid.
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: True)
-    cib.cmd_vm_create("tart", cib.VmConfig())
-    assert "cib vm prepare" in capsys.readouterr().out
+    monkeypatch.setattr(bib, "vm_exists", lambda *a, **k: True)
+    bib.cmd_vm_create("tart", bib.VmConfig())
+    assert "bib vm prepare" in capsys.readouterr().out
 
 
 def test_a_guest_that_will_not_stop_is_pointed_at_prepare(calls, credentials, monkeypatch):
@@ -1932,22 +1978,22 @@ def test_a_guest_that_will_not_stop_is_pointed_at_prepare(calls, credentials, mo
                 raise subprocess.TimeoutExpired("tart", timeout)
             return 0
 
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
-    monkeypatch.setattr(cib, "sudo_is_cached", lambda: True)
-    monkeypatch.setattr(cib, "find_guest_python", lambda: "/usr/bin/python3")
-    monkeypatch.setattr(cib.time, "sleep", lambda s: None)
-    monkeypatch.setattr(cib.subprocess, "Popen", lambda *a, **k: Stuck())
-    with pytest.raises(cib.Failure, match="cib vm prepare"):
-        cib.cmd_vm_create("tart", cib.VmConfig())
+    monkeypatch.setattr(bib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(bib, "sudo_is_cached", lambda: True)
+    monkeypatch.setattr(bib, "find_guest_python", lambda: "/usr/bin/python3")
+    monkeypatch.setattr(bib.time, "sleep", lambda s: None)
+    monkeypatch.setattr(bib.subprocess, "Popen", lambda *a, **k: Stuck())
+    with pytest.raises(bib.Failure, match="bib vm prepare"):
+        bib.cmd_vm_create("tart", bib.VmConfig())
 
 
 def test_the_packer_fallback_is_offered_with_the_delete_that_makes_it_work(monkeypatch, tmp_path):
     # 'vm create' on an existing VM only reports that it exists, so suggesting the
     # fallback without the delete suggests a no-op.
     _fake_guest_disk(monkeypatch, tmp_path)
-    monkeypatch.setattr(cib.Path, "exists", lambda self: "cibpatch" not in str(self))
-    with pytest.raises(cib.Failure, match="cib vm delete"):
-        cib._prepare_guest(cib.VmConfig(), "pw")
+    monkeypatch.setattr(bib.Path, "exists", lambda self: "bibpatch" not in str(self))
+    with pytest.raises(bib.Failure, match="bib vm delete"):
+        bib._prepare_guest(bib.VmConfig(), "pw")
 
 
 # --- the disk layer, where every real failure so far has happened --------------
@@ -1956,27 +2002,27 @@ def test_the_packer_fallback_is_offered_with_the_delete_that_makes_it_work(monke
 def test_the_disk_is_put_back_even_when_patching_fails(monkeypatch):
     # A half-finished run must never leave the guest's disk attached to the host.
     undone: list[tuple[str, str]] = []
-    monkeypatch.setattr(cibpatch, "attach", lambda disk: "/dev/disk9")
-    monkeypatch.setattr(cibpatch, "data_volume", lambda device: "/dev/disk9s1")
-    monkeypatch.setattr(cibpatch, "mount", lambda volume: Path("/Volumes/Data"))
-    monkeypatch.setattr(cibpatch, "unmount", lambda volume: undone.append(("unmount", volume)))
-    monkeypatch.setattr(cibpatch, "detach", lambda device: undone.append(("detach", device)))
+    monkeypatch.setattr(bibpatch, "attach", lambda disk: "/dev/disk9")
+    monkeypatch.setattr(bibpatch, "data_volume", lambda device: "/dev/disk9s1")
+    monkeypatch.setattr(bibpatch, "mount", lambda volume: Path("/Volumes/Data"))
+    monkeypatch.setattr(bibpatch, "unmount", lambda volume: undone.append(("unmount", volume)))
+    monkeypatch.setattr(bibpatch, "detach", lambda device: undone.append(("detach", device)))
     monkeypatch.setattr(
-        cibpatch, "patch", lambda *a, **k: (_ for _ in ()).throw(cibpatch.PatchError("no"))
+        bibpatch, "patch", lambda *a, **k: (_ for _ in ()).throw(bibpatch.PatchError("no"))
     )
-    with pytest.raises(cibpatch.PatchError):
-        cibpatch.prepare(Path("/x/disk.img"), cibpatch.Account("admin", "pw"))
+    with pytest.raises(bibpatch.PatchError):
+        bibpatch.prepare(Path("/x/disk.img"), bibpatch.Account("admin", "pw"))
     assert undone == [("unmount", "/dev/disk9s1"), ("detach", "/dev/disk9")]
 
 
 def test_a_disk_that_will_not_attach_is_reported_with_its_reason(monkeypatch):
     monkeypatch.setattr(
-        cibpatch.subprocess,
+        bibpatch.subprocess,
         "run",
         lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="no such file"),
     )
-    with pytest.raises(cibpatch.PatchError, match="no such file"):
-        cibpatch.attach(Path("/x/disk.img"))
+    with pytest.raises(bibpatch.PatchError, match="no such file"):
+        bibpatch.attach(Path("/x/disk.img"))
 
 
 def test_a_volume_mounted_without_ownership_is_refused(monkeypatch):
@@ -1994,9 +2040,9 @@ def test_a_volume_mounted_without_ownership_is_refused(monkeypatch):
             return subprocess.CompletedProcess(cmd, 0, stdout=info)
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(cibpatch.subprocess, "run", fake_run)
-    with pytest.raises(cibpatch.PatchError, match="without ownership"):
-        cibpatch.mount("/dev/disk9s1")
+    monkeypatch.setattr(bibpatch.subprocess, "run", fake_run)
+    with pytest.raises(bibpatch.PatchError, match="without ownership"):
+        bibpatch.mount("/dev/disk9s1")
 
 
 def test_the_patcher_passes_the_layout_it_was_given(monkeypatch):
@@ -2005,10 +2051,10 @@ def test_the_patcher_passes_the_layout_it_was_given(monkeypatch):
     seen = {}
     typed = "on-stdin-not-argv"
     monkeypatch.setattr(
-        cibpatch, "prepare", lambda d, a, k, ks: seen.update(disk=d, account=a, kb=k, keys=ks)
+        bibpatch, "prepare", lambda d, a, k, ks: seen.update(disk=d, account=a, kb=k, keys=ks)
     )
-    monkeypatch.setattr(cibpatch.sys, "stdin", io.StringIO(typed + "\n"))
-    cibpatch.main(
+    monkeypatch.setattr(bibpatch.sys, "stdin", io.StringIO(typed + "\n"))
+    bibpatch.main(
         [
             "--disk",
             "/x/disk.img",
@@ -2020,7 +2066,7 @@ def test_the_patcher_passes_the_layout_it_was_given(monkeypatch):
             "Swiss German",
         ]
     )
-    assert seen["kb"] == cibpatch.Keyboard(19, "Swiss German")
+    assert seen["kb"] == bibpatch.Keyboard(19, "Swiss German")
     # Never in argv, so it is never in the process list.
     assert seen["account"].password == typed
 
@@ -2029,19 +2075,19 @@ def test_the_patcher_defaults_to_us_when_it_is_told_no_layout(monkeypatch):
     import io
 
     seen = {}
-    monkeypatch.setattr(cibpatch, "prepare", lambda d, a, k, ks: seen.update(kb=k))
-    monkeypatch.setattr(cibpatch.sys, "stdin", io.StringIO("pw\n"))
-    cibpatch.main(["--disk", "/x/disk.img", "--user", "admin"])
-    assert seen["kb"] == cibpatch.Keyboard()
+    monkeypatch.setattr(bibpatch, "prepare", lambda d, a, k, ks: seen.update(kb=k))
+    monkeypatch.setattr(bibpatch.sys, "stdin", io.StringIO("pw\n"))
+    bibpatch.main(["--disk", "/x/disk.img", "--user", "admin"])
+    assert seen["kb"] == bibpatch.Keyboard()
 
 
 def test_the_patcher_refuses_to_run_without_a_password(monkeypatch):
     # An empty password would produce an account nothing can log in to.
     import io
 
-    monkeypatch.setattr(cibpatch.sys, "stdin", io.StringIO("\n"))
+    monkeypatch.setattr(bibpatch.sys, "stdin", io.StringIO("\n"))
     with pytest.raises(SystemExit, match="no password"):
-        cibpatch.main(["--disk", "/x/disk.img", "--user", "admin"])
+        bibpatch.main(["--disk", "/x/disk.img", "--user", "admin"])
 
 
 # --- the guest cannot redirect a root write onto this host ---------------------
@@ -2089,15 +2135,15 @@ def test_a_symlink_planted_in_the_guest_never_redirects_a_root_write(tmp_path, p
         _shutil.rmtree(link)
     link.symlink_to(target)
 
-    with pytest.raises(cibpatch.PatchError, match="symlink"):
-        cibpatch.guest_path(root, f"{planted}/precious")
+    with pytest.raises(bibpatch.PatchError, match="symlink"):
+        bibpatch.guest_path(root, f"{planted}/precious")
     assert witness.read_text() == "host file", "a host file was written through the link"
 
 
 def test_the_whole_patch_refuses_a_guest_that_planted_a_link(tmp_path, monkeypatch):
     # End to end: patch() must stop, not write half the guest and then notice.
-    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g, **kw: None)
+    monkeypatch.setattr(bibpatch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(bibpatch.os, "chown", lambda p, u, g, **kw: None)
     root = _guest_volume(tmp_path)
     target = tmp_path / "host"
     target.mkdir()
@@ -2105,8 +2151,8 @@ def test_the_whole_patch_refuses_a_guest_that_planted_a_link(tmp_path, monkeypat
     (root / "private/etc").mkdir(parents=True, exist_ok=True)
     (root / "private/etc").rmdir()
     (root / "private/etc").symlink_to(target)
-    with pytest.raises(cibpatch.PatchError, match="symlink"):
-        cibpatch.patch(root, cibpatch.Account("admin", "pw"))
+    with pytest.raises(bibpatch.PatchError, match="symlink"):
+        bibpatch.patch(root, bibpatch.Account("admin", "pw"))
     assert sorted(p.name for p in target.iterdir()) == ["AppleSetupDone-decoy"]
 
 
@@ -2114,10 +2160,10 @@ def test_a_guest_volume_with_no_links_still_patches(tmp_path, monkeypatch):
     # The guard must not refuse the ordinary case it was added to protect.
     import plistlib
 
-    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g, **kw: None)
+    monkeypatch.setattr(bibpatch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(bibpatch.os, "chown", lambda p, u, g, **kw: None)
     root = _guest_volume(tmp_path)
-    cibpatch.patch(root, cibpatch.Account("admin", "pw"), cibpatch.Keyboard(19, "Swiss German"))
+    bibpatch.patch(root, bibpatch.Account("admin", "pw"), bibpatch.Keyboard(19, "Swiss German"))
     assert (root / "private/var/db/.AppleSetupDone").exists()
     assert (root / "private/etc/kcpassword").exists()
     record = plistlib.loads((root / "Library/Preferences/com.apple.loginwindow.plist").read_bytes())
@@ -2132,24 +2178,24 @@ def test_the_kcpassword_key_is_apples_not_merely_self_consistent():
     # round-trips perfectly — while loginwindow deobfuscates the real file with
     # Apple's real key, gets nonsense, and autologin fails.
     assert bytes([0x7D, 0x89, 0x52, 0x23, 0xD2, 0xBC, 0xDD, 0xEA, 0xA3, 0xB9, 0x1F]) == (
-        cibpatch.KCPASSWORD_KEY
+        bibpatch.KCPASSWORD_KEY
     )
-    assert cibpatch.kcpassword("test") == bytes.fromhex("09ec2157d2bcddeaa3b91f")
+    assert bibpatch.kcpassword("test") == bytes.fromhex("09ec2157d2bcddeaa3b91f")
 
 
 def test_the_padding_is_observable_for_a_password_the_key_length_divides():
     # The documented failure ("macOS reads past the password") only happens when the
     # length is a multiple of 11, which is the case the old assertion could not see.
-    encoded = cibpatch.kcpassword("elevenchars")
+    encoded = bibpatch.kcpassword("elevenchars")
     assert len(encoded) == 22, "an 11-character password must still get its terminator"
-    assert encoded[11] == cibpatch.KCPASSWORD_KEY[0], "byte 11 is the NUL, XOR-ed"
+    assert encoded[11] == bibpatch.KCPASSWORD_KEY[0], "byte 11 is the NUL, XOR-ed"
 
 
 def test_autologin_writes_the_keys_loginwindow_actually_reads(tmp_path):
     import plistlib
 
-    account = cibpatch.Account("admin", "pw")
-    cibpatch.enable_autologin(tmp_path, account)
+    account = bibpatch.Account("admin", "pw")
+    bibpatch.enable_autologin(tmp_path, account)
     record = plistlib.loads(
         (tmp_path / "Library/Preferences/com.apple.loginwindow.plist").read_bytes()
     )
@@ -2158,27 +2204,27 @@ def test_autologin_writes_the_keys_loginwindow_actually_reads(tmp_path):
     assert record["autoLoginUser"] == "admin"
     assert record["autoLoginUserUID"] == 501
     kc = tmp_path / "private/etc/kcpassword"
-    assert kc.read_bytes() == cibpatch.kcpassword("pw")
+    assert kc.read_bytes() == bibpatch.kcpassword("pw")
     assert kc.stat().st_mode & 0o777 == 0o600, "the guest's password must not be world-readable"
 
 
 def test_remote_login_is_recorded_where_launchd_looks(tmp_path):
     import plistlib
 
-    cibpatch.enable_remote_login(tmp_path)
+    bibpatch.enable_remote_login(tmp_path)
     record = plistlib.loads(
         (tmp_path / "private/var/db/com.apple.xpc.launchd/disabled.plist").read_bytes()
     )
-    # False means "not disabled". True, or a missing key, and 'cib vm setup' can
+    # False means "not disabled". True, or a missing key, and 'bib vm setup' can
     # never reach the guest.
     assert record["com.openssh.sshd"] is False
 
 
 def test_the_two_keyboard_defaults_are_the_same_fact_twice():
-    # cib decides the fallback and cibpatch carries its own; a test that compares
+    # bib decides the fallback and bibpatch carries its own; a test that compares
     # each against itself would not notice them drifting apart.
-    assert cib.DEFAULT_KEYBOARD == (0, "U.S.")
-    assert (cibpatch.Keyboard().layout_id, cibpatch.Keyboard().name) == cib.DEFAULT_KEYBOARD
+    assert bib.DEFAULT_KEYBOARD == (0, "U.S.")
+    assert (bibpatch.Keyboard().layout_id, bibpatch.Keyboard().name) == bib.DEFAULT_KEYBOARD
 
 
 def _run_desktop_script(
@@ -2209,24 +2255,24 @@ def _run_desktop_script(
     # ones, so a real rm here would reach outside the temporary directory — and
     # what the removal was asked to delete is worth asserting anyway.
     (bin_dir / "rm").write_text(f'#!/bin/sh\necho "$@" >> {home}/rm.log\n')
-    # Faked as well, so a test never reads a real log — and CIB_LOG below keeps the
+    # Faked as well, so a test never reads a real log — and BIB_LOG below keeps the
     # script from creating one in the host's /tmp in the first place.
     (bin_dir / "tail").write_text('#!/bin/sh\necho "(tail $*)"\n')
     for name in ("xrandr", "pgrep", "nohup", "rm", "tail"):
         (bin_dir / name).chmod(0o755)
     # Shortened, or the failure case would sit out the full production wait.
-    original_wait = cib.LAUNCH_WAIT_SECS
-    cib.LAUNCH_WAIT_SECS = 1
+    original_wait = bib.LAUNCH_WAIT_SECS
+    bib.LAUNCH_WAIT_SECS = 1
     try:
-        script = cib.desktop_script(cibbrowsers.BROWSERS[browser])
+        script = bib.desktop_script(bibbrowsers.BROWSERS[browser])
     finally:
-        cib.LAUNCH_WAIT_SECS = original_wait
+        bib.LAUNCH_WAIT_SECS = original_wait
     result = subprocess.run(  # noqa: S603
         ["/bin/sh", "-c", script],
         env={
             "HOME": str(home),
             "RES": resolution,
-            "CIB_LOG": str(home / f"{browser}.log"),
+            "BIB_LOG": str(home / f"{browser}.log"),
             "PATH": f"{bin_dir}:/usr/bin:/bin",
         },
         capture_output=True,
@@ -2252,13 +2298,13 @@ def test_the_desktop_script_launches_the_browser_the_image_actually_holds(key):
     # started nothing at all for the other two.
     import tempfile
 
-    browser = cibbrowsers.BROWSERS[key]
+    browser = bibbrowsers.BROWSERS[key]
     with tempfile.TemporaryDirectory() as tmp:
         run = _run_desktop_script(Path(tmp), "1920x1200", browser=key)
     assert "-s 1920x1200" in run.mode
     assert browser.container_bin in run.launch
     assert run.stderr == ""
-    profile = f"{cib.KASM_HOME}/{browser.container_profile}"
+    profile = f"{bib.KASM_HOME}/{browser.container_profile}"
     if browser.settings == "firefox":
         # Firefox rejects both of these, and would have opened them as file names.
         assert "--user-data-dir" not in run.launch
@@ -2286,13 +2332,13 @@ def test_the_desktop_script_skips_xrandr_when_no_mode_was_asked_for():
 
     with tempfile.TemporaryDirectory() as tmp:
         run = _run_desktop_script(Path(tmp), "")
-    assert run.mode == "", "an empty CIB_RESOLUTION means follow the browser window"
-    assert cibbrowsers.BROWSERS["chrome"].container_bin in run.launch
+    assert run.mode == "", "an empty BIB_RESOLUTION means follow the browser window"
+    assert bibbrowsers.BROWSERS["chrome"].container_bin in run.launch
 
 
 def test_the_desktop_script_reports_a_browser_that_never_came_up():
     # `nohup ... &` exits 0 the moment the shell forks, so a browser that is not in
-    # the image at all used to be a silent success: a black desktop, and cib saying
+    # the image at all used to be a silent success: a black desktop, and bib saying
     # everything was fine. ensure_desktop warns on any output, so saying it here is
     # what makes it visible.
     import tempfile
@@ -2318,11 +2364,11 @@ def test_container_running_reads_the_state_not_just_the_exit_code(
     # With `or` instead of `and`, a stopped container reports as running and
     # `box up` prints "Already running" for something dead.
     monkeypatch.setattr(
-        cib,
+        bib,
         "run",
         lambda *a, **k: subprocess.CompletedProcess([], returncode, stdout=stdout, stderr=""),
     )
-    assert cib.container_running("podman", cib.Config()) is expected
+    assert bib.container_running("podman", bib.Config()) is expected
 
 
 def test_ui_status_reports_the_code_and_none_when_nothing_answers(monkeypatch):
@@ -2344,17 +2390,17 @@ def test_ui_status_reports_the_code_and_none_when_nothing_answers(monkeypatch):
                 raise self.answer
             return self.answer
 
-    monkeypatch.setattr(cib.urllib.request, "build_opener", lambda *h: _Opener(_Response()))
-    assert cib.ui_status(cib.Config()) == 200
-    assert cib.ui_is_up(cib.Config()) is True
+    monkeypatch.setattr(bib.urllib.request, "build_opener", lambda *h: _Opener(_Response()))
+    assert bib.ui_status(bib.Config()) == 200
+    assert bib.ui_is_up(bib.Config()) is True
 
     monkeypatch.setattr(
-        cib.urllib.request,
+        bib.urllib.request,
         "build_opener",
         lambda *h: _Opener(urllib.error.URLError("connection refused")),
     )
-    assert cib.ui_status(cib.Config()) is None
-    assert cib.ui_is_up(cib.Config()) is False
+    assert bib.ui_status(bib.Config()) is None
+    assert bib.ui_is_up(bib.Config()) is False
 
 
 def test_the_health_check_never_goes_through_a_proxy(monkeypatch):
@@ -2371,9 +2417,9 @@ def test_the_health_check_never_goes_through_a_proxy(monkeypatch):
         return _Opener()
 
     monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:3128")
-    monkeypatch.setattr(cib.urllib.request, "build_opener", fake_build_opener)
-    cib.ui_status(cib.Config())
-    proxy = next(h for h in handlers["given"] if isinstance(h, cib.urllib.request.ProxyHandler))
+    monkeypatch.setattr(bib.urllib.request, "build_opener", fake_build_opener)
+    bib.ui_status(bib.Config())
+    proxy = next(h for h in handlers["given"] if isinstance(h, bib.urllib.request.ProxyHandler))
     assert proxy.proxies == {}, "an empty proxy map is what bypasses the environment"
 
 
@@ -2384,13 +2430,13 @@ def test_a_missing_patcher_is_named_before_the_download_starts(credentials, monk
     # It used to be found only in the patch step, so a build that could never
     # finish still downloaded ~15 GB and installed macOS first.
     calls: list[str] = []
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
-    monkeypatch.setattr(cib, "sudo_is_cached", lambda: True)
-    monkeypatch.setattr(cib, "find_guest_python", lambda: "/usr/bin/python3")
-    monkeypatch.setattr(cib, "PATCHER", tmp_path / "not-shipped" / "cibpatch.py")
-    monkeypatch.setattr(cib, "run", lambda *a, **k: calls.append(a) or None)
-    with pytest.raises(cib.Failure, match="patcher is missing"):
-        cib.cmd_vm_create("tart", cib.VmConfig())
+    monkeypatch.setattr(bib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(bib, "sudo_is_cached", lambda: True)
+    monkeypatch.setattr(bib, "find_guest_python", lambda: "/usr/bin/python3")
+    monkeypatch.setattr(bib, "PATCHER", tmp_path / "not-shipped" / "bibpatch.py")
+    monkeypatch.setattr(bib, "run", lambda *a, **k: calls.append(a) or None)
+    with pytest.raises(bib.Failure, match="patcher is missing"):
+        bib.cmd_vm_create("tart", bib.VmConfig())
     assert calls == [], "nothing may be downloaded before the check"
 
 
@@ -2398,62 +2444,62 @@ def test_a_missing_sudo_credential_is_named_before_the_download_starts(
     credentials, monkeypatch, tmp_path
 ):
     calls: list[str] = []
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
-    monkeypatch.setattr(cib, "sudo_is_cached", lambda: False)
-    monkeypatch.setattr(cib, "run", lambda *a, **k: calls.append(a) or None)
-    with pytest.raises(cib.Failure, match="Nothing has been downloaded yet"):
-        cib.cmd_vm_create("tart", cib.VmConfig())
+    monkeypatch.setattr(bib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(bib, "sudo_is_cached", lambda: False)
+    monkeypatch.setattr(bib, "run", lambda *a, **k: calls.append(a) or None)
+    with pytest.raises(bib.Failure, match="Nothing has been downloaded yet"):
+        bib.cmd_vm_create("tart", bib.VmConfig())
     assert calls == []
 
 
 def test_a_second_account_on_the_same_uid_is_refused(tmp_path, monkeypatch):
-    # uid is fixed at 501, so 'CIB_VM_USER=bob cib vm prepare' over a guest built as
+    # uid is fixed at 501, so 'BIB_VM_USER=bob bib vm prepare' over a guest built as
     # 'admin' would give bob full access to admin's home, Chrome profile and login
     # keychain — and nothing said so.
-    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g, **kw: None)
+    monkeypatch.setattr(bibpatch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(bibpatch.os, "chown", lambda p, u, g, **kw: None)
     root = _guest_volume(tmp_path)
-    cibpatch.patch(root, cibpatch.Account("admin", "pw"))
-    with pytest.raises(cibpatch.PatchError, match="already has an account 'admin'"):
-        cibpatch.patch(root, cibpatch.Account("bob", "pw"))
+    bibpatch.patch(root, bibpatch.Account("admin", "pw"))
+    with pytest.raises(bibpatch.PatchError, match="already has an account 'admin'"):
+        bibpatch.patch(root, bibpatch.Account("bob", "pw"))
 
 
 def test_preparing_the_same_account_twice_is_still_allowed(tmp_path, monkeypatch):
-    # 'cib vm prepare' after a failed patch is the documented retry, so the guard
+    # 'bib vm prepare' after a failed patch is the documented retry, so the guard
     # must not turn it into an error.
-    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g, **kw: None)
+    monkeypatch.setattr(bibpatch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(bibpatch.os, "chown", lambda p, u, g, **kw: None)
     root = _guest_volume(tmp_path)
-    cibpatch.patch(root, cibpatch.Account("admin", "pw"))
-    cibpatch.patch(root, cibpatch.Account("admin", "pw"))  # must not raise
+    bibpatch.patch(root, bibpatch.Account("admin", "pw"))
+    bibpatch.patch(root, bibpatch.Account("admin", "pw"))  # must not raise
 
 
 def test_logs_reports_an_engine_failure_as_a_failure(monkeypatch):
-    # It used to exit 0 whatever the engine did, so `cib box logs > out.txt || handle`
+    # It used to exit 0 whatever the engine did, so `bib box logs > out.txt || handle`
     # never fired and out.txt was silently empty.
     monkeypatch.setattr(
-        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="")
+        bib, "run", lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="")
     )
-    with pytest.raises(cib.Failure, match="cib box status"):
-        cib.cmd_logs("podman", cib.Config())
+    with pytest.raises(bib.Failure, match="bib box status"):
+        bib.cmd_logs("podman", bib.Config())
 
 
 def test_logs_stays_quiet_when_the_engine_is_happy(monkeypatch):
     monkeypatch.setattr(
-        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        bib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="", stderr="")
     )
-    cib.cmd_logs("podman", cib.Config())  # must not raise
+    bib.cmd_logs("podman", bib.Config())  # must not raise
 
 
 def test_the_guest_script_keeps_its_scratch_space_out_of_tmp():
     # /tmp in the guest is writable by every account there, so a staged Chrome.app
     # could be swapped between the copy and the move into /Applications. It also
     # made two concurrent test runs share host paths and delete each other's.
-    script = cib.guest_install_script("pw")
+    script = bib.guest_install_script("pw")
     body = "\n".join(ln for ln in script.split("\n") if not ln.lstrip().startswith("#"))
     # Spelled this way so the assertion itself is not a hardcoded temp path.
     assert not re.search(r"/tm[p]/", body)
-    assert 'CIB_WORK="$HOME/.cache/cib"' in body
+    assert 'BIB_WORK="$HOME/.cache/bib"' in body
     assert "trap cleanup EXIT" in body, "the scratch space must be cleaned up"
     # The detach has to come before the rm: rm -rf over a mounted DMG recurses into
     # a read-only volume, fails, and leaves the image attached — so the next run
@@ -2466,9 +2512,9 @@ def test_the_guest_script_keeps_its_scratch_space_out_of_tmp():
 def test_the_guest_script_cleans_up_after_itself_even_when_it_fails(tmp_path):
     # The trap is the only cleanup: an aborted install must not leave a half-copied
     # Chrome and a mounted disk image in the account's home for ever.
-    result = _run_guest_script(cib.guest_install_script("pw"), tmp_path, share_exists=False)
+    result = _run_guest_script(bib.guest_install_script("pw"), tmp_path, share_exists=False)
     assert result.returncode != 0, "a missing share is still a failure"
-    assert not (tmp_path / ".cache" / "cib").exists()
+    assert not (tmp_path / ".cache" / "bib").exists()
 
 
 # --- the clipboard agent, which was started by a flag that does not exist -------
@@ -2478,20 +2524,20 @@ def test_the_clipboard_agent_is_started_by_launchd_not_an_invented_flag():
     # `--install-daemon=launchd` was never a real flag; the agent's own README says
     # it is started from a launchd plist. So it was downloaded, installed, and never
     # ran — and copy-paste, which the generated password exists for, never worked.
-    script = cib.guest_install_script("pw")
+    script = bib.guest_install_script("pw")
     assert "--install-daemon" not in script
     assert "--run-agent" in script, "the session agent is the one that sees the pasteboard"
     assert "--run-daemon" not in script, "a root daemon cannot reach the pasteboard"
-    assert cib.AGENT_PLIST_PATH in script
+    assert bib.AGENT_PLIST_PATH in script
     assert "launchctl bootstrap" in script
 
 
 def test_the_agent_plist_is_a_plist_launchd_will_accept():
     import plistlib
 
-    record = plistlib.loads(cib.AGENT_PLIST.encode())
-    assert record["Label"] == cib.AGENT_LABEL
-    assert record["ProgramArguments"] == [cib.AGENT_BIN, "--run-agent"]
+    record = plistlib.loads(bib.AGENT_PLIST.encode())
+    assert record["Label"] == bib.AGENT_LABEL
+    assert record["ProgramArguments"] == [bib.AGENT_BIN, "--run-agent"]
     assert record["RunAtLoad"] is True
     assert record["KeepAlive"] is True
 
@@ -2501,60 +2547,60 @@ def test_the_agent_plist_survives_the_shell_that_writes_it(tmp_path):
     # mangled newline would install a plist launchd silently ignores.
     import plistlib
 
-    script = cib.guest_install_script("pw")
-    end_marker = '> "$CIB_WORK/agent.plist"'
+    script = bib.guest_install_script("pw")
+    end_marker = '> "$BIB_WORK/agent.plist"'
     end = script.index(end_marker) + len(end_marker)
     # The first printf in the script belongs to sudo_pw; this is the last one before
     # the plist is written.
     start = script.rindex("printf ", 0, end)
     out = tmp_path / "agent.plist"
-    statement = script[start:end].replace('"$CIB_WORK/agent.plist"', str(out))
+    statement = script[start:end].replace('"$BIB_WORK/agent.plist"', str(out))
     subprocess.run(["/bin/sh", "-c", statement], check=True, capture_output=True)  # noqa: S603
-    assert plistlib.loads(out.read_bytes())["Label"] == cib.AGENT_LABEL
+    assert plistlib.loads(out.read_bytes())["Label"] == bib.AGENT_LABEL
 
 
 # --- settings that used to fail late, or quietly do the wrong thing ------------
 
 
 def test_an_empty_share_is_refused_rather_than_sharing_the_current_directory(monkeypatch):
-    # "~/Downloads/chrome-vm" expands to the working directory when empty, and the
+    # "~/Downloads/browser-vm" expands to the working directory when empty, and the
     # guest would get whatever happened to be there.
-    monkeypatch.setenv("CIB_VM_SHARE", "  ")
-    with pytest.raises(cib.Failure, match="CIB_VM_SHARE is empty"):
-        cib.VmConfig().check()
+    monkeypatch.setenv("BIB_VM_SHARE", "  ")
+    with pytest.raises(bib.Failure, match="BIB_VM_SHARE is empty"):
+        bib.VmConfig().check()
 
 
 @pytest.mark.parametrize("value", ["1920", "1920*1200", "big", "1920x"])
 def test_a_malformed_display_is_refused_like_the_box_variant_does(monkeypatch, value):
-    monkeypatch.setenv("CIB_VM_DISPLAY", value)
-    with pytest.raises(cib.Failure, match="CIB_VM_DISPLAY"):
-        cib.VmConfig().check()
+    monkeypatch.setenv("BIB_VM_DISPLAY", value)
+    with pytest.raises(bib.Failure, match="BIB_VM_DISPLAY"):
+        bib.VmConfig().check()
 
 
 def test_a_well_formed_display_and_share_pass(monkeypatch):
-    monkeypatch.setenv("CIB_VM_DISPLAY", "1280x800")
-    cib.VmConfig().check()  # must not raise
+    monkeypatch.setenv("BIB_VM_DISPLAY", "1280x800")
+    bib.VmConfig().check()  # must not raise
 
 
 def test_deleting_the_vm_takes_its_password_and_keys_with_it(credentials, monkeypatch):
-    # Left behind, the next build silently reuses them, and 'cib vm password' keeps
+    # Left behind, the next build silently reuses them, and 'bib vm password' keeps
     # printing a password for a guest that no longer exists.
-    cib.guest_password(create=True)
-    cib.ensure_vm_keys()
+    bib.guest_password(create=True)
+    bib.ensure_vm_keys()
     monkeypatch.setattr("builtins.input", lambda *a: "y")
     monkeypatch.setattr(
-        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        bib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="", stderr="")
     )
-    cib.cmd_vm_delete("tart", cib.VmConfig())
-    for gone in (cib.CREDENTIALS, cib.VM_KEY, cib.VM_HOST_KEY, cib.KNOWN_HOSTS):
+    bib.cmd_vm_delete("tart", bib.VmConfig())
+    for gone in (bib.CREDENTIALS, bib.VM_KEY, bib.VM_HOST_KEY, bib.KNOWN_HOSTS):
         assert not gone.exists(), f"{gone.name} outlived the VM"
 
 
 def test_a_cancelled_delete_keeps_everything(credentials, monkeypatch):
-    cib.guest_password(create=True)
+    bib.guest_password(create=True)
     monkeypatch.setattr("builtins.input", lambda *a: "n")
-    cib.cmd_vm_delete("tart", cib.VmConfig())
-    assert cib.CREDENTIALS.exists()
+    bib.cmd_vm_delete("tart", bib.VmConfig())
+    assert bib.CREDENTIALS.exists()
 
 
 @pytest.mark.parametrize(
@@ -2569,23 +2615,23 @@ def test_a_cancelled_delete_keeps_everything(credentials, monkeypatch):
 def test_the_host_time_zone_is_read_from_the_localtime_link(monkeypatch, link, expected):
     # A single-component zone such as UTC is its own city, not a reason to fall back
     # to the hardcoded default.
-    monkeypatch.setattr(cib.os, "readlink", lambda p: link)
-    result = cib.host_time_zone()
+    monkeypatch.setattr(bib.os, "readlink", lambda p: link)
+    result = bib.host_time_zone()
     assert result == (expected or ("America/Argentina/Buenos_Aires", "Buenos Aires"))
 
 
 def test_the_guest_gets_the_key_and_the_host_key_it_will_be_checked_against(tmp_path, monkeypatch):
-    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g, **kw: None)
+    monkeypatch.setattr(bibpatch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(bibpatch.os, "chown", lambda p, u, g, **kw: None)
     root = _guest_volume(tmp_path)
-    keys = cibpatch.Keys(
-        authorized="ssh-ed25519 AAAAPUB cib",
+    keys = bibpatch.Keys(
+        authorized="ssh-ed25519 AAAAPUB bib",
         host_private="-----BEGIN OPENSSH PRIVATE KEY-----\nx\n",
-        host_public="ssh-ed25519 AAAAHOST cib-guest",
+        host_public="ssh-ed25519 AAAAHOST bib-guest",
     )
-    cibpatch.patch(root, cibpatch.Account("admin", "pw"), None, keys)
+    bibpatch.patch(root, bibpatch.Account("admin", "pw"), None, keys)
     authorized = root / "Users/admin/.ssh/authorized_keys"
-    assert authorized.read_text().strip() == "ssh-ed25519 AAAAPUB cib"
+    assert authorized.read_text().strip() == "ssh-ed25519 AAAAPUB bib"
     assert authorized.stat().st_mode & 0o777 == 0o600
     assert (root / "Users/admin/.ssh").stat().st_mode & 0o777 == 0o700
     host = root / "private/etc/ssh/ssh_host_ed25519_key"
@@ -2597,7 +2643,7 @@ def test_the_guest_gets_the_key_and_the_host_key_it_will_be_checked_against(tmp_
 def test_a_secret_is_never_briefly_world_readable(tmp_path):
     # Creating the file and chmod-ing it afterwards leaves a window in between.
     target = tmp_path / "secret"
-    cibpatch.write_private(target, b"x")
+    bibpatch.write_private(target, b"x")
     assert target.stat().st_mode & 0o777 == 0o600
 
 
@@ -2608,32 +2654,32 @@ def test_a_planted_fifo_does_not_hang_the_root_patcher(tmp_path):
     root = tmp_path / "volume"
     (root / "private/etc").mkdir(parents=True)
     os.mkfifo(root / "private/etc/kcpassword")
-    with pytest.raises(cibpatch.PatchError, match="neither a directory nor a regular file"):
-        cibpatch.guest_path(root, "private/etc/kcpassword")
+    with pytest.raises(bibpatch.PatchError, match="neither a directory nor a regular file"):
+        bibpatch.guest_path(root, "private/etc/kcpassword")
 
 
 def test_a_fifo_in_the_middle_of_the_path_is_refused_too(tmp_path):
     root = tmp_path / "volume"
     (root / "private").mkdir(parents=True)
     os.mkfifo(root / "private/etc")
-    with pytest.raises(cibpatch.PatchError, match="neither a directory nor a regular file"):
-        cibpatch.guest_path(root, "private/etc/kcpassword")
+    with pytest.raises(bibpatch.PatchError, match="neither a directory nor a regular file"):
+        bibpatch.guest_path(root, "private/etc/kcpassword")
 
 
 # --- round 13's remainder ------------------------------------------------------
 
 
 def test_shell_refuses_instead_of_reporting_a_session_it_never_opened(monkeypatch):
-    # `cib box shell && echo attached` printed the engine's refusal and then
+    # `bib box shell && echo attached` printed the engine's refusal and then
     # "attached", because the exec's exit code was ignored.
-    monkeypatch.setattr(cib, "container_running", lambda *a, **k: False)
-    with pytest.raises(cib.Failure, match="cib box up"):
-        cib.cmd_shell("podman", cib.Config())
+    monkeypatch.setattr(bib, "container_running", lambda *a, **k: False)
+    with pytest.raises(bib.Failure, match="bib box up"):
+        bib.cmd_shell("podman", bib.Config())
 
 
 def test_shell_opens_when_the_container_is_there(calls, monkeypatch):
-    monkeypatch.setattr(cib, "container_running", lambda *a, **k: True)
-    cib.cmd_shell("podman", cib.Config())
+    monkeypatch.setattr(bib, "container_running", lambda *a, **k: True)
+    bib.cmd_shell("podman", bib.Config())
     assert "exec" in flat(calls)
 
 
@@ -2641,7 +2687,7 @@ def test_the_first_pull_is_visible_instead_of_several_silent_gigabytes(calls, mo
     # `run -d` is captured, which also swallowed the whole first pull: one line of
     # output and then nothing at all for several GB.
     monkeypatch.setattr(
-        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="")
+        bib, "run", lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="")
     )
     seen = {}
 
@@ -2649,8 +2695,8 @@ def test_the_first_pull_is_visible_instead_of_several_silent_gigabytes(calls, mo
         seen.setdefault("cmds", []).append((args, kwargs))
         return subprocess.CompletedProcess([], 0 if args[0] == "pull" else 1, stdout="", stderr="")
 
-    monkeypatch.setattr(cib, "run", fake)
-    cib.ensure_image("podman", cib.Config())
+    monkeypatch.setattr(bib, "run", fake)
+    bib.ensure_image("podman", bib.Config())
     pull = next(a for a, _ in seen["cmds"] if a[0] == "pull")
     kwargs = next(k for a, k in seen["cmds"] if a[0] == "pull")
     assert "--platform" in pull
@@ -2660,13 +2706,13 @@ def test_the_first_pull_is_visible_instead_of_several_silent_gigabytes(calls, mo
 def test_an_image_already_present_in_the_right_architecture_is_not_pulled_again(monkeypatch):
     pulled = []
     monkeypatch.setattr(
-        cib,
+        bib,
         "run",
         lambda e, *a, **k: (
             pulled.append(a[0]) or subprocess.CompletedProcess([], 0, stdout="amd64\n", stderr="")
         ),
     )
-    cib.ensure_image("podman", cib.Config())
+    bib.ensure_image("podman", bib.Config())
     assert "pull" not in pulled
 
 
@@ -2675,31 +2721,31 @@ def test_an_image_of_the_wrong_architecture_is_pulled_again_visibly(monkeypatch)
     # linux/amd64` then pulls the amd64 one anyway — captured, so silently.
     seen = []
     monkeypatch.setattr(
-        cib,
+        bib,
         "run",
         lambda e, *a, **k: (
             seen.append((a[0], k.get("capture")))
             or subprocess.CompletedProcess([], 0, stdout="arm64\n", stderr="")
         ),
     )
-    cib.ensure_image("podman", cib.Config())
+    bib.ensure_image("podman", bib.Config())
     assert ("pull", None) in seen or ("pull", False) in seen
 
 
 def test_a_failed_pull_is_reported(monkeypatch):
     monkeypatch.setattr(
-        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="")
+        bib, "run", lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="")
     )
-    with pytest.raises(cib.Failure, match="could not pull"):
-        cib.ensure_image("podman", cib.Config())
+    with pytest.raises(bib.Failure, match="could not pull"):
+        bib.ensure_image("podman", bib.Config())
 
 
 @pytest.mark.parametrize("value,expected", [["1920X1200", "1920x1200"], ["1280 x 800", "1280x800"]])
 def test_the_vm_display_is_normalised_like_the_box_one(monkeypatch, value, expected):
     # tart takes 1920X1200 without complaint and then ignores it, leaving the guest
     # at 1024x768 with nothing said.
-    monkeypatch.setenv("CIB_VM_DISPLAY", value)
-    vm = cib.VmConfig()
+    monkeypatch.setenv("BIB_VM_DISPLAY", value)
+    vm = bib.VmConfig()
     vm.check()
     assert vm.normalised_display == expected
 
@@ -2709,14 +2755,14 @@ def test_an_account_the_guest_already_has_is_not_overwritten(tmp_path, monkeypat
     # with a uid-501 one leaves the guest with no working sudo at all.
     import plistlib
 
-    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g, **kw: None)
+    monkeypatch.setattr(bibpatch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(bibpatch.os, "chown", lambda p, u, g, **kw: None)
     root = _guest_volume(tmp_path)
     users = root / "private/var/db/dslocal/nodes/Default/users"
     with (users / "root.plist").open("wb") as fh:
         plistlib.dump({"name": ["root"], "uid": ["0"]}, fh, fmt=plistlib.FMT_BINARY)
-    with pytest.raises(cibpatch.PatchError, match="already has an account called 'root'"):
-        cibpatch.patch(root, cibpatch.Account("root", "pw"))
+    with pytest.raises(bibpatch.PatchError, match="already has an account called 'root'"):
+        bibpatch.patch(root, bibpatch.Account("root", "pw"))
     assert plistlib.loads((users / "root.plist").read_bytes())["uid"] == ["0"]
 
 
@@ -2743,11 +2789,11 @@ def test_ownership_is_read_from_this_volumes_line_only(monkeypatch, mount_output
     # so another disk on the host could vouch for this one — and every chown
     # afterwards would be a silent no-op.
     monkeypatch.setattr(
-        cibpatch.subprocess,
+        bibpatch.subprocess,
         "run",
         lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=mount_output, stderr=""),
     )
-    assert cibpatch.ownership_is_honoured(Path("/Volumes/Data")) is expected
+    assert bibpatch.ownership_is_honoured(Path("/Volumes/Data")) is expected
 
 
 @pytest.mark.parametrize("content", [[1, 2, 3], "a string", 42])
@@ -2760,7 +2806,7 @@ def test_a_plist_that_is_not_a_dictionary_is_not_a_traceback(tmp_path, content):
     target.parent.mkdir(parents=True)
     with target.open("wb") as fh:
         plistlib.dump(content, fh, fmt=plistlib.FMT_BINARY)
-    assert cibpatch.read_plist(tmp_path, "Library/Preferences/com.apple.loginwindow.plist") == {}
+    assert bibpatch.read_plist(tmp_path, "Library/Preferences/com.apple.loginwindow.plist") == {}
 
 
 def test_a_diskutil_that_will_not_describe_the_volume_is_reported(monkeypatch):
@@ -2771,58 +2817,58 @@ def test_a_diskutil_that_will_not_describe_the_volume_is_reported(monkeypatch):
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(cibpatch.subprocess, "run", fake)
-    with pytest.raises(cibpatch.PatchError, match="could not find disk"):
-        cibpatch.mount("/dev/disk9s1")
+    monkeypatch.setattr(bibpatch.subprocess, "run", fake)
+    with pytest.raises(bibpatch.PatchError, match="could not find disk"):
+        bibpatch.mount("/dev/disk9s1")
 
 
 def test_the_agent_directory_is_created_before_the_agent_is_installed():
     # BSD install does not create its target directory, and a fresh guest can have
     # /usr/local with no bin in it.
-    script = cib.guest_install_script("pw")
-    assert f'sudo_pw install -d -m 0755 "$(dirname {cib.AGENT_BIN})"' in script
+    script = bib.guest_install_script("pw")
+    assert f'sudo_pw install -d -m 0755 "$(dirname {bib.AGENT_BIN})"' in script
     assert script.index("install -d") < script.index(
-        f'"$CIB_WORK/tart-guest-agent" {cib.AGENT_BIN}'
+        f'"$BIB_WORK/tart-guest-agent" {bib.AGENT_BIN}'
     )
 
 
 def test_a_python3_that_cannot_run_is_not_treated_as_an_interpreter(monkeypatch):
     # /usr/bin/python3 exists on every Mac and is a stub without the Command Line
     # Tools: it is executable, and exits non-zero the moment it runs.
-    monkeypatch.setattr(cib.shutil, "which", lambda name: None)
-    monkeypatch.setattr(cib.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess([], 1))
-    with pytest.raises(cib.Failure, match="xcode-select --install"):
-        cib.find_guest_python()
+    monkeypatch.setattr(bib.shutil, "which", lambda name: None)
+    monkeypatch.setattr(bib.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess([], 1))
+    with pytest.raises(bib.Failure, match="xcode-select --install"):
+        bib.find_guest_python()
 
 
 def test_a_working_python3_is_used_as_it_is(monkeypatch):
-    monkeypatch.setattr(cib.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess([], 0))
-    assert cib.find_guest_python() == "/usr/bin/python3"
+    monkeypatch.setattr(bib.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess([], 0))
+    assert bib.find_guest_python() == "/usr/bin/python3"
 
 
 # --- round 14 and 15 -----------------------------------------------------------
 
 
 def test_a_delete_that_failed_keeps_the_password_and_keys(credentials, monkeypatch):
-    # Wiping them on a failed delete locks cib out of a guest that is still there.
-    cib.guest_password(create=True)
-    cib.ensure_vm_keys()
+    # Wiping them on a failed delete locks bib out of a guest that is still there.
+    bib.guest_password(create=True)
+    bib.ensure_vm_keys()
     monkeypatch.setattr("builtins.input", lambda *a: "y")
     monkeypatch.setattr(
-        cib,
+        bib,
         "run",
         lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="VM is running"),
     )
-    with pytest.raises(cib.Failure, match="nothing is locked out"):
-        cib.cmd_vm_delete("tart", cib.VmConfig())
-    for kept in (cib.CREDENTIALS, cib.VM_KEY, cib.VM_HOST_KEY, cib.KNOWN_HOSTS):
+    with pytest.raises(bib.Failure, match="nothing is locked out"):
+        bib.cmd_vm_delete("tart", bib.VmConfig())
+    for kept in (bib.CREDENTIALS, bib.VM_KEY, bib.VM_HOST_KEY, bib.KNOWN_HOSTS):
         assert kept.exists(), f"{kept.name} was destroyed by a delete that did not happen"
 
 
 def test_ssh_refuses_every_way_of_being_asked_for_a_password(credentials):
     # PasswordAuthentication=no alone leaves keyboard-interactive, which sshd offers
     # the same password through.
-    cmd = cib.ssh_command(cib.VmConfig(), "192.168.1.50")
+    cmd = bib.ssh_command(bib.VmConfig(), "192.168.1.50")
     assert "PasswordAuthentication=no" in cmd
     assert "KbdInteractiveAuthentication=no" in cmd
     assert "NumberOfPasswordPrompts=0" in cmd
@@ -2831,14 +2877,14 @@ def test_ssh_refuses_every_way_of_being_asked_for_a_password(credentials):
 def test_the_interpreter_is_checked_before_the_download_too(credentials, monkeypatch, tmp_path):
     # The README promises the preflight catches this; it used to run after the build.
     calls: list = []
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
-    monkeypatch.setattr(cib, "sudo_is_cached", lambda: True)
-    monkeypatch.setattr(cib, "find_patcher", lambda: tmp_path / "cibpatch.py")
-    monkeypatch.setattr(cib.shutil, "which", lambda name: None)
-    monkeypatch.setattr(cib.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess([], 1))
-    monkeypatch.setattr(cib, "run", lambda *a, **k: calls.append(a) or None)
-    with pytest.raises(cib.Failure, match="xcode-select --install"):
-        cib.cmd_vm_create("tart", cib.VmConfig())
+    monkeypatch.setattr(bib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(bib, "sudo_is_cached", lambda: True)
+    monkeypatch.setattr(bib, "find_patcher", lambda: tmp_path / "bibpatch.py")
+    monkeypatch.setattr(bib.shutil, "which", lambda name: None)
+    monkeypatch.setattr(bib.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess([], 1))
+    monkeypatch.setattr(bib, "run", lambda *a, **k: calls.append(a) or None)
+    with pytest.raises(bib.Failure, match="xcode-select --install"):
+        bib.cmd_vm_create("tart", bib.VmConfig())
     assert calls == [], "nothing may be downloaded before the check"
 
 
@@ -2847,14 +2893,14 @@ def test_preparing_twice_keeps_the_accounts_generated_uid(tmp_path, monkeypatch)
     # and staff pointing at a user that no longer exists under that id.
     import plistlib
 
-    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g, **kw: None)
+    monkeypatch.setattr(bibpatch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(bibpatch.os, "chown", lambda p, u, g, **kw: None)
     root = _guest_volume(tmp_path)
     users = root / "private/var/db/dslocal/nodes/Default/users"
     groups = root / "private/var/db/dslocal/nodes/Default/groups"
-    cibpatch.patch(root, cibpatch.Account("admin", "pw"))
+    bibpatch.patch(root, bibpatch.Account("admin", "pw"))
     first = plistlib.loads((users / "admin.plist").read_bytes())["generateduid"][0]
-    cibpatch.patch(root, cibpatch.Account("admin", "pw"))
+    bibpatch.patch(root, bibpatch.Account("admin", "pw"))
     assert plistlib.loads((users / "admin.plist").read_bytes())["generateduid"][0] == first
     members = plistlib.loads((groups / "admin.plist").read_bytes())["groupmembers"]
     assert members == [first], "the group must still name the account that exists"
@@ -2866,19 +2912,19 @@ def test_a_malformed_xml_plist_is_not_a_traceback(tmp_path):
     target = tmp_path / "Library" / "Preferences" / "com.apple.loginwindow.plist"
     target.parent.mkdir(parents=True)
     target.write_bytes(b'<?xml version="1.0"?>\n<plist version="1.0"><dict><key>x')
-    assert cibpatch.read_plist(tmp_path, "Library/Preferences/com.apple.loginwindow.plist") == {}
+    assert bibpatch.read_plist(tmp_path, "Library/Preferences/com.apple.loginwindow.plist") == {}
 
 
 def test_each_vm_name_keeps_its_own_password_and_keys(monkeypatch, tmp_path):
-    # They used to sit flat in one directory, so a second CIB_VM_NAME reused the
+    # They used to sit flat in one directory, so a second BIB_VM_NAME reused the
     # first one's key — and deleting either took the other's away.
-    monkeypatch.setattr(cib.Path, "home", classmethod(lambda c: tmp_path))
-    first = cib.secrets_dir()
-    assert first.name == "chrome-vm"
-    monkeypatch.setenv("CIB_VM_NAME", "other")
-    assert cib.secrets_dir() != first
-    assert cib.secrets_dir().name == "other"
-    assert cib.secrets_dir().parent == first.parent
+    monkeypatch.setattr(bib.Path, "home", classmethod(lambda c: tmp_path))
+    first = bib.secrets_dir()
+    assert first.name == "browser-vm"
+    monkeypatch.setenv("BIB_VM_NAME", "other")
+    assert bib.secrets_dir() != first
+    assert bib.secrets_dir().name == "other"
+    assert bib.secrets_dir().parent == first.parent
 
 
 def test_the_six_files_that_have_to_be_migrated_are_named_here_too():
@@ -2886,7 +2932,7 @@ def test_the_six_files_that_have_to_be_migrated_are_named_here_too():
     # only ever compared with itself: dropping "vm-credentials" from it left the
     # password stranded in the flat directory with the suite green, and the first
     # command an upgrading user ran died on a guest that exists.
-    assert set(cib.SECRET_NAMES) == {
+    assert set(bib.SECRET_NAMES) == {
         "vm-credentials",
         "vm-key",
         "vm-key.pub",
@@ -2894,98 +2940,98 @@ def test_the_six_files_that_have_to_be_migrated_are_named_here_too():
         "vm-host-key.pub",
         "vm-known-hosts",
     }
-    # And they are the files the rest of cib actually uses.
-    assert cib.CREDENTIALS.name in cib.SECRET_NAMES
-    assert cib.VM_KEY.name in cib.SECRET_NAMES
-    assert cib.VM_KEY.with_suffix(".pub").name in cib.SECRET_NAMES
-    assert cib.VM_HOST_KEY.name in cib.SECRET_NAMES
-    assert cib.VM_HOST_KEY.with_suffix(".pub").name in cib.SECRET_NAMES
-    assert cib.KNOWN_HOSTS.name in cib.SECRET_NAMES
+    # And they are the files the rest of bib actually uses.
+    assert bib.CREDENTIALS.name in bib.SECRET_NAMES
+    assert bib.VM_KEY.name in bib.SECRET_NAMES
+    assert bib.VM_KEY.with_suffix(".pub").name in bib.SECRET_NAMES
+    assert bib.VM_HOST_KEY.name in bib.SECRET_NAMES
+    assert bib.VM_HOST_KEY.with_suffix(".pub").name in bib.SECRET_NAMES
+    assert bib.KNOWN_HOSTS.name in bib.SECRET_NAMES
 
 
-def test_secrets_an_older_cib_left_flat_go_to_the_default_vm(monkeypatch, tmp_path):
+def test_secrets_an_older_bib_left_flat_go_to_the_default_vm(monkeypatch, tmp_path):
     # Nothing on disk says which guest they belong to. Moving them into whichever
     # name runs first takes them away from the guest actually using them — whose
     # disk was patched with that key pair, and which has no password fallback left.
-    monkeypatch.setattr(cib.Path, "home", classmethod(lambda c: tmp_path))
+    monkeypatch.setattr(bib.Path, "home", classmethod(lambda c: tmp_path))
     flat = tmp_path / ".config" / "browser-in-a-box"
     flat.mkdir(parents=True)
-    for name in cib.SECRET_NAMES:
+    for name in bib.SECRET_NAMES:
         (flat / name).write_text(f"old {name}\n")
-    monkeypatch.setenv("CIB_VM_NAME", "work")  # a second name runs first
-    cib.migrate_flat_secrets()
-    for name in cib.SECRET_NAMES:
-        assert (flat / cib.DEFAULT_VM_NAME / name).read_text() == f"old {name}\n"
+    monkeypatch.setenv("BIB_VM_NAME", "work")  # a second name runs first
+    bib.migrate_flat_secrets()
+    for name in bib.SECRET_NAMES:
+        assert (flat / bib.DEFAULT_VM_NAME / name).read_text() == f"old {name}\n"
         assert not (flat / name).exists(), "moved, not copied"
         assert not (flat / "work" / name).exists(), "they are not the second VM's"
 
 
 def test_the_migration_does_not_overwrite_what_is_already_there(monkeypatch, tmp_path):
-    monkeypatch.setattr(cib.Path, "home", classmethod(lambda c: tmp_path))
+    monkeypatch.setattr(bib.Path, "home", classmethod(lambda c: tmp_path))
     flat = tmp_path / ".config" / "browser-in-a-box"
-    (flat / cib.DEFAULT_VM_NAME).mkdir(parents=True)
+    (flat / bib.DEFAULT_VM_NAME).mkdir(parents=True)
     (flat / "vm-credentials").write_text("old\n")
-    (flat / cib.DEFAULT_VM_NAME / "vm-credentials").write_text("current\n")
-    cib.migrate_flat_secrets()
-    assert (flat / cib.DEFAULT_VM_NAME / "vm-credentials").read_text() == "current\n"
+    (flat / bib.DEFAULT_VM_NAME / "vm-credentials").write_text("current\n")
+    bib.migrate_flat_secrets()
+    assert (flat / bib.DEFAULT_VM_NAME / "vm-credentials").read_text() == "current\n"
 
 
-def test_delete_removes_what_an_older_cib_left_flat_too(credentials, monkeypatch, tmp_path):
+def test_delete_removes_what_an_older_bib_left_flat_too(credentials, monkeypatch, tmp_path):
     # It used to unlink per-name paths that did not exist yet, print "Deleted.",
     # and the next command migrated the flat originals back in.
-    monkeypatch.setattr(cib.Path, "home", classmethod(lambda c: tmp_path))
+    monkeypatch.setattr(bib.Path, "home", classmethod(lambda c: tmp_path))
     flat = tmp_path / ".config" / "browser-in-a-box"
     flat.mkdir(parents=True)
-    for name in cib.SECRET_NAMES:
+    for name in bib.SECRET_NAMES:
         (flat / name).write_text("old\n")
-    monkeypatch.setattr(cib, "SECRETS", flat / cib.DEFAULT_VM_NAME)
-    monkeypatch.setattr(cib, "CREDENTIALS", cib.SECRETS / "vm-credentials")
-    monkeypatch.setattr(cib, "VM_KEY", cib.SECRETS / "vm-key")
-    monkeypatch.setattr(cib, "VM_HOST_KEY", cib.SECRETS / "vm-host-key")
-    monkeypatch.setattr(cib, "KNOWN_HOSTS", cib.SECRETS / "vm-known-hosts")
+    monkeypatch.setattr(bib, "SECRETS", flat / bib.DEFAULT_VM_NAME)
+    monkeypatch.setattr(bib, "CREDENTIALS", bib.SECRETS / "vm-credentials")
+    monkeypatch.setattr(bib, "VM_KEY", bib.SECRETS / "vm-key")
+    monkeypatch.setattr(bib, "VM_HOST_KEY", bib.SECRETS / "vm-host-key")
+    monkeypatch.setattr(bib, "KNOWN_HOSTS", bib.SECRETS / "vm-known-hosts")
     monkeypatch.setattr("builtins.input", lambda *a: "y")
     monkeypatch.setattr(
-        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        bib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="", stderr="")
     )
-    cib.cmd_vm_delete("tart", cib.VmConfig())
-    for name in cib.SECRET_NAMES:
+    bib.cmd_vm_delete("tart", bib.VmConfig())
+    for name in bib.SECRET_NAMES:
         assert not (flat / name).exists(), f"{name} survived a delete that said Deleted."
-        assert not (flat / cib.DEFAULT_VM_NAME / name).exists()
+        assert not (flat / bib.DEFAULT_VM_NAME / name).exists()
 
 
 def test_the_shell_reports_an_exec_the_engine_refused(monkeypatch):
     # Checking the container first was not enough: the exec itself can fail, and
     # its exit code was still thrown away.
-    monkeypatch.setattr(cib, "container_running", lambda *a, **k: True)
+    monkeypatch.setattr(bib, "container_running", lambda *a, **k: True)
     monkeypatch.setattr(
-        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 125, stdout="", stderr="")
+        bib, "run", lambda *a, **k: subprocess.CompletedProcess([], 125, stdout="", stderr="")
     )
-    with pytest.raises(cib.Failure, match="could not start a shell"):
-        cib.cmd_shell("podman", cib.Config())
+    with pytest.raises(bib.Failure, match="could not start a shell"):
+        bib.cmd_shell("podman", bib.Config())
 
 
-def test_a_shell_that_exits_non_zero_is_not_a_cib_failure(monkeypatch):
-    # The user's own shell exiting 1 is their business, not a cib error.
-    monkeypatch.setattr(cib, "container_running", lambda *a, **k: True)
+def test_a_shell_that_exits_non_zero_is_not_a_bib_failure(monkeypatch):
+    # The user's own shell exiting 1 is their business, not a bib error.
+    monkeypatch.setattr(bib, "container_running", lambda *a, **k: True)
     monkeypatch.setattr(
-        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="")
+        bib, "run", lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="")
     )
-    cib.cmd_shell("podman", cib.Config())  # must not raise
+    bib.cmd_shell("podman", bib.Config())  # must not raise
 
 
 @pytest.mark.parametrize("tty,expected", [(True, "-it"), (False, "-i")])
 def test_a_pty_is_only_asked_for_when_there_is_a_terminal(monkeypatch, tty, expected):
     # podman blocks for ever allocating a pty for a stdin that is a pipe, so
-    # `cib box shell` from a script or CI hung instead of failing.
-    monkeypatch.setattr(cib, "container_running", lambda *a, **k: True)
-    monkeypatch.setattr(cib.sys.stdin, "isatty", lambda: tty, raising=False)
+    # `bib box shell` from a script or CI hung instead of failing.
+    monkeypatch.setattr(bib, "container_running", lambda *a, **k: True)
+    monkeypatch.setattr(bib.sys.stdin, "isatty", lambda: tty, raising=False)
     seen = {}
     monkeypatch.setattr(
-        cib,
+        bib,
         "run",
         lambda e, *a, **k: seen.update(args=a) or subprocess.CompletedProcess([], 0),
     )
-    cib.cmd_shell("podman", cib.Config())
+    bib.cmd_shell("podman", bib.Config())
     assert seen["args"][1] == expected
 
 
@@ -2993,23 +3039,23 @@ def test_a_pty_is_only_asked_for_when_there_is_a_terminal(monkeypatch, tty, expe
 def test_a_resolution_kasmvnc_does_not_ship_is_refused_not_merely_bounded(monkeypatch, mode):
     # In range is not the same as available: 1600x900 is smaller than the largest
     # mode and still not there, and xrandr then leaves the desktop at 1024x768
-    # while cib warned three times and reported "Ready."
-    monkeypatch.setenv("CIB_RESOLUTION", mode)
-    with pytest.raises(cib.Failure, match="not one of the modes KasmVNC"):
-        cib.Config().check()
+    # while bib warned three times and reported "Ready."
+    monkeypatch.setenv("BIB_RESOLUTION", mode)
+    with pytest.raises(bib.Failure, match="not one of the modes KasmVNC"):
+        bib.Config().check()
 
 
 @pytest.mark.parametrize("mode", ["1920x1200", "1280x800", "1024x768"])
 def test_the_modes_kasmvnc_does_ship_are_accepted(monkeypatch, mode):
-    monkeypatch.setenv("CIB_RESOLUTION", mode)
-    cib.Config().check()  # must not raise
+    monkeypatch.setenv("BIB_RESOLUTION", mode)
+    bib.Config().check()  # must not raise
 
 
 def test_the_sdist_carries_everything_its_tests_read():
     # Shipping tests/ without the files they open means the tests are there and
     # cannot run, which is the only reason to ship them.
     # Read as text, not with tomllib: that is 3.11+, and this project supports 3.10.
-    root = Path(cib.__file__).resolve().parent
+    root = Path(bib.__file__).resolve().parent
     source = (root / "pyproject.toml").read_text()
     block = re.search(
         r"\[tool\.hatch\.build\.targets\.sdist\].*?include\s*=\s*\[(.*?)\]", source, re.S
@@ -3025,59 +3071,59 @@ def test_the_default_build_installs_the_key_it_will_connect_with(
 ):
     # The packer path had a test for this and the default path had none, so both
     # `ensure_vm_keys()` and the four argv entries could be deleted with the suite
-    # green — producing exactly the "a VM cib could never connect to" the packer
+    # green — producing exactly the "a VM bib could never connect to" the packer
     # fix was written for.
     _fake_guest_disk(monkeypatch, tmp_path)
     seen = {}
     monkeypatch.setattr(
-        cib.subprocess,
+        bib.subprocess,
         "run",
         lambda cmd, **kw: (
-            (seen.update(cmd=cmd) if any("cibpatch" in str(c) for c in cmd) else None)
+            (seen.update(cmd=cmd) if any("bibpatch" in str(c) for c in cmd) else None)
             or subprocess.CompletedProcess(cmd, 0)
         ),
     )
-    cib._prepare_guest(cib.VmConfig(), "pw")
+    bib._prepare_guest(bib.VmConfig(), "pw")
     cmd = seen["cmd"]
-    assert cmd[cmd.index("--authorized-key") + 1] == str(cib.VM_KEY.with_suffix(".pub"))
-    assert cmd[cmd.index("--host-key") + 1] == str(cib.VM_HOST_KEY)
-    assert cib.KNOWN_HOSTS.exists(), "the host key has to be pinned for cib to use it"
+    assert cmd[cmd.index("--authorized-key") + 1] == str(bib.VM_KEY.with_suffix(".pub"))
+    assert cmd[cmd.index("--host-key") + 1] == str(bib.VM_HOST_KEY)
+    assert bib.KNOWN_HOSTS.exists(), "the host key has to be pinned for bib to use it"
 
 
 def test_the_default_build_generates_the_keys_if_they_are_missing(
     credentials, monkeypatch, tmp_path
 ):
     for stale in (
-        cib.VM_KEY,
-        cib.VM_KEY.with_suffix(".pub"),
-        cib.VM_HOST_KEY,
-        cib.VM_HOST_KEY.with_suffix(".pub"),
+        bib.VM_KEY,
+        bib.VM_KEY.with_suffix(".pub"),
+        bib.VM_HOST_KEY,
+        bib.VM_HOST_KEY.with_suffix(".pub"),
     ):
         stale.unlink(missing_ok=True)
     _fake_guest_disk(monkeypatch, tmp_path)
-    real = cib.subprocess.run
+    real = bib.subprocess.run
     monkeypatch.setattr(
-        cib.subprocess,
+        bib.subprocess,
         "run",
         lambda cmd, **kw: (
             real(cmd, **kw) if "ssh-keygen" in str(cmd[0]) else subprocess.CompletedProcess(cmd, 0)
         ),
     )
-    cib._prepare_guest(cib.VmConfig(), "pw")
-    assert cib.VM_KEY.with_suffix(".pub").read_text().startswith("ssh-ed25519 ")
-    assert cib.VM_HOST_KEY.with_suffix(".pub").read_text().startswith("ssh-ed25519 ")
+    bib._prepare_guest(bib.VmConfig(), "pw")
+    assert bib.VM_KEY.with_suffix(".pub").read_text().startswith("ssh-ed25519 ")
+    assert bib.VM_HOST_KEY.with_suffix(".pub").read_text().startswith("ssh-ed25519 ")
 
 
 def test_the_share_the_guest_looks_for_is_the_one_tart_mounts(calls, credentials, monkeypatch):
     # The old assertion compared GUEST_SHARE with itself. Change either side alone
-    # and `cib vm setup` aborts before installing anything, because the script's
+    # and `bib vm setup` aborts before installing anything, because the script's
     # `[ -d "$GUEST_SHARE" ]` fails.
-    monkeypatch.setattr(cib, "vm_running", lambda *a, **k: False)
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: True)
-    cib.cmd_vm_up("tart", cib.VmConfig())
+    monkeypatch.setattr(bib, "vm_running", lambda *a, **k: False)
+    monkeypatch.setattr(bib, "vm_exists", lambda *a, **k: True)
+    bib.cmd_vm_up("tart", bib.VmConfig())
     shared = next(a for a in flat(calls).split() if a.startswith("--dir="))
     name = shared.removeprefix("--dir=").split(":", 1)[0]
-    assert f"/Volumes/My Shared Files/{name}" == cib.GUEST_SHARE, (
+    assert f"/Volumes/My Shared Files/{name}" == bib.GUEST_SHARE, (
         "the guest looks for the share under the name tart was told to use"
     )
 
@@ -3091,16 +3137,16 @@ def test_a_complete_patch_writes_every_marker_it_documents(tmp_path, monkeypatch
     # Assistant the offline path exists to avoid, or with sshd still disabled.
     import plistlib
 
-    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g, **kw: None)
+    monkeypatch.setattr(bibpatch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(bibpatch.os, "chown", lambda p, u, g, **kw: None)
     root = _guest_volume(tmp_path)
-    keys = cibpatch.Keys(
-        authorized="ssh-ed25519 AAAAPUB cib",
+    keys = bibpatch.Keys(
+        authorized="ssh-ed25519 AAAAPUB bib",
         host_private="KEY\n",
         host_public="ssh-ed25519 AAAAHOST g",
     )
-    cibpatch.patch(
-        root, cibpatch.Account("admin", "pw"), cibpatch.Keyboard(19, "Swiss German"), keys
+    bibpatch.patch(
+        root, bibpatch.Account("admin", "pw"), bibpatch.Keyboard(19, "Swiss German"), keys
     )
 
     assert (root / "private/var/db/.AppleSetupDone").exists(), "the system assistant returns"
@@ -3112,10 +3158,10 @@ def test_a_complete_patch_writes_every_marker_it_documents(tmp_path, monkeypatch
     launchd = plistlib.loads(
         (root / "private/var/db/com.apple.xpc.launchd/disabled.plist").read_bytes()
     )
-    assert launchd["com.openssh.sshd"] is False, "without this cib can never reach the guest"
+    assert launchd["com.openssh.sshd"] is False, "without this bib can never reach the guest"
     login = plistlib.loads((root / "Library/Preferences/com.apple.loginwindow.plist").read_bytes())
     assert login["autoLoginUser"] == "admin"
-    assert (root / "private/etc/kcpassword").read_bytes() == cibpatch.kcpassword("pw")
+    assert (root / "private/etc/kcpassword").read_bytes() == bibpatch.kcpassword("pw")
     layout = plistlib.loads(
         (root / "Users/admin/Library/Preferences/com.apple.HIToolbox.plist").read_bytes()
     )
@@ -3131,16 +3177,16 @@ def test_up_pulls_the_image_before_it_runs_the_container(monkeypatch):
     # Deleting the ensure_image call puts the pull back inside the captured
     # `run -d`, which is the several silent gigabytes round 13 reported as a hang.
     order: list[str] = []
-    monkeypatch.setattr(cib, "container_running", lambda *a, **k: False)
-    monkeypatch.setattr(cib, "ensure_image", lambda e, c: order.append("pull"))
-    monkeypatch.setattr(cib, "wait_for_ui", lambda e, c: None)
-    monkeypatch.setattr(cib, "ensure_desktop", lambda e, c: True)
+    monkeypatch.setattr(bib, "container_running", lambda *a, **k: False)
+    monkeypatch.setattr(bib, "ensure_image", lambda e, c: order.append("pull"))
+    monkeypatch.setattr(bib, "wait_for_ui", lambda e, c: None)
+    monkeypatch.setattr(bib, "ensure_desktop", lambda e, c: True)
     monkeypatch.setattr(
-        cib,
+        bib,
         "run",
         lambda e, *a, **k: order.append(a[0]) or subprocess.CompletedProcess([], 0, stdout=""),
     )
-    cib.cmd_up("podman", cib.Config())
+    bib.cmd_up("podman", bib.Config())
     assert order.index("pull") < order.index("run"), "the pull has to happen outside `run -d`"
 
 
@@ -3148,10 +3194,10 @@ def test_the_password_verifier_matches_a_known_answer(monkeypatch):
     # Swapping the password and the salt, or reordering the PBKDF2 arguments, still
     # produces a plausible-looking verifier — one macOS will never match, so the
     # account exists and refuses its own password for ever.
-    monkeypatch.setattr(cibpatch.secrets, "token_bytes", lambda n: bytes(range(n)))
+    monkeypatch.setattr(bibpatch.secrets, "token_bytes", lambda n: bytes(range(n)))
     import plistlib
 
-    entry = plistlib.loads(cibpatch.shadow_hash_data("hunter2"))["SALTED-SHA512-PBKDF2"]
+    entry = plistlib.loads(bibpatch.shadow_hash_data("hunter2"))["SALTED-SHA512-PBKDF2"]
     expected = hashlib.pbkdf2_hmac("sha512", b"hunter2", bytes(range(32)), 50_000, 128)
     assert entry["entropy"] == expected
     assert entry["salt"] == bytes(range(32))
@@ -3159,14 +3205,14 @@ def test_the_password_verifier_matches_a_known_answer(monkeypatch):
 
 def test_the_sudo_probe_can_never_block_on_a_prompt(monkeypatch):
     # Without -n the probe whose docstring promises an exit code instead of a hang
-    # waits for a password cib says it will never ask for.
+    # waits for a password bib says it will never ask for.
     seen = {}
     monkeypatch.setattr(
-        cib.subprocess,
+        bib.subprocess,
         "run",
         lambda cmd, **kw: seen.update(cmd=cmd) or subprocess.CompletedProcess(cmd, 0),
     )
-    assert cib.sudo_is_cached() is True
+    assert bib.sudo_is_cached() is True
     assert "-n" in seen["cmd"]
 
 
@@ -3175,11 +3221,11 @@ def test_the_keepalive_refreshes_without_prompting(monkeypatch):
     # sixty; without this the last step of every unattended build was refused.
     seen: list[list[str]] = []
     monkeypatch.setattr(
-        cib.subprocess,
+        bib.subprocess,
         "run",
         lambda cmd, **kw: seen.append(cmd) or subprocess.CompletedProcess(cmd, 0),
     )
-    keepalive = cib.SudoKeepalive(interval=0.01)
+    keepalive = bib.SudoKeepalive(interval=0.01)
     with keepalive:
         time.sleep(0.15)
     assert seen, "the credential was never refreshed"
@@ -3197,34 +3243,34 @@ def test_a_file_where_a_directory_belongs_is_a_message_not_a_traceback(tmp_path,
     root = tmp_path / "volume"
     (root / planted).parent.mkdir(parents=True)
     (root / planted).write_text("not a directory")
-    with pytest.raises(cibpatch.PatchError, match="file where a directory has to be"):
-        cibpatch.guest_path(root, relative, make_parents=True)
+    with pytest.raises(bibpatch.PatchError, match="file where a directory has to be"):
+        bibpatch.guest_path(root, relative, make_parents=True)
 
 
 def test_a_directory_where_a_file_belongs_is_a_message_too(tmp_path):
     root = tmp_path / "volume"
     (root / "private/etc/kcpassword").mkdir(parents=True)
-    with pytest.raises(cibpatch.PatchError, match="directory in the guest where a file"):
-        cibpatch.guest_path(root, "private/etc/kcpassword", make_parents=True)
+    with pytest.raises(bibpatch.PatchError, match="directory in the guest where a file"):
+        bibpatch.guest_path(root, "private/etc/kcpassword", make_parents=True)
 
 
 # --- round 17 ------------------------------------------------------------------
 
 
 def test_preparing_a_guest_that_already_has_the_key_still_works(tmp_path, monkeypatch):
-    # `cib vm prepare` is the documented retry for a half-hour build, and every
+    # `bib vm prepare` is the documented retry for a half-hour build, and every
     # failure message points at it. The directory guard added for a file where a
     # directory belongs fired on ~/.ssh, which is a directory and is supposed to be.
-    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g, **kw: None)
+    monkeypatch.setattr(bibpatch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(bibpatch.os, "chown", lambda p, u, g, **kw: None)
     root = _guest_volume(tmp_path)
-    keys = cibpatch.Keys(
-        authorized="ssh-ed25519 AAAAPUB cib",
+    keys = bibpatch.Keys(
+        authorized="ssh-ed25519 AAAAPUB bib",
         host_private="KEY\n",
         host_public="ssh-ed25519 AAAAHOST guest",
     )
-    cibpatch.patch(root, cibpatch.Account("admin", "pw"), None, keys)
-    cibpatch.patch(root, cibpatch.Account("admin", "pw"), None, keys)  # must not raise
+    bibpatch.patch(root, bibpatch.Account("admin", "pw"), None, keys)
+    bibpatch.patch(root, bibpatch.Account("admin", "pw"), None, keys)  # must not raise
     authorized = root / "Users/admin/.ssh/authorized_keys"
     assert authorized.read_text().strip() == keys.authorized
     assert authorized.stat().st_mode & 0o777 == 0o600
@@ -3232,45 +3278,45 @@ def test_preparing_a_guest_that_already_has_the_key_still_works(tmp_path, monkey
 
 def test_a_file_where_the_ssh_directory_belongs_is_still_refused(tmp_path, monkeypatch):
     # The guard has to keep catching the case it was added for.
-    monkeypatch.setattr(cibpatch.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g, **kw: None)
+    monkeypatch.setattr(bibpatch.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(bibpatch.os, "chown", lambda p, u, g, **kw: None)
     root = _guest_volume(tmp_path)
     (root / "Users/admin").mkdir(parents=True)
     (root / "Users/admin/.ssh").write_text("not a directory")
-    with pytest.raises(cibpatch.PatchError, match="file in the guest where a directory"):
-        cibpatch.authorise_key(root, cibpatch.Account("admin", "pw"), "ssh-ed25519 AAAA cib")
+    with pytest.raises(bibpatch.PatchError, match="file in the guest where a directory"):
+        bibpatch.authorise_key(root, bibpatch.Account("admin", "pw"), "ssh-ed25519 AAAA bib")
 
 
 def test_every_vm_command_migrates_an_older_installs_secrets(monkeypatch, tmp_path):
-    # 'cib vm ssh' reads the keys through ssh_options() without ever calling
+    # 'bib vm ssh' reads the keys through ssh_options() without ever calling
     # guest_password(), so it was the one command that failed on a pre-1.4 install
     # while every other one repaired it on the way past.
-    monkeypatch.setattr(cib.Path, "home", classmethod(lambda c: tmp_path))
+    monkeypatch.setattr(bib.Path, "home", classmethod(lambda c: tmp_path))
     flat = tmp_path / ".config" / "browser-in-a-box"
     flat.mkdir(parents=True)
-    for name in cib.SECRET_NAMES:
+    for name in bib.SECRET_NAMES:
         (flat / name).write_text(f"old {name}\n")
-    monkeypatch.setattr(cib, "SECRETS", flat / cib.DEFAULT_VM_NAME)
-    monkeypatch.setattr(cib, "find_tart", lambda: "/usr/bin/tart")
-    monkeypatch.setattr(cib, "VM_ACTIONS", {"ssh": lambda tart, vm: None})
-    cib.main(["vm", "ssh"])
-    for name in cib.SECRET_NAMES:
-        assert (flat / cib.DEFAULT_VM_NAME / name).exists(), f"{name} was not migrated"
+    monkeypatch.setattr(bib, "SECRETS", flat / bib.DEFAULT_VM_NAME)
+    monkeypatch.setattr(bib, "find_tart", lambda: "/usr/bin/tart")
+    monkeypatch.setattr(bib, "VM_ACTIONS", {"ssh": lambda tart, vm: None})
+    bib.main(["vm", "ssh"])
+    for name in bib.SECRET_NAMES:
+        assert (flat / bib.DEFAULT_VM_NAME / name).exists(), f"{name} was not migrated"
 
 
 def test_the_patcher_turns_the_key_paths_it_is_given_into_key_material(monkeypatch, tmp_path):
-    # cib's side of this wire is asserted; the patcher's side was not, so main()
+    # bib's side of this wire is asserted; the patcher's side was not, so main()
     # could throw both arguments away with the suite green.
     import io
 
     pub, priv = tmp_path / "k.pub", tmp_path / "h"
-    pub.write_text("ssh-ed25519 AAAAPUB cib\n")
+    pub.write_text("ssh-ed25519 AAAAPUB bib\n")
     priv.write_text("HOSTKEY\n")
     priv.with_suffix(".pub").write_text("ssh-ed25519 AAAAHOST guest\n")
     seen = {}
-    monkeypatch.setattr(cibpatch, "prepare", lambda d, a, k, ks: seen.update(keys=ks))
-    monkeypatch.setattr(cibpatch.sys, "stdin", io.StringIO("pw\n"))
-    cibpatch.main(
+    monkeypatch.setattr(bibpatch, "prepare", lambda d, a, k, ks: seen.update(keys=ks))
+    monkeypatch.setattr(bibpatch.sys, "stdin", io.StringIO("pw\n"))
+    bibpatch.main(
         [
             "--disk",
             "/x/disk.img",
@@ -3282,13 +3328,13 @@ def test_the_patcher_turns_the_key_paths_it_is_given_into_key_material(monkeypat
             str(priv),
         ]
     )
-    assert seen["keys"].authorized.strip() == "ssh-ed25519 AAAAPUB cib"
+    assert seen["keys"].authorized.strip() == "ssh-ed25519 AAAAPUB bib"
     assert seen["keys"].host_private == "HOSTKEY\n"
     assert seen["keys"].host_public.strip() == "ssh-ed25519 AAAAHOST guest"
 
 
 def _template() -> str:
-    return (Path(cib.__file__).resolve().parent / "packer" / "browser-vm.pkr.hcl").read_text()
+    return (Path(bib.__file__).resolve().parent / "packer" / "browser-vm.pkr.hcl").read_text()
 
 
 def _template_command(needle: str, **values: str) -> str:
@@ -3323,7 +3369,7 @@ def test_the_template_never_interpolates_key_material_into_a_command():
 def test_the_template_refuses_to_build_a_guest_with_no_key(tmp_path):
     # An empty key used to build fine: `printf '%s\n' ''` writes a newline, so the
     # file exists, is not empty, and passed every size test on it — leaving a guest
-    # that cib can never reach and a build that said it went well. The upload adds
+    # that bib can never reach and a build that said it went well. The upload adds
     # that same newline, so the check has to be on the content.
     command = _template_command("grep -q '[^[:space:]]' ~/.ssh/authorized_keys || { echo 'no")
     ssh_dir = tmp_path / ".ssh"
@@ -3343,12 +3389,12 @@ def test_the_template_refuses_to_build_a_guest_with_no_key(tmp_path):
     result = run_guard(command)
     assert result.returncode != 0, "a file holding one newline holds no key"
     assert "could never log in" in result.stdout + result.stderr
-    (ssh_dir / "authorized_keys").write_text("ssh-ed25519 AAAAPUB cib\n")
+    (ssh_dir / "authorized_keys").write_text("ssh-ed25519 AAAAPUB bib\n")
     assert run_guard(command).returncode == 0
 
 
 def test_the_template_refuses_to_build_a_guest_with_no_host_key(tmp_path):
-    # Without it cib cannot tell the guest apart from anything else answering on
+    # Without it bib cannot tell the guest apart from anything else answering on
     # that address, and the build would still report success.
     command = _template_command("test -s ~/.ssh/host_key ||")
     (tmp_path / ".ssh").mkdir()
@@ -3387,19 +3433,19 @@ def test_the_template_never_stages_the_private_key_where_others_can_read_it():
 def test_up_mounts_the_profile_volume_where_the_image_keeps_it(calls, monkeypatch):
     # Drop the -v, or let the container path drift from /home/kasm-user, and the
     # profile stops persisting while `box down` still promises it is kept.
-    monkeypatch.setattr(cib, "container_running", lambda *a, **k: False)
-    monkeypatch.setattr(cib, "ensure_image", lambda e, c: None)
-    monkeypatch.setattr(cib, "wait_for_ui", lambda e, c: None)
-    monkeypatch.setattr(cib, "ensure_desktop", lambda e, c: True)
-    cfg = cib.Config()
-    cib.cmd_up("podman", cfg)
+    monkeypatch.setattr(bib, "container_running", lambda *a, **k: False)
+    monkeypatch.setattr(bib, "ensure_image", lambda e, c: None)
+    monkeypatch.setattr(bib, "wait_for_ui", lambda e, c: None)
+    monkeypatch.setattr(bib, "ensure_desktop", lambda e, c: True)
+    cfg = bib.Config()
+    bib.cmd_up("podman", cfg)
     # The exact pair, not a substring: "/home/kasm-user/Downloads" contains
     # "/home/kasm-user", so the substring form could only ever catch a dropped -v,
     # never the drift the comment above names.
     argv = [a for call in calls for a in call]
     assert argv[argv.index("-v") + 1] == f"{cfg.volume}:/home/kasm-user"
-    assert cib.KASM_HOME == "/home/kasm-user"
-    for browser in cibbrowsers.expand(cibbrowsers.ALL):
+    assert bib.KASM_HOME == "/home/kasm-user"
+    for browser in bibbrowsers.expand(bibbrowsers.ALL):
         assert browser.container_profile and not browser.container_profile.startswith("/"), (
             f"{browser.key}: the profile has to live under what is mounted, or it stops persisting"
         )
@@ -3422,11 +3468,11 @@ def test_the_selected_layout_wins_over_the_merely_enabled_ones(monkeypatch):
         fmt=plistlib.FMT_XML,
     ).decode()
     monkeypatch.setattr(
-        cib.subprocess,
+        bib.subprocess,
         "run",
         lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout=exported),
     )
-    assert cib.host_keyboard_layout() == (19, "Swiss German")
+    assert bib.host_keyboard_layout() == (19, "Swiss German")
 
 
 def test_the_enabled_list_is_used_when_nothing_is_selected(monkeypatch):
@@ -3437,11 +3483,11 @@ def test_the_enabled_list_is_used_when_nothing_is_selected(monkeypatch):
         fmt=plistlib.FMT_XML,
     ).decode()
     monkeypatch.setattr(
-        cib.subprocess,
+        bib.subprocess,
         "run",
         lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout=exported),
     )
-    assert cib.host_keyboard_layout() == (19, "Swiss German")
+    assert bib.host_keyboard_layout() == (19, "Swiss German")
 
 
 def test_a_secret_written_over_a_loose_file_gets_the_tight_mode(tmp_path):
@@ -3452,7 +3498,7 @@ def test_a_secret_written_over_a_loose_file_gets_the_tight_mode(tmp_path):
     target = tmp_path / "ssh_host_ed25519_key"
     target.write_bytes(b"OLD\n")
     target.chmod(0o644)
-    cibpatch.write_private(target, b"NEWKEY\n")
+    bibpatch.write_private(target, b"NEWKEY\n")
     assert target.read_bytes() == b"NEWKEY\n"
     assert target.stat().st_mode & 0o777 == 0o600
 
@@ -3465,7 +3511,7 @@ def test_owning_the_home_never_descends_through_a_link(tmp_path, monkeypatch):
     # the guard: os.walk(followlinks=True) descends *through* a symlinked directory
     # and lchowns whatever is inside it — on the host. Both mutations have to fail.
     chowned: list[str] = []
-    monkeypatch.setattr(cibpatch.os, "chown", lambda p, u, g, **kw: chowned.append(str(p)))
+    monkeypatch.setattr(bibpatch.os, "chown", lambda p, u, g, **kw: chowned.append(str(p)))
     outside = tmp_path / "host"
     (outside / "deeper").mkdir(parents=True)
     (outside / "deeper" / "sudoers").write_text("root ALL")
@@ -3473,7 +3519,7 @@ def test_owning_the_home_never_descends_through_a_link(tmp_path, monkeypatch):
     home.mkdir(parents=True)
     (home / "real").write_text("guest file")
     (home / "escape").symlink_to(outside)
-    cibpatch.own_home(tmp_path / "volume", cibpatch.Account("admin", "pw"))
+    bibpatch.own_home(tmp_path / "volume", bibpatch.Account("admin", "pw"))
     assert str(home / "real") in chowned
     # The link itself is chowned (harmlessly, as a link). What must never happen is
     # the walk stepping through it.
@@ -3487,7 +3533,7 @@ def test_the_templates_keyboard_provisioner_keeps_the_two_things_that_make_it_wo
     # The offline copy of this logic is pinned by three tests; the packer copy was
     # only grepped for a variable name. Rounds 8/9 and 14/15 were both keyboard
     # regressions.
-    template = (Path(cib.__file__).resolve().parent / "packer" / "browser-vm.pkr.hcl").read_text()
+    template = (Path(bib.__file__).resolve().parent / "packer" / "browser-vm.pkr.hcl").read_text()
     line = next(ln for ln in template.splitlines() if "AppleEnabledInputSources" in ln)
     # An integer, not a string: `defaults write` stores it as a string and HIToolbox
     # then ignores the entry, which is why PlistBuddy is used at all.
@@ -3501,15 +3547,15 @@ def test_the_clipboard_agent_is_installed_as_a_launch_agent_not_a_daemon():
     # The path was asserted against itself, so it could move to LaunchDaemons and
     # everything still reported success — while launchd loads it as a root daemon,
     # which has no pasteboard, so copy-paste is dead.
-    assert f"/Library/LaunchAgents/{cib.AGENT_LABEL}.plist" == cib.AGENT_PLIST_PATH
-    assert "/Library/LaunchDaemons" not in cib.guest_install_script("pw")
+    assert f"/Library/LaunchAgents/{bib.AGENT_LABEL}.plist" == bib.AGENT_PLIST_PATH
+    assert "/Library/LaunchDaemons" not in bib.guest_install_script("pw")
 
 
 def test_the_keepalive_refreshes_faster_than_sudo_forgets():
     # sudo's timestamp_timeout is five minutes by default and the build takes thirty
     # to sixty; any interval above that makes the thread do nothing useful, and the
     # last step of every unattended build is refused.
-    assert cib.SudoKeepalive().interval <= 120
+    assert bib.SudoKeepalive().interval <= 120
 
 
 def test_the_image_is_pulled_before_the_container_is_removed(monkeypatch):
@@ -3517,17 +3563,17 @@ def test_the_image_is_pulled_before_the_container_is_removed(monkeypatch):
     # a pull that could not succeed destroyed a working container and then reported
     # only the pull.
     order: list[str] = []
-    monkeypatch.setattr(cib, "container_running", lambda *a, **k: False)
+    monkeypatch.setattr(bib, "container_running", lambda *a, **k: False)
     monkeypatch.setattr(
-        cib,
+        bib,
         "ensure_image",
-        lambda e, c: order.append("pull") or (_ for _ in ()).throw(cib.Failure("could not pull")),
+        lambda e, c: order.append("pull") or (_ for _ in ()).throw(bib.Failure("could not pull")),
     )
     monkeypatch.setattr(
-        cib, "run", lambda e, *a, **k: order.append(a[0]) or subprocess.CompletedProcess([], 0)
+        bib, "run", lambda e, *a, **k: order.append(a[0]) or subprocess.CompletedProcess([], 0)
     )
-    with pytest.raises(cib.Failure, match="could not pull"):
-        cib.cmd_up("podman", cib.Config())
+    with pytest.raises(bib.Failure, match="could not pull"):
+        bib.cmd_up("podman", bib.Config())
     assert "rm" not in order, "a working container was removed for a pull that failed"
 
 
@@ -3535,25 +3581,25 @@ def test_the_guest_sets_its_own_time_zone_with_its_own_tool(credentials, monkeyp
     # Patching /etc/localtime from the host cannot work: on a real Data volume both
     # it and the zoneinfo directory are symlinks into paths that resolve against the
     # host, so the patcher refused them and aborted the whole patch.
-    cib.guest_password(create=True)
-    monkeypatch.setattr(cib, "vm_ip", lambda *a, **k: "192.168.1.50")
-    monkeypatch.setattr(cib, "host_time_zone", lambda: ("Europe/Rome", "Rome"))
+    bib.guest_password(create=True)
+    monkeypatch.setattr(bib, "vm_ip", lambda *a, **k: "192.168.1.50")
+    monkeypatch.setattr(bib, "host_time_zone", lambda: ("Europe/Rome", "Rome"))
     seen = {}
     monkeypatch.setattr(
-        cib, "guest_ssh", lambda vm, ip, script=None: seen.update(script=script) or 0
+        bib, "guest_ssh", lambda vm, ip, script=None: seen.update(script=script) or 0
     )
-    cib.cmd_vm_setup("tart", cib.VmConfig())
+    bib.cmd_vm_setup("tart", bib.VmConfig())
     assert "sudo_pw systemsetup -settimezone Europe/Rome" in seen["script"]
 
 
 def test_a_guest_script_without_a_time_zone_still_runs(tmp_path):
     # The step has to be a no-op, not an empty line that `sh -e` chokes on.
-    result = _run_guest_script(cib.guest_install_script("pw"), tmp_path, share_exists=True)
+    result = _run_guest_script(bib.guest_install_script("pw"), tmp_path, share_exists=True)
     assert result.returncode == 0, result.stderr
 
 
 def test_the_time_zone_step_runs_in_the_guest(tmp_path):
-    script = cib.guest_install_script("pw", "Europe/Rome")
+    script = bib.guest_install_script("pw", "Europe/Rome")
     # Not "fakebin": that is the harness's own directory, and writing into it
     # means the two overwrite each other.
     bin_dir = tmp_path / "extra"
@@ -3568,7 +3614,7 @@ def test_the_time_zone_step_runs_in_the_guest(tmp_path):
 def test_a_time_zone_the_guest_rejects_does_not_fail_the_install(tmp_path):
     # A wrong clock is an annoyance; a failed `vm setup` costs Chrome and the
     # clipboard agent. Under `sh -e` the step has to swallow its own failure.
-    script = cib.guest_install_script("pw", "Mars/Olympus")
+    script = bib.guest_install_script("pw", "Mars/Olympus")
     # Not "fakebin": that is the harness's own directory, and writing into it
     # means the two overwrite each other.
     bin_dir = tmp_path / "extra"
@@ -3582,97 +3628,124 @@ def test_a_time_zone_the_guest_rejects_does_not_fail_the_install(tmp_path):
 
 @pytest.mark.parametrize("command", ["ssh", "setup"])
 def test_the_repair_advice_names_the_step_that_makes_it_possible(credentials, monkeypatch, command):
-    # Both messages can only be printed while the guest is up, and `cib vm prepare`
+    # Both messages can only be printed while the guest is up, and `bib vm prepare`
     # refuses while it is up. Naming prepare alone sent the user to a second error.
-    cib.guest_password(create=True)
-    monkeypatch.setattr(cib, "vm_ip", lambda *a, **k: "192.168.1.50")
-    monkeypatch.setattr(cib, "guest_ssh", lambda *a, **k: 255)
-    action = cib.cmd_vm_ssh if command == "ssh" else cib.cmd_vm_setup
-    with pytest.raises(cib.Failure) as caught:
-        action("tart", cib.VmConfig())
+    bib.guest_password(create=True)
+    monkeypatch.setattr(bib, "vm_ip", lambda *a, **k: "192.168.1.50")
+    monkeypatch.setattr(bib, "guest_ssh", lambda *a, **k: 255)
+    action = bib.cmd_vm_ssh if command == "ssh" else bib.cmd_vm_setup
+    with pytest.raises(bib.Failure) as caught:
+        action("tart", bib.VmConfig())
     message = str(caught.value)
-    assert "cib vm prepare" in message
-    assert "cib vm down" in message, "prepare refuses while the guest is running"
-    assert message.index("cib vm down") < message.index("cib vm prepare")
+    assert "bib vm prepare" in message
+    assert "bib vm down" in message, "prepare refuses while the guest is running"
+    assert message.index("bib vm down") < message.index("bib vm prepare")
 
 
 def test_the_sudo_message_says_the_credential_is_per_terminal():
     # sudo remembers per tty. "Run 'sudo -v', then re-run" is only true from the
     # same window, and a process with no tty can never satisfy the check at all —
     # which is exactly how this was found, from a tool that has none.
-    assert "SAME TERMINAL" in cib.SUDO_MESSAGE
-    assert "per tty" in cib.SUDO_MESSAGE
+    assert "SAME TERMINAL" in bib.SUDO_MESSAGE
+    assert "per tty" in bib.SUDO_MESSAGE
+
+
+def _say(kwargs, text):
+    """Write what tart would have said into the log it was handed.
+
+    Into the file, not a pipe: boot_once holds this child for the whole first boot,
+    and a pipe nobody drains stops tart dead as soon as its buffer fills.
+    """
+    kwargs["stdout"].write(text)
+    kwargs["stdout"].flush()
 
 
 def test_a_boot_blocked_by_the_installers_lock_is_retried(monkeypatch):
     # `tart create` returns before the Virtualization framework lets go of the VM's
     # auxiliary storage, so a boot started straight afterwards fails with EAGAIN.
     # Nothing holds it a moment later: it is a handover, not a conflict.
-    import io
-
     attempts = []
 
     class _Locked(_FakeBoot):
         returncode = 1
-
-        # A property, not a class attribute: one StringIO shared by every instance
-        # is emptied by the first read, so the second attempt would see no detail
-        # and be reported as a different failure.
-        @property
-        def stderr(self):
-            return io.StringIO('VZErrorDomain Code=2 "Failed to lock auxiliary storage."')
 
         def poll(self):
             return 1
 
     def spawn(*a, **k):
         attempts.append(1)
-        return _FakeBoot() if len(attempts) >= 3 else _Locked()
+        if len(attempts) >= 3:
+            return _FakeBoot()
+        _say(k, 'VZErrorDomain Code=2 "Failed to lock auxiliary storage."')
+        return _Locked()
 
-    monkeypatch.setattr(cib.time, "sleep", lambda s: None)
-    monkeypatch.setattr(cib.subprocess, "Popen", spawn)
-    assert cib.boot_once("tart", cib.VmConfig()).poll() is None
+    monkeypatch.setattr(bib.time, "sleep", lambda s: None)
+    monkeypatch.setattr(bib.subprocess, "Popen", spawn)
+    assert bib.boot_once("tart", bib.VmConfig()).poll() is None
     assert len(attempts) == 3
+
+
+def test_the_first_boot_is_not_held_open_by_a_pipe(monkeypatch):
+    # The child this returns is held for BIB_VM_FIRSTBOOT_SECS, three minutes by
+    # default. With stderr on a pipe and nobody reading it, tart blocked once the
+    # buffer filled and never saw `tart stop` — a ~40-minute build that ended in
+    # "did not shut down in time". start_detached had the same bug and was fixed;
+    # this one was missed.
+    seen = {}
+
+    def spawn(*a, **k):
+        seen.update(k)
+        _say(k, "into the log, not a pipe")
+        return _FakeBoot()
+
+    monkeypatch.setattr(bib.time, "sleep", lambda s: None)
+    monkeypatch.setattr(bib.subprocess, "Popen", spawn)
+    bib.boot_once("tart", bib.VmConfig())
+    assert seen["stderr"] is bib.subprocess.STDOUT
+    assert seen["stdout"] is not bib.subprocess.PIPE
+    # Written through the handle tart was given, and read back from the path: the
+    # two are the same file, which is the whole claim.
+    assert "into the log, not a pipe" in bib.BOOT_LOG.read_text()
 
 
 def test_a_boot_that_failed_for_another_reason_is_not_retried(monkeypatch):
     # A guest that never booted has no first-boot state; patching it produces
     # something that reports "Built." and cannot be logged in to.
-    import io
-
     attempts = []
 
     class _Broken(_FakeBoot):
         returncode = 2
-        stderr = io.StringIO("no such vm")
 
         def poll(self):
             return 2
 
-    monkeypatch.setattr(cib.time, "sleep", lambda s: None)
-    monkeypatch.setattr(cib.subprocess, "Popen", lambda *a, **k: attempts.append(1) or _Broken())
-    with pytest.raises(cib.Failure, match="no such vm"):
-        cib.boot_once("tart", cib.VmConfig())
+    def spawn(*a, **k):
+        attempts.append(1)
+        _say(k, "no such vm")
+        return _Broken()
+
+    monkeypatch.setattr(bib.time, "sleep", lambda s: None)
+    monkeypatch.setattr(bib.subprocess, "Popen", spawn)
+    with pytest.raises(bib.Failure, match="no such vm"):
+        bib.boot_once("tart", bib.VmConfig())
     assert len(attempts) == 1, "only the lock error is transient"
 
 
 def test_a_lock_that_never_clears_is_reported(monkeypatch):
-    import io
-
     class _Locked(_FakeBoot):
         returncode = 1
-
-        @property
-        def stderr(self):
-            return io.StringIO("Failed to lock auxiliary storage.")
 
         def poll(self):
             return 1
 
-    monkeypatch.setattr(cib.time, "sleep", lambda s: None)
-    monkeypatch.setattr(cib.subprocess, "Popen", lambda *a, **k: _Locked())
-    with pytest.raises(cib.Failure, match="still locked after"):
-        cib.boot_once("tart", cib.VmConfig())
+    def spawn(*a, **k):
+        _say(k, "Failed to lock auxiliary storage.")
+        return _Locked()
+
+    monkeypatch.setattr(bib.time, "sleep", lambda s: None)
+    monkeypatch.setattr(bib.subprocess, "Popen", spawn)
+    with pytest.raises(bib.Failure, match="still locked after"):
+        bib.boot_once("tart", bib.VmConfig())
 
 
 def test_the_data_volume_is_found_in_the_second_container_too(monkeypatch):
@@ -3708,11 +3781,11 @@ def test_the_data_volume_is_found_in_the_second_container_too(monkeypatch):
         }
     )
     monkeypatch.setattr(
-        cibpatch.subprocess,
+        bibpatch.subprocess,
         "run",
         lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=listing, stderr=b""),
     )
-    assert cibpatch.data_volume("/dev/disk4") == "/dev/disk5s2"
+    assert bibpatch.data_volume("/dev/disk4") == "/dev/disk5s2"
 
 
 def test_a_disk_whose_containers_hold_no_data_volume_names_them_all(monkeypatch):
@@ -3733,12 +3806,12 @@ def test_a_disk_whose_containers_hold_no_data_volume_names_them_all(monkeypatch)
         }
     )
     monkeypatch.setattr(
-        cibpatch.subprocess,
+        bibpatch.subprocess,
         "run",
         lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=listing, stderr=b""),
     )
-    with pytest.raises(cibpatch.PatchError, match="iSCPreboot, Recovery"):
-        cibpatch.data_volume("/dev/disk4")
+    with pytest.raises(bibpatch.PatchError, match="iSCPreboot, Recovery"):
+        bibpatch.data_volume("/dev/disk4")
 
 
 def test_the_suite_cannot_reach_the_real_secrets():
@@ -3746,9 +3819,9 @@ def test_the_suite_cannot_reach_the_real_secrets():
     # autouse fixture is what stops that; this is what stops the fixture being
     # dropped.
     real = Path(os.path.expanduser("~")) / ".config" / "browser-in-a-box"
-    for path in (cib.SECRETS, cib.CREDENTIALS, cib.VM_KEY, cib.VM_HOST_KEY, cib.KNOWN_HOSTS):
+    for path in (bib.SECRETS, bib.CREDENTIALS, bib.VM_KEY, bib.VM_HOST_KEY, bib.KNOWN_HOSTS):
         assert real not in path.parents and path != real, f"{path} is the user's own"
-    assert cib.Path.home() != Path(os.path.expanduser("~")), "Path.home() is not redirected"
+    assert bib.Path.home() != Path(os.path.expanduser("~")), "Path.home() is not redirected"
 
 
 def test_chrome_is_pointed_at_the_share_rather_than_moving_downloads(tmp_path):
@@ -3758,7 +3831,7 @@ def test_chrome_is_pointed_at_the_share_rather_than_moving_downloads(tmp_path):
     import json as _json
 
     (tmp_path / "Downloads").mkdir()
-    result = _run_guest_script(cib.guest_install_script("pw"), tmp_path, share_exists=True)
+    result = _run_guest_script(bib.guest_install_script("pw"), tmp_path, share_exists=True)
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "Downloads").is_dir(), "the guest's own Downloads is left alone"
     assert not (tmp_path / "Downloads.local").exists(), "nothing is moved aside any more"
@@ -3772,7 +3845,7 @@ def test_chrome_is_pointed_at_the_share_rather_than_moving_downloads(tmp_path):
 
 def test_the_share_is_reachable_from_inside_downloads(tmp_path):
     (tmp_path / "Downloads").mkdir()
-    _run_guest_script(cib.guest_install_script("pw"), tmp_path, share_exists=True)
+    _run_guest_script(bib.guest_install_script("pw"), tmp_path, share_exists=True)
     link = tmp_path / "Downloads" / "on-the-host"
     assert link.is_symlink()
     assert str(link.readlink()) == str(tmp_path / "share")
@@ -3784,25 +3857,59 @@ def test_an_existing_chrome_profile_is_not_overwritten(tmp_path):
     prefs = tmp_path / "Library/Application Support/Google/Chrome/Default/Preferences"
     prefs.parent.mkdir(parents=True)
     prefs.write_text('{"mine": true}')
-    result = _run_guest_script(cib.guest_install_script("pw"), tmp_path, share_exists=True)
+    result = _run_guest_script(bib.guest_install_script("pw"), tmp_path, share_exists=True)
     assert result.returncode == 0, result.stderr
     assert prefs.read_text() == '{"mine": true}'
     assert "already has a profile" in result.stderr
 
 
-def test_the_first_run_preferences_are_valid_json():
+def test_the_chromium_preferences_are_valid_json_and_send_nothing_home():
+    # Against bibbrowsers, which is what a guest actually gets. This used to assert
+    # against bib.FIRST_RUN_PREFS and bib.LOCAL_STATE_PREFS, two constants left
+    # behind by the per-browser split that nothing read any more — so every setting
+    # below could have been turned back on with the whole suite still green.
     import json as _json
 
-    written = _json.loads(cib.FIRST_RUN_PREFS)
-    assert written["download"]["default_directory"] == cib.GUEST_SHARE
-    # Chrome reads this file once, before its first launch, so anything malformed is
-    # silently discarded and every setting here is quietly lost.
-    assert written["safebrowsing"]["enabled"] is False
+    written = _json.loads(bibbrowsers.chromium_preferences(bibbrowsers.GUEST_SHARE))
+    assert written["download"]["default_directory"] == bibbrowsers.GUEST_SHARE
+    # Read once, before the first launch, so anything malformed is silently
+    # discarded and every setting here is quietly lost.
+    assert written["safebrowsing"] == {"enabled": False, "enhanced": False}
     assert written["search"]["suggest_enabled"] is False
-    state = _json.loads(cib.LOCAL_STATE_PREFS)
+    assert written["alternate_error_pages"]["enabled"] is False
+    assert written["spellcheck"]["use_spelling_service"] is False
+    assert written["net"]["network_prediction_options"] == 2
+    assert written["credentials_enable_service"] is False
+    assert written["profile"]["password_manager_leak_detection"] is False
+    state = _json.loads(bibbrowsers.CHROMIUM_LOCAL_STATE)
     # Not in Preferences: metrics consent lives beside the profiles, not inside one,
     # so putting it in the profile would look right and do nothing.
     assert state["user_experience_metrics"]["reporting_enabled"] is False
+
+
+def test_the_firefox_preferences_send_nothing_home_either():
+    # Firefox's half had no assertion at all, so its telemetry could have been left
+    # on without anything noticing.
+    written = bibbrowsers.firefox_preferences("/somewhere")
+    lines = dict(
+        line.removeprefix("user_pref(").removesuffix(");").split(", ", 1)
+        for line in written.splitlines()
+    )
+    assert lines['"browser.download.dir"'] == '"/somewhere"'
+    # 2 is "use the folder named above"; without it Firefox ignores the path.
+    assert lines['"browser.download.folderList"'] == "2"
+    for key in (
+        "datareporting.healthreport.uploadEnabled",
+        "datareporting.policy.dataSubmissionEnabled",
+        "toolkit.telemetry.enabled",
+        "toolkit.telemetry.unified",
+        "browser.newtabpage.activity-stream.feeds.telemetry",
+        "browser.ping-centre.telemetry",
+        "browser.search.suggest.enabled",
+        "network.prefetch-next",
+    ):
+        assert lines[f'"{key}"'] == "false", key
+    assert lines['"network.dns.disablePrefetch"'] == "true"
 
 
 @pytest.mark.parametrize(
@@ -3813,10 +3920,10 @@ def test_the_guest_script_needs_nothing_the_guest_does_not_have(tool):
     # "The <tool> command requires the command line developer tools" — a dialog on
     # the guest's screen, waiting for a click, from a command that is supposed to
     # need none. Seen for real, from a diagnostic that used python3 in the guest.
-    script = cib.guest_install_script("pw", "Europe/Rome")
+    script = bib.guest_install_script("pw", "Europe/Rome")
     body = "\n".join(ln for ln in script.split("\n") if not ln.lstrip().startswith("#"))
     assert not re.search(rf"(^|[\s|;&(]){re.escape(tool)}([\s;&)]|$)", body), (
-        f"{tool} is not on a bare macOS; using it turns 'cib vm setup' into a dialog"
+        f"{tool} is not on a bare macOS; using it turns 'bib vm setup' into a dialog"
     )
 
 
@@ -3832,7 +3939,7 @@ def test_the_guest_never_locks_its_screen(tmp_path):
         (bin_dir / tool).write_text(f'#!/bin/sh\necho "{tool} $@" >> {tmp_path}/lock.log\n')
         (bin_dir / tool).chmod(0o755)
     result = _run_guest_script(
-        cib.guest_install_script("pw"), tmp_path, share_exists=True, extra_bin=bin_dir
+        bib.guest_install_script("pw"), tmp_path, share_exists=True, extra_bin=bin_dir
     )
     assert result.returncode == 0, result.stderr
     log = (tmp_path / "lock.log").read_text()
@@ -3847,7 +3954,7 @@ def test_the_guest_never_locks_its_screen(tmp_path):
     )
     assert "pmset -a displaysleep 0 sleep 0" in log, "the display would still sleep"
     # The one that actually does it on every guest this project can build: macOS 14
-    # moved the lock behind sysadminctl, and cib requires 15+ for the Apple Account.
+    # moved the lock behind sysadminctl, and bib requires 15+ for the Apple Account.
     assert "sysadminctl -screenLock off" in log, "macOS 14+ would still lock the screen"
 
 
@@ -3865,7 +3972,7 @@ def test_a_guest_without_sysadminctl_still_finishes(tmp_path):
     (bin_dir / "sysadminctl").write_text("#!/bin/sh\nexit 127\n")
     (bin_dir / "sysadminctl").chmod(0o755)
     result = _run_guest_script(
-        cib.guest_install_script("pw"), tmp_path, share_exists=True, extra_bin=bin_dir
+        bib.guest_install_script("pw"), tmp_path, share_exists=True, extra_bin=bin_dir
     )
     assert result.returncode == 0, result.stderr
 
@@ -3873,18 +3980,18 @@ def test_a_guest_without_sysadminctl_still_finishes(tmp_path):
 def test_the_vnc_viewer_is_how_the_window_goes_full_screen(monkeypatch):
     # tart's own window has neither full screen nor scaling; Screen Sharing has
     # both, and the offline patch already turns on the Remote Login it needs.
-    monkeypatch.setenv("CIB_VM_VIEWER", "vnc")
-    assert "--vnc" in cib.vm_run_args(cib.VmConfig())
+    monkeypatch.setenv("BIB_VM_VIEWER", "vnc")
+    assert "--vnc" in bib.vm_run_args(bib.VmConfig())
 
 
 def test_the_built_in_window_stays_the_default(monkeypatch):
-    assert "--vnc" not in cib.vm_run_args(cib.VmConfig())
+    assert "--vnc" not in bib.vm_run_args(bib.VmConfig())
 
 
 def test_an_unknown_viewer_is_refused(monkeypatch):
-    monkeypatch.setenv("CIB_VM_VIEWER", "kiosk")
-    with pytest.raises(cib.Failure, match="CIB_VM_VIEWER"):
-        cib.vm_run_args(cib.VmConfig())
+    monkeypatch.setenv("BIB_VM_VIEWER", "kiosk")
+    with pytest.raises(bib.Failure, match="BIB_VM_VIEWER"):
+        bib.vm_run_args(bib.VmConfig())
 
 
 # --- one command instead of three ----------------------------------------------
@@ -3896,35 +4003,35 @@ def test_create_boots_the_guest_and_installs_chrome_itself(
     # It used to stop after patching and print three more commands to run. Each of
     # them is a place a build can fail, and each failure meant starting over.
     order: list[str] = []
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
-    monkeypatch.setattr(cib.time, "sleep", lambda s: None)
+    monkeypatch.setattr(bib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(bib.time, "sleep", lambda s: None)
     _fake_guest_disk(monkeypatch, tmp_path)
-    monkeypatch.setattr(cib.subprocess, "Popen", lambda *a, **k: _FakeBoot())
+    monkeypatch.setattr(bib.subprocess, "Popen", lambda *a, **k: _FakeBoot())
     monkeypatch.setattr(
-        cib.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0)
+        bib.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0)
     )
-    monkeypatch.setattr(cib, "start_detached", lambda t, vm: order.append("start") or _FakeBoot())
-    monkeypatch.setattr(cib, "wait_for_guest", lambda t, vm, b: order.append("wait") or "10.0.0.9")
+    monkeypatch.setattr(bib, "start_detached", lambda t, vm: order.append("start") or _FakeBoot())
+    monkeypatch.setattr(bib, "wait_for_guest", lambda t, vm, b: order.append("wait") or "10.0.0.9")
     monkeypatch.setattr(
-        cib, "guest_ssh", lambda vm, ip, script=None: order.append(f"ssh:{ip}") or 0
+        bib, "guest_ssh", lambda vm, ip, script=None: order.append(f"ssh:{ip}") or 0
     )
-    cib.cmd_vm_create("tart", cib.VmConfig())
+    bib.cmd_vm_create("tart", bib.VmConfig())
     assert order == ["start", "wait", "ssh:10.0.0.9"]
 
 
 def test_create_says_what_is_left_when_the_install_fails(calls, credentials, monkeypatch, tmp_path):
     # The guest is built and running by then; telling the user to start over would
     # throw away half an hour for a step that retries on its own.
-    monkeypatch.setattr(cib, "vm_exists", lambda *a, **k: False)
-    monkeypatch.setattr(cib.time, "sleep", lambda s: None)
+    monkeypatch.setattr(bib, "vm_exists", lambda *a, **k: False)
+    monkeypatch.setattr(bib.time, "sleep", lambda s: None)
     _fake_guest_disk(monkeypatch, tmp_path)
-    monkeypatch.setattr(cib.subprocess, "Popen", lambda *a, **k: _FakeBoot())
+    monkeypatch.setattr(bib.subprocess, "Popen", lambda *a, **k: _FakeBoot())
     monkeypatch.setattr(
-        cib.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0)
+        bib.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0)
     )
-    monkeypatch.setattr(cib, "guest_ssh", lambda vm, ip, script=None: 1)
-    with pytest.raises(cib.Failure, match="cib vm setup"):
-        cib.cmd_vm_create("tart", cib.VmConfig())
+    monkeypatch.setattr(bib, "guest_ssh", lambda vm, ip, script=None: 1)
+    with pytest.raises(bib.Failure, match="bib vm setup"):
+        bib.cmd_vm_create("tart", bib.VmConfig())
 
 
 def test_a_guest_that_dies_while_starting_is_not_waited_out(isolate_secrets, monkeypatch):
@@ -3937,30 +4044,30 @@ def test_a_guest_that_dies_while_starting_is_not_waited_out(isolate_secrets, mon
 
     # Through the log, not a pipe. tart's stderr is redirected into the boot log
     # now, because a pipe nobody drains blocks tart at 64 KiB and then SIGPIPEs it
-    # dead the moment cib exits — which killed the guest this test is about.
-    cib.BOOT_LOG.parent.mkdir(parents=True, exist_ok=True)
-    cib.BOOT_LOG.write_text("Downloading...\nbridged networking failed\n")
-    monkeypatch.setattr(cib.time, "sleep", lambda s: None)
-    with pytest.raises(cib.Failure, match="bridged networking failed"):
-        isolate_secrets.wait_for_guest("tart", cib.VmConfig(), _Died())
+    # dead the moment bib exits — which killed the guest this test is about.
+    bib.BOOT_LOG.parent.mkdir(parents=True, exist_ok=True)
+    bib.BOOT_LOG.write_text("Downloading...\nbridged networking failed\n")
+    monkeypatch.setattr(bib.time, "sleep", lambda s: None)
+    with pytest.raises(bib.Failure, match="bridged networking failed"):
+        isolate_secrets.wait_for_guest("tart", bib.VmConfig(), _Died())
 
 
 def test_a_guest_that_never_answers_points_at_setup(isolate_secrets, monkeypatch):
-    monkeypatch.setattr(cib.time, "sleep", lambda s: None)
-    monkeypatch.setattr(cib, "GUEST_WAIT_SECS", 0)
+    monkeypatch.setattr(bib.time, "sleep", lambda s: None)
+    monkeypatch.setattr(bib, "GUEST_WAIT_SECS", 0)
     monkeypatch.setattr(
-        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        bib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="", stderr="")
     )
-    with pytest.raises(cib.Failure, match="cib vm setup"):
-        isolate_secrets.wait_for_guest("tart", cib.VmConfig(), _FakeBoot())
+    with pytest.raises(bib.Failure, match="bib vm setup"):
+        isolate_secrets.wait_for_guest("tart", bib.VmConfig(), _FakeBoot())
 
 
 def test_no_test_can_start_a_real_vm():
     # start_detached uses subprocess.Popen directly, so a test that replaces only
-    # `cib.run` spawned tart for real and then sat in wait_for_guest for five
+    # `bib.run` spawned tart for real and then sat in wait_for_guest for five
     # minutes. The autouse fixture is what stops that.
-    assert cib.start_detached("tart", cib.VmConfig()).poll() is None
-    assert cib.wait_for_guest("tart", cib.VmConfig(), _FakeBoot()) == "192.168.1.50"
+    assert bib.start_detached("tart", bib.VmConfig()).poll() is None
+    assert bib.wait_for_guest("tart", bib.VmConfig(), _FakeBoot()) == "192.168.1.50"
 
 
 def test_the_address_the_guest_last_answered_on_is_remembered(credentials, monkeypatch):
@@ -3968,24 +4075,24 @@ def test_the_address_the_guest_last_answered_on_is_remembered(credentials, monke
     # only re-reads that table — it sends nothing that would repopulate it. Hit
     # twice on a real guest that was pingable the whole time.
     monkeypatch.setattr(
-        cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="10.0.0.9\n")
+        bib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout="10.0.0.9\n")
     )
-    assert cib.vm_ip("tart", cib.VmConfig()) == "10.0.0.9"
-    assert cib.read_state()["last_ip"] == "10.0.0.9"
+    assert bib.vm_ip("tart", bib.VmConfig()) == "10.0.0.9"
+    assert bib.read_state()["last_ip"] == "10.0.0.9"
 
-    monkeypatch.setattr(cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=""))
-    monkeypatch.setattr(cib, "guest_answers", lambda ip: ip == "10.0.0.9")
-    assert cib.vm_ip("tart", cib.VmConfig()) == "10.0.0.9"
+    monkeypatch.setattr(bib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=""))
+    monkeypatch.setattr(bib, "guest_answers", lambda ip: ip == "10.0.0.9")
+    assert bib.vm_ip("tart", bib.VmConfig()) == "10.0.0.9"
 
 
 def test_a_remembered_address_that_answers_nothing_is_not_used(credentials, monkeypatch):
     # A guest that has really gone needs the error, not an address that will time
     # out on every command after it.
-    cib.write_state(last_ip="10.0.0.9")
-    monkeypatch.setattr(cib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=""))
-    monkeypatch.setattr(cib, "guest_answers", lambda ip: False)
-    with pytest.raises(cib.Failure, match="cib vm status"):
-        cib.vm_ip("tart", cib.VmConfig())
+    bib.write_state(last_ip="10.0.0.9")
+    monkeypatch.setattr(bib, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, stdout=""))
+    monkeypatch.setattr(bib, "guest_answers", lambda ip: False)
+    with pytest.raises(bib.Failure, match="bib vm status"):
+        bib.vm_ip("tart", bib.VmConfig())
 
 
 def test_the_probe_asks_for_ssh_and_gives_up_quickly(monkeypatch):
@@ -4005,117 +4112,117 @@ def test_the_probe_asks_for_ssh_and_gives_up_quickly(monkeypatch):
             seen["addr"] = addr
             return 0
 
-    monkeypatch.setattr(cib.socket, "socket", lambda *a, **k: _Probe())
-    assert cib.guest_answers("10.0.0.9") is True
+    monkeypatch.setattr(bib.socket, "socket", lambda *a, **k: _Probe())
+    assert bib.guest_answers("10.0.0.9") is True
     assert seen["addr"] == ("10.0.0.9", 22)
     assert seen["timeout"] <= 5, "a dead guest must not hold the command up"
 
 
 def test_a_chosen_guest_password_is_used_instead_of_a_generated_one(credentials, monkeypatch):
-    monkeypatch.setenv("CIB_VM_PASSWORD", "admin")
-    assert cib.guest_password(create=True) == "admin"
-    # Saved like any other, so 'cib vm login' and the guest agree after the variable
+    monkeypatch.setenv("BIB_VM_PASSWORD", "admin")
+    assert bib.guest_password(create=True) == "admin"
+    # Saved like any other, so 'bib vm login' and the guest agree after the variable
     # is gone from the shell that built it.
-    monkeypatch.delenv("CIB_VM_PASSWORD")
-    assert cib.guest_password() == "admin"
+    monkeypatch.delenv("BIB_VM_PASSWORD")
+    assert bib.guest_password() == "admin"
 
 
 def test_a_chosen_password_with_a_shifting_key_is_refused(credentials, monkeypatch):
     # y and z swap between the US and Swiss German layouts, and the packer path types
     # this password in as keystrokes — so it would build a guest nobody can log into.
-    monkeypatch.setenv("CIB_VM_PASSWORD", "crazy")
-    with pytest.raises(cib.Failure, match="Swiss German"):
-        cib.guest_password(create=True)
+    monkeypatch.setenv("BIB_VM_PASSWORD", "crazy")
+    with pytest.raises(bib.Failure, match="Swiss German"):
+        bib.guest_password(create=True)
 
 
 def test_the_settings_file_fills_in_what_the_environment_does_not(tmp_path, monkeypatch):
-    config = tmp_path / "cib.yaml"
+    config = tmp_path / "bib.yaml"
     config.write_text(
         "box:\n  port: 7000\n  resolution: 1280x800\nvm:\n  name: work-vm\n  display: 1440x900\n"
     )
-    monkeypatch.setenv("CIB_CONFIG", str(config))
-    monkeypatch.setattr(cib, "CONFIG", cib.load_config())
+    monkeypatch.setenv("BIB_CONFIG", str(config))
+    monkeypatch.setattr(bib, "CONFIG", bib.load_config())
     # Sections map onto the two prefixes, so one file configures both variants.
-    assert cib.VmConfig().name == "work-vm"
-    assert cib.VmConfig().display == "1440x900"
-    assert cib.Config().port == 7000
+    assert bib.VmConfig().name == "work-vm"
+    assert bib.VmConfig().display == "1440x900"
+    assert bib.Config().port == 7000
 
 
 def test_the_environment_wins_over_the_settings_file(tmp_path, monkeypatch):
     """A variable exported for one command has to beat a file you edited once."""
-    config = tmp_path / "cib.yaml"
+    config = tmp_path / "bib.yaml"
     config.write_text("vm:\n  name: from-file\n")
-    monkeypatch.setenv("CIB_CONFIG", str(config))
-    monkeypatch.setattr(cib, "CONFIG", cib.load_config())
-    monkeypatch.setenv("CIB_VM_NAME", "from-env")
-    assert cib.VmConfig().name == "from-env"
+    monkeypatch.setenv("BIB_CONFIG", str(config))
+    monkeypatch.setattr(bib, "CONFIG", bib.load_config())
+    monkeypatch.setenv("BIB_VM_NAME", "from-env")
+    assert bib.VmConfig().name == "from-env"
 
 
 def test_a_settings_file_that_is_not_a_mapping_is_refused(tmp_path, monkeypatch):
-    config = tmp_path / "cib.yaml"
+    config = tmp_path / "bib.yaml"
     config.write_text("- one\n- two\n")
-    monkeypatch.setenv("CIB_CONFIG", str(config))
-    with pytest.raises(cib.Failure, match="mapping of sections"):
-        cib.load_config()
+    monkeypatch.setenv("BIB_CONFIG", str(config))
+    with pytest.raises(bib.Failure, match="mapping of sections"):
+        bib.load_config()
 
 
 def test_an_unknown_section_is_named_rather_than_ignored(tmp_path, monkeypatch):
     # Silently ignoring it looks exactly like the setting not working, which is the
     # one failure mode a settings file must not have.
-    config = tmp_path / "cib.yaml"
+    config = tmp_path / "bib.yaml"
     config.write_text("vm:\n  name: ok\ncontainer:\n  port: 1\n")
-    monkeypatch.setenv("CIB_CONFIG", str(config))
-    with pytest.raises(cib.Failure, match="container"):
-        cib.load_config()
+    monkeypatch.setenv("BIB_CONFIG", str(config))
+    with pytest.raises(bib.Failure, match="container"):
+        bib.load_config()
 
 
-def test_a_yaml_boolean_survives_as_the_string_the_rest_of_cib_reads(tmp_path, monkeypatch):
+def test_a_yaml_boolean_survives_as_the_string_the_rest_of_bib_reads(tmp_path, monkeypatch):
     # yaml turns "yes" into True, and everything downstream compares strings.
-    config = tmp_path / "cib.yaml"
+    config = tmp_path / "bib.yaml"
     config.write_text("box:\n  force: yes\n")
-    monkeypatch.setenv("CIB_CONFIG", str(config))
-    settings = cib.load_config()
-    assert settings["CIB_FORCE"] == "true"
+    monkeypatch.setenv("BIB_CONFIG", str(config))
+    settings = bib.load_config()
+    assert settings["BIB_FORCE"] == "true"
     # Stopping at the load is what let this pass for a key that did nothing:
     # env_flag read os.environ directly, so the file's value was parsed, stored and
     # never looked at again.
-    monkeypatch.setattr(cib, "CONFIG", settings)
-    assert cib.env_flag("CIB_FORCE") is True
+    monkeypatch.setattr(bib, "CONFIG", settings)
+    assert bib.env_flag("BIB_FORCE") is True
 
 
 def test_every_yes_no_setting_can_be_written_in_the_settings_file(tmp_path, monkeypatch):
-    # CIB_FORCE and CIB_VM_PACKER are the two, and neither reached its reader.
-    config = tmp_path / "cib.yaml"
+    # BIB_FORCE and BIB_VM_PACKER are the two, and neither reached its reader.
+    config = tmp_path / "bib.yaml"
     config.write_text("box:\n  force: 1\nvm:\n  packer: true\n")
-    monkeypatch.setenv("CIB_CONFIG", str(config))
-    monkeypatch.setattr(cib, "CONFIG", cib.load_config())
-    assert cib.env_flag("CIB_FORCE") is True
-    assert cib.env_flag("CIB_VM_PACKER") is True
-    assert cib.env_flag("CIB_NOT_SET_ANYWHERE") is False
+    monkeypatch.setenv("BIB_CONFIG", str(config))
+    monkeypatch.setattr(bib, "CONFIG", bib.load_config())
+    assert bib.env_flag("BIB_FORCE") is True
+    assert bib.env_flag("BIB_VM_PACKER") is True
+    assert bib.env_flag("BIB_NOT_SET_ANYWHERE") is False
     # And the environment still wins, the same way it does for every other setting.
-    monkeypatch.setenv("CIB_VM_PACKER", "0")
-    assert cib.env_flag("CIB_VM_PACKER") is False
+    monkeypatch.setenv("BIB_VM_PACKER", "0")
+    assert bib.env_flag("BIB_VM_PACKER") is False
 
 
 def test_the_engine_can_be_named_in_the_settings_file(tmp_path, monkeypatch):
-    config = tmp_path / "cib.yaml"
+    config = tmp_path / "bib.yaml"
     config.write_text("box:\n  engine: docker\n")
-    monkeypatch.setenv("CIB_CONFIG", str(config))
-    monkeypatch.setattr(cib, "CONFIG", cib.load_config())
+    monkeypatch.setenv("BIB_CONFIG", str(config))
+    monkeypatch.setattr(bib, "CONFIG", bib.load_config())
     monkeypatch.setattr(
-        cib.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "docker" else None
+        bib.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "docker" else None
     )
-    assert cib.find_engine() == "/usr/bin/docker"
+    assert bib.find_engine() == "/usr/bin/docker"
 
 
 def test_no_settings_file_is_normal_and_silent(tmp_path, monkeypatch):
-    monkeypatch.setenv("CIB_CONFIG", str(tmp_path / "absent.yaml"))
-    assert cib.load_config() == {}
+    monkeypatch.setenv("BIB_CONFIG", str(tmp_path / "absent.yaml"))
+    assert bib.load_config() == {}
 
 
 # The icon is built with osacompile, sips and iconutil, none of which exist off
 # macOS — and CI runs the suite on Linux. Skipped rather than faked: what these
-# assert is that macOS itself accepts what cib writes, and a fake would assert
+# assert is that macOS itself accepts what bib writes, and a fake would assert
 # nothing.
 macos_only = pytest.mark.skipif(sys.platform != "darwin", reason="needs macOS tooling")
 
@@ -4124,13 +4231,13 @@ def test_the_launcher_names_the_interpreter_instead_of_trusting_the_path(tmp_pat
     # A Dock launch gets almost none of a login shell's PATH, so `env python3`
     # resolves against /usr/bin — where an unconfigured Mac has a stub that opens
     # the "install command line tools" dialog instead of running anything.
-    script = tmp_path / "cib.py"
+    script = tmp_path / "bib.py"
     script.touch()
     monkeypatch.setattr(sys, "argv", [str(script)])
     monkeypatch.setattr(sys, "executable", "/opt/python/bin/python3")
     monkeypatch.setattr(sys, "prefix", "/opt/python")
     monkeypatch.setattr(sys, "base_prefix", "/opt/python")
-    assert cib.launcher_command() == f"/opt/python/bin/python3 {shlex.quote(str(script.resolve()))}"
+    assert bib.launcher_command() == f"/opt/python/bin/python3 {shlex.quote(str(script.resolve()))}"
 
 
 def test_the_launcher_does_not_bake_in_a_virtualenv(tmp_path, monkeypatch):
@@ -4140,34 +4247,34 @@ def test_the_launcher_does_not_bake_in_a_virtualenv(tmp_path, monkeypatch):
     base = tmp_path / "base"
     (base / "bin").mkdir(parents=True)
     (base / "bin" / "python3").touch()
-    script = tmp_path / "cib.py"
+    script = tmp_path / "bib.py"
     script.touch()
     monkeypatch.setattr(sys, "argv", [str(script)])
     monkeypatch.setattr(sys, "executable", str(tmp_path / "throwaway" / "bin" / "python3"))
     monkeypatch.setattr(sys, "prefix", str(tmp_path / "throwaway"))
     monkeypatch.setattr(sys, "base_prefix", str(base))
-    command = cib.launcher_command()
-    # The icon has to outlive the shell that wrote it, and cib imports nothing
+    command = bib.launcher_command()
+    # The icon has to outlive the shell that wrote it, and bib imports nothing
     # outside the standard library, so the base interpreter runs it just as well.
     assert command.startswith(shlex.quote(str(base / "bin" / "python3")))
     assert "throwaway" not in command
 
 
 def test_a_virtualenv_that_names_a_base_which_is_gone_falls_back(tmp_path, monkeypatch):
-    script = tmp_path / "cib.py"
+    script = tmp_path / "bib.py"
     script.touch()
     monkeypatch.setattr(sys, "argv", [str(script)])
     monkeypatch.setattr(sys, "executable", "/venv/bin/python3")
     monkeypatch.setattr(sys, "prefix", "/venv")
     monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "no-such-base"))
-    assert cib.launcher_command().startswith("/venv/bin/python3 ")
+    assert bib.launcher_command().startswith("/venv/bin/python3 ")
 
 
 def test_a_frozen_build_is_its_own_interpreter(tmp_path, monkeypatch):
-    binary = tmp_path / "cib"
+    binary = tmp_path / "bib"
     binary.touch()
     monkeypatch.setattr(sys, "argv", [str(binary)])
-    assert cib.launcher_command() == shlex.quote(str(binary.resolve()))
+    assert bib.launcher_command() == shlex.quote(str(binary.resolve()))
 
 
 @macos_only
@@ -4177,38 +4284,38 @@ def test_the_icon_is_a_real_app_bundle_rather_than_a_script(tmp_path, monkeypatc
     LaunchServices reports success, nothing executes, and nothing reaches the log
     — so the failure is invisible. osacompile builds a real signed bundle.
     """
-    monkeypatch.setattr(cib, "APPS_DIR", tmp_path / "Applications")
-    # cib.py, not pytest: sys.argv[0] under pytest is the runner, and a bundle
+    monkeypatch.setattr(bib, "APPS_DIR", tmp_path / "Applications")
+    # bib.py, not pytest: sys.argv[0] under pytest is the runner, and a bundle
     # pointing at that is not the launcher anyone would ever get.
-    entry = Path(cib.__file__).resolve()
+    entry = Path(bib.__file__).resolve()
     monkeypatch.setattr(sys, "argv", [str(entry)])
-    cib.cmd_vm_icon("tart", cib.VmConfig())
+    bib.cmd_vm_icon("tart", bib.VmConfig())
     bundle = tmp_path / "Applications" / "Google Chrome in a Box.app"
     assert (bundle / "Contents" / "MacOS" / "applet").exists()
-    compiled = cib.run(
+    compiled = bib.run(
         "/usr/bin/osadecompile",
         str(bundle / "Contents" / "Resources" / "Scripts" / "main.scpt"),
         capture=True,
     ).stdout
     # The settings are baked in: a Dock click inherits almost none of a login
-    # shell's environment, so a CIB_VM_NAME set in a profile would open another VM.
-    assert "CIB_VM_NAME=chrome-vm" in compiled
+    # shell's environment, so a BIB_VM_NAME set in a profile would open another VM.
+    assert "BIB_VM_NAME=browser-vm" in compiled
     assert "vm open" in compiled
-    assert str(entry) in compiled, "the bundle has to invoke cib, not whatever ran it"
+    assert str(entry) in compiled, "the bundle has to invoke bib, not whatever ran it"
 
 
 @macos_only
 def test_a_second_vm_gets_its_own_icon(tmp_path, monkeypatch):
-    monkeypatch.setattr(cib, "APPS_DIR", tmp_path / "Applications")
-    monkeypatch.setenv("CIB_VM_NAME", "work-vm")
-    cib.cmd_vm_icon("tart", cib.VmConfig())
+    monkeypatch.setattr(bib, "APPS_DIR", tmp_path / "Applications")
+    monkeypatch.setenv("BIB_VM_NAME", "work-vm")
+    bib.cmd_vm_icon("tart", bib.VmConfig())
     assert (tmp_path / "Applications" / "Google Chrome in a Box (work-vm).app").exists()
 
 
 def test_an_applescript_string_escapes_its_two_special_characters():
     # A share path with a quote in it would otherwise end the string early and
     # compile into something else entirely.
-    assert cib.applescript_string(r'a"b\c') == r'"a\"b\\c"'
+    assert bib.applescript_string(r'a"b\c') == r'"a\"b\\c"'
 
 
 @macos_only
@@ -4218,10 +4325,10 @@ def test_the_icon_is_a_valid_pdf_that_sips_can_rasterise(tmp_path):
     The check is that macOS itself reads it, not that the bytes look plausible.
     """
     source = tmp_path / "icon.pdf"
-    source.write_bytes(cibicon.pdf())
+    source.write_bytes(bibicon.pdf())
     assert source.read_bytes().startswith(b"%PDF-")
     out = tmp_path / "icon.png"
-    cib.run(
+    bib.run(
         "/usr/bin/sips",
         "-s",
         "format",
@@ -4236,7 +4343,7 @@ def test_the_icon_is_a_valid_pdf_that_sips_can_rasterise(tmp_path):
     )
     assert out.exists()
     # Transparent outside the artwork, or the icon wears a white square.
-    alpha = cib.run("/usr/bin/sips", "-g", "hasAlpha", str(out), capture=True).stdout
+    alpha = bib.run("/usr/bin/sips", "-g", "hasAlpha", str(out), capture=True).stdout
     assert "yes" in alpha
 
 
@@ -4246,9 +4353,9 @@ def test_the_icon_holds_every_size_macos_asks_for(tmp_path):
     target = tmp_path / "applet.icns"
     scratch = tmp_path / "scratch"
     scratch.mkdir()
-    cib._build_icns(target, scratch)
+    bib._build_icns(target, scratch)
     unpacked = tmp_path / "out.iconset"
-    cib.run("/usr/bin/iconutil", "-c", "iconset", "-o", str(unpacked), str(target), capture=True)
+    bib.run("/usr/bin/iconutil", "-c", "iconset", "-o", str(unpacked), str(target), capture=True)
     present = {png.name for png in unpacked.glob("*.png")}
     assert "icon_512x512@2x.png" in present, "no 1024, so the largest sizes are upscaled"
     assert "icon_16x16.png" in present
@@ -4260,11 +4367,11 @@ def test_the_drawing_uses_both_the_browser_and_the_box():
     Asserting on the colours rather than the shapes — it is the four Google ones
     plus cardboard that carry the meaning, and geometry has no stable assertion.
     """
-    drawing = "\n".join(cibicon._artwork())
-    for colour in (cibicon.RED, cibicon.YELLOW, cibicon.GREEN, cibicon.BLUE):
-        assert cibicon._fill(colour) in drawing
-    assert cibicon._fill(cibicon.CARTON_FACE) in drawing
-    assert cibicon._fill(cibicon.CARTON_FLAP) in drawing
+    drawing = "\n".join(bibicon._artwork())
+    for colour in (bibicon.RED, bibicon.YELLOW, bibicon.GREEN, bibicon.BLUE):
+        assert bibicon._fill(colour) in drawing
+    assert bibicon._fill(bibicon.CARTON_FACE) in drawing
+    assert bibicon._fill(bibicon.CARTON_FLAP) in drawing
 
 
 def test_opening_a_running_guest_brings_its_window_forward(tmp_path, monkeypatch, calls):
@@ -4276,8 +4383,8 @@ def test_opening_a_running_guest_brings_its_window_forward(tmp_path, monkeypatch
     binary = bundle / "Contents" / "MacOS" / "tart"
     binary.parent.mkdir(parents=True)
     binary.write_text("")
-    monkeypatch.setattr(cib, "vm_running", lambda tart, vm: True)
-    cib.cmd_vm_open(str(binary), cib.VmConfig())
+    monkeypatch.setattr(bib, "vm_running", lambda tart, vm: True)
+    bib.cmd_vm_open(str(binary), bib.VmConfig())
     assert ["/usr/bin/open", "-a", str(bundle)] in calls
 
 
@@ -4287,45 +4394,45 @@ def test_a_tart_outside_an_app_bundle_is_left_alone(tmp_path, monkeypatch, calls
     binary = tmp_path / "bin" / "tart"
     binary.parent.mkdir(parents=True)
     binary.write_text("")
-    monkeypatch.setattr(cib, "vm_running", lambda tart, vm: True)
-    cib.cmd_vm_open(str(binary), cib.VmConfig())
+    monkeypatch.setattr(bib, "vm_running", lambda tart, vm: True)
+    bib.cmd_vm_open(str(binary), bib.VmConfig())
     assert not any(call[:2] == ["/usr/bin/open", "-a"] for call in calls)
 
 
 def test_the_state_file_says_what_each_value_is(tmp_path):
     """It replaced a directory of bare values — vm-last-ip held an address and
     nothing else, so the only way to know what it was for was to read the source."""
-    cib.write_state(last_ip="10.0.0.5")
-    written = cib.STATE.read_text()
+    bib.write_state(last_ip="10.0.0.5")
+    written = bib.STATE.read_text()
     assert "last_ip: 10.0.0.5" in written
     assert written.startswith("#"), "no line saying where the file came from"
-    assert cib.read_state()["last_ip"] == "10.0.0.5"
+    assert bib.read_state()["last_ip"] == "10.0.0.5"
 
 
 def test_updating_one_value_keeps_the_others(tmp_path):
-    cib.write_state(last_ip="10.0.0.5", something_else="kept")
-    cib.write_state(last_ip="10.0.0.6")
-    assert cib.read_state() == {"last_ip": "10.0.0.6", "something_else": "kept"}
+    bib.write_state(last_ip="10.0.0.5", something_else="kept")
+    bib.write_state(last_ip="10.0.0.6")
+    assert bib.read_state() == {"last_ip": "10.0.0.6", "something_else": "kept"}
 
 
 def test_the_old_remembered_address_is_carried_into_the_state_file(tmp_path):
     """Losing it costs a guest that arp has forgotten, which is the case it is for."""
-    cib.SECRETS.mkdir(parents=True, exist_ok=True)
-    (cib.SECRETS / "vm-last-ip").write_text("10.0.0.9\n")
-    cib.migrate_flat_secrets()
-    assert cib.read_state()["last_ip"] == "10.0.0.9"
-    assert not (cib.SECRETS / "vm-last-ip").exists()
+    bib.SECRETS.mkdir(parents=True, exist_ok=True)
+    (bib.SECRETS / "vm-last-ip").write_text("10.0.0.9\n")
+    bib.migrate_flat_secrets()
+    assert bib.read_state()["last_ip"] == "10.0.0.9"
+    assert not (bib.SECRETS / "vm-last-ip").exists()
 
 
-@pytest.mark.parametrize("key", sorted(cibbrowsers.BROWSERS.keys() - {cibbrowsers.ALL}))
+@pytest.mark.parametrize("key", sorted(bibbrowsers.BROWSERS.keys() - {bibbrowsers.ALL}))
 def test_every_browser_installs_from_a_script_that_actually_runs(key, tmp_path):
     """Rendering is not running. Firefox and Chromium take different shapes —
     a different archive, a different profile, a different way of being made the
     default — and a template can look right and still be unrunnable shell."""
     (tmp_path / "Downloads").mkdir()
-    browser = cibbrowsers.BROWSERS[key]
+    browser = bibbrowsers.BROWSERS[key]
     result = _run_guest_script(
-        cib.guest_install_script("pw", browser=browser),
+        bib.guest_install_script("pw", browser=browser),
         tmp_path,
         share_exists=True,
         browser=browser,
@@ -4343,11 +4450,11 @@ def test_every_browser_installs_from_a_script_that_actually_runs(key, tmp_path):
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("key", sorted(cibbrowsers.BROWSERS.keys() - {cibbrowsers.ALL}))
+@pytest.mark.parametrize("key", sorted(bibbrowsers.BROWSERS.keys() - {bibbrowsers.ALL}))
 def test_every_browser_is_pointed_at_the_shared_downloads_folder(key):
     """The whole point of the share is that what you download lands on the host."""
-    script = cib.guest_install_script("pw", browser=cibbrowsers.BROWSERS[key])
-    assert cib.GUEST_SHARE in script
+    script = bib.guest_install_script("pw", browser=bibbrowsers.BROWSERS[key])
+    assert bib.GUEST_SHARE in script
 
 
 def test_the_install_script_refuses_the_all_sentinel():
@@ -4355,8 +4462,8 @@ def test_the_install_script_refuses_the_all_sentinel():
     # "/Applications" itself — and this script does `rm -rf` on it before installing.
     # install_browsers expands the choice first, so nothing reaches this today; the
     # guard is what keeps the next call site from finding out the hard way.
-    with pytest.raises(cib.Failure) as failure:
-        cib.guest_install_script("pw", browser=cibbrowsers.BROWSERS[cibbrowsers.ALL])
+    with pytest.raises(bib.Failure) as failure:
+        bib.guest_install_script("pw", browser=bibbrowsers.BROWSERS[bibbrowsers.ALL])
     assert "expand" in str(failure.value)
 
 
@@ -4364,16 +4471,16 @@ def test_installing_every_browser_leaves_all_of_them_in_the_dock():
     # -array replaces the row. One script per browser meant each pass threw the
     # previous browser out again, so the Dock held whichever was installed last —
     # and re-running with -array-add alone would instead stack duplicates.
-    first = cib.guest_install_script("pw", browser=cibbrowsers.BROWSERS["chrome"], first=True)
-    later = cib.guest_install_script("pw", browser=cibbrowsers.BROWSERS["firefox"], first=False)
+    first = bib.guest_install_script("pw", browser=bibbrowsers.BROWSERS["chrome"], first=True)
+    later = bib.guest_install_script("pw", browser=bibbrowsers.BROWSERS["firefox"], first=False)
     assert "persistent-apps -array \\" in first, "the first pass clears Apple's suite out"
     assert "persistent-apps -array-add \\" in later, "the rest add themselves to it"
 
 
 def test_only_the_first_browser_of_a_run_is_made_the_default():
-    first = cib.guest_install_script("pw", browser=cibbrowsers.BROWSERS["chrome"], first=True)
-    later = cib.guest_install_script("pw", browser=cibbrowsers.BROWSERS["chromium"], first=False)
-    firefox = cib.guest_install_script("pw", browser=cibbrowsers.BROWSERS["firefox"], first=False)
+    first = bib.guest_install_script("pw", browser=bibbrowsers.BROWSERS["chrome"], first=True)
+    later = bib.guest_install_script("pw", browser=bibbrowsers.BROWSERS["chromium"], first=False)
+    firefox = bib.guest_install_script("pw", browser=bibbrowsers.BROWSERS["firefox"], first=False)
     assert "--make-default-browser" in first
     assert "--make-default-browser" not in later
     assert "--setDefaultBrowser" not in firefox
@@ -4383,10 +4490,10 @@ def test_installing_all_browsers_asks_exactly_one_of_them_to_be_the_default(monk
     # The wiring, not just the flag: every pass used to ask, so the default ended up
     # being whichever browser the table happens to list last.
     scripts: list[str] = []
-    monkeypatch.setattr(cib, "host_time_zone", lambda: ("Europe/Zurich", "Zurich"))
-    monkeypatch.setattr(cib, "guest_ssh", lambda vm, ip, script: scripts.append(script) or 0)
-    assert cib.install_browsers(cib.VmConfig(browser=cibbrowsers.ALL), "10.0.0.9", "pw") == 0
-    assert len(scripts) == len(cibbrowsers.expand(cibbrowsers.ALL))
+    monkeypatch.setattr(bib, "host_time_zone", lambda: ("Europe/Zurich", "Zurich"))
+    monkeypatch.setattr(bib, "guest_ssh", lambda vm, ip, script: scripts.append(script) or 0)
+    assert bib.install_browsers(bib.VmConfig(browser=bibbrowsers.ALL), "10.0.0.9", "pw") == 0
+    assert len(scripts) == len(bibbrowsers.expand(bibbrowsers.ALL))
     asked = [s for s in scripts if "--make-default-browser" in s or "--setDefaultBrowser" in s]
     assert len(asked) == 1
     assert sum("persistent-apps -array \\" in s for s in scripts) == 1
@@ -4395,8 +4502,8 @@ def test_installing_all_browsers_asks_exactly_one_of_them_to_be_the_default(monk
 def test_firefox_gets_a_profiles_ini_and_chromium_does_not():
     # Firefox ignores a profile directory it has not been told about, so the files
     # alone would be written and never read.
-    firefox = cib.guest_install_script("pw", browser=cibbrowsers.BROWSERS["firefox"])
-    chrome = cib.guest_install_script("pw", browser=cibbrowsers.BROWSERS["chrome"])
+    firefox = bib.guest_install_script("pw", browser=bibbrowsers.BROWSERS["firefox"])
+    chrome = bib.guest_install_script("pw", browser=bibbrowsers.BROWSERS["chrome"])
     assert "profiles.ini" in firefox
     assert "user_pref" in firefox
     assert "profiles.ini" not in chrome
@@ -4406,17 +4513,17 @@ def test_firefox_gets_a_profiles_ini_and_chromium_does_not():
 def test_each_browser_draws_a_different_icon():
     """A launcher per browser is useless if they all look the same in the Dock."""
     drawn = {
-        key: cibicon.pdf(browser.palette, browser.mark)
-        for key, browser in cibbrowsers.BROWSERS.items()
+        key: bibicon.pdf(browser.palette, browser.mark)
+        for key, browser in bibbrowsers.BROWSERS.items()
     }
     assert len(set(drawn.values())) == len(drawn), "two browsers render identically"
 
 
-@pytest.mark.parametrize("key", sorted(cibbrowsers.BROWSERS.keys() - {cibbrowsers.ALL}))
+@pytest.mark.parametrize("key", sorted(bibbrowsers.BROWSERS.keys() - {bibbrowsers.ALL}))
 def test_every_browser_has_a_full_palette(key):
     # _artwork unpacks exactly four: top, lower left, lower right, centre. A short
     # one would raise at draw time, which is after the bundle has been written.
-    assert len(cibbrowsers.BROWSERS[key].palette) == 4
+    assert len(bibbrowsers.BROWSERS[key].palette) == 4
 
 
 def test_every_module_is_in_the_wheel():
@@ -4425,14 +4532,14 @@ def test_every_module_is_in_the_wheel():
     The failure is invisible until someone installs it: the tests import from the
     source tree and pass, and only the packaged console script raises
     ModuleNotFoundError. Read with a regex rather than tomllib, which needs 3.11
-    while cib supports 3.10.
+    while bib supports 3.10.
     """
     root = Path(__file__).resolve().parent.parent
     manifest = (root / "pyproject.toml").read_text()
     listed = re.search(r"only-include = \[([^\]]*)\]", manifest)
     assert listed, "the wheel manifest has moved"
     shipped = set(re.findall(r'"([^"]+)"', listed.group(1)))
-    present = {module.name for module in root.glob("cib*.py")}
+    present = {module.name for module in root.glob("bib*.py")}
     assert present <= shipped, f"not in the wheel: {sorted(present - shipped)}"
 
 
@@ -4442,32 +4549,32 @@ def test_firefox_is_a_different_shape_and_not_a_recoloured_chrome():
     The shapes are compared with one palette held constant, so what differs can
     only be the geometry.
     """
-    palette = cibicon.DEFAULT_PALETTE
-    wheel = cibicon.pdf(palette, "wheel")
-    flame = cibicon.pdf(palette, "flame")
+    palette = bibicon.DEFAULT_PALETTE
+    wheel = bibicon.pdf(palette, "wheel")
+    flame = bibicon.pdf(palette, "flame")
     assert wheel != flame
-    assert cibbrowsers.BROWSERS["firefox"].mark == "flame"
+    assert bibbrowsers.BROWSERS["firefox"].mark == "flame"
     # Chromium's real mark is Chrome's, in blue and grey. Same shape is correct.
-    assert cibbrowsers.BROWSERS["chromium"].mark == cibbrowsers.BROWSERS["chrome"].mark
+    assert bibbrowsers.BROWSERS["chromium"].mark == bibbrowsers.BROWSERS["chrome"].mark
 
 
 def test_every_browser_names_a_mark_that_exists():
     # An unknown one raises inside the drawing, which is after the bundle has been
     # written and the launcher already looks installed.
-    for browser in cibbrowsers.BROWSERS.values():
-        assert browser.mark in cibicon.MARKS, browser.key
+    for browser in bibbrowsers.BROWSERS.values():
+        assert browser.mark in bibicon.MARKS, browser.key
 
 
 def test_the_all_mode_installs_every_browser_and_the_container_refuses_it():
     """One image serves one browser, so 'all' can only mean the VM."""
-    assert [b.key for b in cibbrowsers.expand(cibbrowsers.ALL)] == ["chrome", "firefox", "chromium"]
-    assert cibbrowsers.BROWSERS[cibbrowsers.ALL].mark == "globe"
+    assert [b.key for b in bibbrowsers.expand(bibbrowsers.ALL)] == ["chrome", "firefox", "chromium"]
+    assert bibbrowsers.BROWSERS[bibbrowsers.ALL].mark == "globe"
 
 
 def test_the_container_says_why_it_cannot_hold_every_browser(monkeypatch):
-    monkeypatch.setenv("CIB_BROWSER", "all")
-    with pytest.raises(cib.Failure, match="VM mode"):
-        cib.Config()
+    monkeypatch.setenv("BIB_BROWSER", "all")
+    with pytest.raises(bib.Failure, match="VM mode"):
+        bib.Config()
 
 
 def test_the_vm_installs_one_browser_per_pass(monkeypatch, tmp_path):
@@ -4476,40 +4583,40 @@ def test_the_vm_installs_one_browser_per_pass(monkeypatch, tmp_path):
     A script that installed three would need a second dimension of conditionals
     inside shell that is already the hardest thing here to read.
     """
-    monkeypatch.setenv("CIB_BROWSER", "all")
+    monkeypatch.setenv("BIB_BROWSER", "all")
     seen = []
-    monkeypatch.setattr(cib, "guest_ssh", lambda vm, ip, script=None: seen.append(script) or 0)
-    monkeypatch.setattr(cib, "host_time_zone", lambda: ("Europe/Zurich", "Zurich"))
-    assert cib.install_browsers(cib.VmConfig(), "10.0.0.5", "pw") == 0
+    monkeypatch.setattr(bib, "guest_ssh", lambda vm, ip, script=None: seen.append(script) or 0)
+    monkeypatch.setattr(bib, "host_time_zone", lambda: ("Europe/Zurich", "Zurich"))
+    assert bib.install_browsers(bib.VmConfig(), "10.0.0.5", "pw") == 0
     assert len(seen) == 3
-    for browser in cibbrowsers.expand(cibbrowsers.ALL):
+    for browser in bibbrowsers.expand(bibbrowsers.ALL):
         assert any(browser.app in script for script in seen), browser.key
 
 
 def test_a_failing_browser_stops_the_rest(monkeypatch):
     # Otherwise the run reports the last browser's exit code and the earlier
     # failure disappears, which is the one thing a loop must not do.
-    monkeypatch.setenv("CIB_BROWSER", "all")
-    monkeypatch.setattr(cib, "guest_ssh", lambda vm, ip, script=None: 1)
-    monkeypatch.setattr(cib, "host_time_zone", lambda: ("Europe/Zurich", "Zurich"))
-    assert cib.install_browsers(cib.VmConfig(), "10.0.0.5", "pw") == 1
+    monkeypatch.setenv("BIB_BROWSER", "all")
+    monkeypatch.setattr(bib, "guest_ssh", lambda vm, ip, script=None: 1)
+    monkeypatch.setattr(bib, "host_time_zone", lambda: ("Europe/Zurich", "Zurich"))
+    assert bib.install_browsers(bib.VmConfig(), "10.0.0.5", "pw") == 1
 
 
 @macos_only
 def test_the_built_icns_differs_per_browser_not_just_the_drawing(tmp_path):
     """The drawing took a palette and the thing that packs it threw it away.
 
-    Every launcher wore Chrome's wheel. The earlier test called cibicon.pdf
+    Every launcher wore Chrome's wheel. The earlier test called bibicon.pdf
     directly, so it passed while the path that actually writes the icon did not
     use either argument — which is why this one goes through _build_icns.
     """
     built = {}
-    for key in ("chrome", "firefox", cibbrowsers.ALL):
-        browser = cibbrowsers.BROWSERS[key]
+    for key in ("chrome", "firefox", bibbrowsers.ALL):
+        browser = bibbrowsers.BROWSERS[key]
         scratch = tmp_path / key
         scratch.mkdir()
         target = scratch / "applet.icns"
-        cib._build_icns(target, scratch, browser.palette, browser.mark)
+        bib._build_icns(target, scratch, browser.palette, browser.mark)
         built[key] = target.read_bytes()
     assert len(set(built.values())) == len(built), "the launchers all look the same"
 
@@ -4529,20 +4636,20 @@ def test_the_tart_bundle_is_found_through_homebrews_shim(tmp_path):
     shim.write_text('#!/bin/bash\nexec .../tart.app/Contents/MacOS/tart "$@"\n')
     bundle = prefix / "libexec" / "tart.app"
     (bundle / "Contents" / "MacOS").mkdir(parents=True)
-    assert cib.tart_bundle(str(shim)) == bundle
+    assert bib.tart_bundle(str(shim)) == bundle
 
 
 def test_a_bare_tart_binary_has_no_bundle_to_activate(tmp_path):
     binary = tmp_path / "bin" / "tart"
     binary.parent.mkdir(parents=True)
     binary.write_text("")
-    assert cib.tart_bundle(str(binary)) is None
+    assert bib.tart_bundle(str(binary)) is None
 
 
-def test_a_detached_guest_survives_writing_to_stderr_after_cib_exits(tmp_path, isolate_secrets):
+def test_a_detached_guest_survives_writing_to_stderr_after_bib_exits(tmp_path, isolate_secrets):
     """A pipe nobody drains is not a detach.
 
-    tart blocks once 64 KiB of diagnostics fill it, and when cib exits the read
+    tart blocks once 64 KiB of diagnostics fill it, and when bib exits the read
     end closes so the next write is a SIGPIPE. Either one kills the guest that
     start_new_session was added to keep alive.
     """
@@ -4550,6 +4657,6 @@ def test_a_detached_guest_survives_writing_to_stderr_after_cib_exits(tmp_path, i
     # More than a pipe buffer holds, so a pipe would block rather than finish.
     noisy.write_text("#!/bin/sh\nawk 'BEGIN{for(i=0;i<3000;i++)print \"diagnostic line\"}' >&2\n")
     noisy.chmod(0o755)
-    boot = isolate_secrets.start_detached(str(noisy), cib.VmConfig())
+    boot = isolate_secrets.start_detached(str(noisy), bib.VmConfig())
     assert boot.wait(timeout=30) == 0, "tart blocked writing to a pipe nobody reads"
-    assert "diagnostic line" in cib.BOOT_LOG.read_text()
+    assert "diagnostic line" in bib.BOOT_LOG.read_text()

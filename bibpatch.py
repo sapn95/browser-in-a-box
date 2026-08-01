@@ -26,7 +26,7 @@ What gets written, and why each is needed:
                                      U.S. puts the punctuation somewhere else
   loginwindow autoLoginUser          boot straight to the desktop
   /etc/kcpassword                    the obfuscated password autologin reads
-  launchd disabled.plist             turns on Remote Login, which is how cib then
+  launchd disabled.plist             turns on Remote Login, which is how bib then
                                      takes the guest over
 
 Standard library only, like the rest of this project: hashlib does PBKDF2 and
@@ -74,7 +74,7 @@ class Account:
 
 @dataclass(frozen=True)
 class Keys:
-    """What the guest needs so cib can reach it by key alone: the public key it
+    """What the guest needs so bib can reach it by key alone: the public key it
     should trust, and the host key it should present."""
 
     authorized: str = ""
@@ -238,14 +238,14 @@ def write_private(path: Path, data: bytes, mode: int = 0o600) -> None:
 
 
 def authorise_key(root: Path, account: Account, public_key: str) -> None:
-    """Let cib log in as the account without a password.
+    """Let bib log in as the account without a password.
 
-    sshd runs 'cib vm setup' non-interactively, and the script it runs carries the
+    sshd runs 'bib vm setup' non-interactively, and the script it runs carries the
     account's password for sudo. Sending that password to authenticate as well
     would mean sending it before the peer is identified at all.
     """
     # directory=True: this leaf IS a directory, and after the first patch it exists.
-    # Without it every later 'cib vm prepare' — the documented retry — refused to
+    # Without it every later 'bib vm prepare' — the documented retry — refused to
     # run, blaming the guest for something the guest did correctly.
     ssh_dir = guest_path(root, f"Users/{account.name}/.ssh", make_parents=True, directory=True)
     ssh_dir.mkdir(parents=True, exist_ok=True)
@@ -257,7 +257,7 @@ def authorise_key(root: Path, account: Account, public_key: str) -> None:
 
 
 def plant_host_key(root: Path, private_key: str, public_key: str) -> None:
-    """Give the guest the host key cib already expects.
+    """Give the guest the host key bib already expects.
 
     A host key the guest generates on first boot cannot be verified on the first
     connection, which is the one that carries the password. Planting it means there
@@ -355,7 +355,7 @@ def enable_autologin(root: Path, account: Account) -> None:
 
 
 def enable_remote_login(root: Path) -> None:
-    """Turn on sshd the way launchd records it, so cib can take over by SSH."""
+    """Turn on sshd the way launchd records it, so bib can take over by SSH."""
     relative = "private/var/db/com.apple.xpc.launchd/disabled.plist"
     record = read_plist(root, relative)
     record["com.openssh.sshd"] = False
@@ -372,7 +372,7 @@ def create_account(root: Path, account: Account) -> None:
     # The uid is fixed at 501, so a second account under a different name would be
     # the same user to the filesystem: logging in as the new one would give full
     # access to the old one's home, Chrome profile and login keychain. Changing
-    # CIB_VM_USER and re-running 'cib vm prepare' is a plausible way to reach this.
+    # BIB_VM_USER and re-running 'bib vm prepare' is a plausible way to reach this.
     # An account of this name that the guest already has: root, daemon, _spotlight
     # and a dozen others all match the name rules. Overwriting root's record with a
     # uid-501 one leaves the guest with no working sudo at all.
@@ -384,7 +384,7 @@ def create_account(root: Path, account: Account) -> None:
         if existing_uid and existing_uid != [str(account.uid)]:
             raise PatchError(
                 f"the guest already has an account called {account.name!r} on uid "
-                f"{existing_uid[0]} — this would overwrite it. Pick another CIB_VM_USER."
+                f"{existing_uid[0]} — this would overwrite it. Pick another BIB_VM_USER."
             )
     for existing in sorted(users.glob("*.plist")):
         if existing.stem == account.name or existing.is_symlink():
@@ -394,11 +394,11 @@ def create_account(root: Path, account: Account) -> None:
             raise PatchError(
                 f"the guest already has an account {existing.stem!r} on uid {account.uid}, "
                 f"so {account.name!r} would share its home and its keychain. Either set "
-                f"CIB_VM_USER={existing.stem} to keep using it, or 'cib vm delete' and "
+                f"BIB_VM_USER={existing.stem} to keep using it, or 'bib vm delete' and "
                 "build again."
             )
     # Reused when the account is already there: group membership records the GUID,
-    # so a fresh one on every 'cib vm prepare' would leave admin and staff pointing
+    # so a fresh one on every 'bib vm prepare' would leave admin and staff pointing
     # at a user that no longer exists under that id.
     existing = read_plist(
         root, f"private/var/db/dslocal/nodes/Default/users/{account.name}.plist"
@@ -650,16 +650,16 @@ def prepare(
 def main(argv: list[str]) -> int:
     """Run the patch as root, for just the step that needs it.
 
-    cib invokes this with sudo rather than asking for the whole build to run as
+    bib invokes this with sudo rather than asking for the whole build to run as
     root: a multi-gigabyte download and a VM boot have no business being root.
     The password arrives on stdin, so it is not in the process list.
     """
     import argparse
 
-    parser = argparse.ArgumentParser(prog="cibpatch", description=__doc__)
+    parser = argparse.ArgumentParser(prog="bibpatch", description=__doc__)
     parser.add_argument("--disk", required=True, type=Path)
     parser.add_argument("--user", required=True)
-    # Defaulted rather than required, so the patcher stays usable on its own; cib
+    # Defaulted rather than required, so the patcher stays usable on its own; bib
     # always passes the host's layout.
     parser.add_argument("--keyboard-id", type=int, default=Keyboard.layout_id)
     parser.add_argument("--keyboard-name", default=Keyboard.name)

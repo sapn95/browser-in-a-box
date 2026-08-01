@@ -24,14 +24,14 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
-      - name: the tag, cib.py and pyproject.toml must agree
+      - name: the tag, bib.py and pyproject.toml must agree
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          code=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' cib.py)
+          code=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' bib.py)
           meta=$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml)
-          echo "tag=$tag cib.py=$code pyproject=$meta"
-          test "$tag" = "$code" || { echo "cib.py says $code, the tag says $tag"; exit 1; }
+          echo "tag=$tag bib.py=$code pyproject=$meta"
+          test "$tag" = "$code" || { echo "bib.py says $code, the tag says $tag"; exit 1; }
           test "$tag" = "$meta" || { echo "pyproject says $meta, the tag says $tag"; exit 1; }
           # uv.lock carries a third copy of the version and is committed.
           lock=$(python3 -c "import re,pathlib;print(re.search(r'name = \"browser-in-a-box\"\nversion = \"([^\"]+)\"', pathlib.Path('uv.lock').read_text()).group(1))")
@@ -84,29 +84,29 @@ jobs:
           uv run --locked --python "${PYTHON_VERSION}" --group dev \
             python -m nuitka \
             --standalone --remove-output --assume-yes-for-downloads \
-            --include-data-files=cibpatch.py=cibpatch.py \
+            --include-data-files=bibpatch.py=bibpatch.py \
             --include-data-dir=packer=packer \
-            --output-filename=cib --output-dir=dist cib.py
-          ./dist/cib.dist/cib --version
-          # cibpatch.py is spawned as a script, never imported, so Nuitka has no
-          # way to know it is needed. Without it 'cib vm create' builds a whole
+            --output-filename=bib --output-dir=dist bib.py
+          ./dist/bib.dist/bib --version
+          # bibpatch.py is spawned as a script, never imported, so Nuitka has no
+          # way to know it is needed. Without it 'bib vm create' builds a whole
           # guest and only then reports the patcher missing.
-          test -f ./dist/cib.dist/cibpatch.py
-          test -f ./dist/cib.dist/packer/browser-vm.pkr.hcl
+          test -f ./dist/bib.dist/bibpatch.py
+          test -f ./dist/bib.dist/packer/browser-vm.pkr.hcl
       - name: package
         run: |
           # A top-level directory on purpose: this is a standalone build, ~44 files,
           # and it must not explode into whatever directory it is unpacked in.
-          mv dist/cib.dist "dist/cib-linux-${{ matrix.arch }}"
-          tar -czf "dist/cib-linux-${{ matrix.arch }}.tar.gz" \
-            -C dist "cib-linux-${{ matrix.arch }}"
+          mv dist/bib.dist "dist/bib-linux-${{ matrix.arch }}"
+          tar -czf "dist/bib-linux-${{ matrix.arch }}.tar.gz" \
+            -C dist "bib-linux-${{ matrix.arch }}"
           cd dist
-          sha256sum "cib-linux-${{ matrix.arch }}.tar.gz" \
-            > "cib-linux-${{ matrix.arch }}.tar.gz.sha256"
+          sha256sum "bib-linux-${{ matrix.arch }}.tar.gz" \
+            > "bib-linux-${{ matrix.arch }}.tar.gz.sha256"
       - uses: actions/upload-artifact@v7
         with:
-          name: cib-linux-${{ matrix.arch }}
-          path: dist/cib-linux-${{ matrix.arch }}.tar.gz*
+          name: bib-linux-${{ matrix.arch }}
+          path: dist/bib-linux-${{ matrix.arch }}.tar.gz*
 
   macos:
     name: binary (macos-arm64)
@@ -120,26 +120,26 @@ jobs:
         run: |
           uv run --locked --python "${PYTHON_VERSION}" --group dev python -m nuitka \
             --standalone --remove-output --assume-yes-for-downloads \
-            --include-data-files=cibpatch.py=cibpatch.py \
+            --include-data-files=bibpatch.py=bibpatch.py \
             --include-data-dir=packer=packer \
-            --output-filename=cib --output-dir=dist cib.py
-          ./dist/cib.dist/cib --version
-          # This is the build that can actually run 'cib vm', so the two files the
+            --output-filename=bib --output-dir=dist bib.py
+          ./dist/bib.dist/bib --version
+          # This is the build that can actually run 'bib vm', so the two files the
           # VM path spawns rather than imports have to be verified present.
-          test -f ./dist/cib.dist/cibpatch.py
-          test -f ./dist/cib.dist/packer/browser-vm.pkr.hcl
+          test -f ./dist/bib.dist/bibpatch.py
+          test -f ./dist/bib.dist/packer/browser-vm.pkr.hcl
       - name: package
         run: |
           # A top-level directory on purpose: this is a standalone build, ~44 files,
           # and it must not explode into whatever directory it is unpacked in.
-          mv dist/cib.dist dist/cib-macos-arm64
-          tar -czf dist/cib-macos-arm64.tar.gz -C dist cib-macos-arm64
+          mv dist/bib.dist dist/bib-macos-arm64
+          tar -czf dist/bib-macos-arm64.tar.gz -C dist bib-macos-arm64
           cd dist
-          shasum -a 256 cib-macos-arm64.tar.gz > cib-macos-arm64.tar.gz.sha256
+          shasum -a 256 bib-macos-arm64.tar.gz > bib-macos-arm64.tar.gz.sha256
       - uses: actions/upload-artifact@v7
         with:
-          name: cib-macos-arm64
-          path: dist/cib-macos-arm64.tar.gz*
+          name: bib-macos-arm64
+          path: dist/bib-macos-arm64.tar.gz*
 
   publish:
     name: publish release
@@ -175,11 +175,11 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: rewrite Formula/cib.rb with the published checksums
+      - name: rewrite Formula/bib.rb with the published checksums
         run: |
           version="${GITHUB_REF_NAME#v}"
-          sha() { cut -d' ' -f1 < "dist/cib-$1.tar.gz.sha256"; }
-          python3 scripts/update_formula.py "$version" Formula/cib.rb \
+          sha() { cut -d' ' -f1 < "dist/bib-$1.tar.gz.sha256"; }
+          python3 scripts/update_formula.py "$version" Formula/bib.rb \
             "macos-arm64=$(sha macos-arm64)" \
             "linux-arm64=$(sha linux-arm64)" \
             "linux-x86_64=$(sha linux-x86_64)"
@@ -192,6 +192,6 @@ jobs:
           # one-person project, once per release and forever.
           git config user.name "Sebastian Winterberger"
           git config user.email "sapn95@users.noreply.github.com"
-          git add Formula/cib.rb
+          git add Formula/bib.rb
           git commit -m "chore: point the Homebrew formula at ${GITHUB_REF_NAME}" || exit 0
           git push origin main

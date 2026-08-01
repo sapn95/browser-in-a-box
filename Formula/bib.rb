@@ -4,10 +4,10 @@
 # The published asset is a Nuitka standalone build: compiled, so there is no
 # interpreter and no readable source on disk. It is deliberately not a Nuitka
 # *onefile* binary — onefile unpacks its whole payload on every single run, which
-# made even `cib --help` take about four seconds. The directory form does not
+# made even `bib --help` take about four seconds. The directory form does not
 # unpack anything and starts in well under a second.
-class Cib < Formula
-  desc "Real Google Chrome in a box — a Linux container or a macOS VM"
+class Bib < Formula
+  desc "A real, unmanaged browser in a box — a Linux container or a macOS VM"
   homepage "https://github.com/sapn95/browser-in-a-box"
   version "2.0.0"
   license "MIT"
@@ -16,32 +16,32 @@ class Cib < Formula
     on_intel do
       # Only the container variant would work here anyway, and no Intel Mac binary
       # is published; say so instead of failing with a missing url.
-      odie "cib ships macOS binaries for Apple silicon only; run ./cib.py from a checkout"
+      odie "bib ships macOS binaries for Apple silicon only; run ./bib.py from a checkout"
     end
 
     on_arm do
-      url "https://github.com/sapn95/browser-in-a-box/releases/download/v2.0.0/cib-macos-arm64.tar.gz"
+      url "https://github.com/sapn95/browser-in-a-box/releases/download/v2.0.0/bib-macos-arm64.tar.gz"
       sha256 "83f9e00b0a422fe139a4f0b5eed9a39a905f3aabb85cf642fab3a0af15756f10"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/sapn95/browser-in-a-box/releases/download/v2.0.0/cib-linux-arm64.tar.gz"
+      url "https://github.com/sapn95/browser-in-a-box/releases/download/v2.0.0/bib-linux-arm64.tar.gz"
       sha256 "5dc0c85171b3d1fecd1f3dd281562d8e9bd0d1a5c3de04adb2847e1fb279d649"
     end
     on_intel do
-      url "https://github.com/sapn95/browser-in-a-box/releases/download/v2.0.0/cib-linux-x86_64.tar.gz"
+      url "https://github.com/sapn95/browser-in-a-box/releases/download/v2.0.0/bib-linux-x86_64.tar.gz"
       sha256 "975ec9552fa9c7a755a57d31ff4bf896bb701061964278d75cd7452b6c777495"
     end
   end
 
   def install
     libexec.install Dir["*"]
-    bin.install_symlink libexec/"cib"
+    bin.install_symlink libexec/"bib"
   end
 
   test do
-    assert_match "cib #{version}", shell_output("#{bin}/cib --version")
+    assert_match "bib #{version}", shell_output("#{bin}/bib --version")
   end
 end

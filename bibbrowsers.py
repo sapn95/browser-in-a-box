@@ -40,6 +40,10 @@ class Browser:
     settings: str = "chromium"
     # Relative to the guest's home. Chrome and Chromium differ only here.
     profile: str = ""
+    # What to tell the user once the guest is up. Not one sentence with the name
+    # swapped: the three browsers sync into three different things, and Chromium
+    # into none at all, so a single line would be wrong for two of them.
+    sign_in: str = ""
     # The container variant runs a Linux package inside Kasm's image, not a macOS
     # bundle, so none of the three fields above apply to it. Command names rather
     # than absolute paths, because that is what the image's own startup script uses
@@ -83,6 +87,7 @@ BROWSERS = {
     "chrome": Browser(
         key="chrome",
         label="Google Chrome",
+        sign_in="sign Google Chrome into your Google account",
         app_name="Google Chrome.app",
         executable="Google Chrome",
         archive="dmg",
@@ -100,6 +105,7 @@ BROWSERS = {
     "firefox": Browser(
         key="firefox",
         label="Firefox",
+        sign_in="sign Firefox into your Mozilla account",
         app_name="Firefox.app",
         executable="firefox",
         archive="dmg",
@@ -108,7 +114,7 @@ BROWSERS = {
         # renovate: datasource=docker depName=kasmweb/firefox
         image="docker.io/kasmweb/firefox:1.19.0",
         settings="firefox",
-        profile="Library/Application Support/Firefox/Profiles/cib.default-release",
+        profile="Library/Application Support/Firefox/Profiles/bib.default-release",
         container_bin="firefox",
         container_process="firefox",
         # The root, not one profile: which profile inside it is current is Firefox's
@@ -120,6 +126,9 @@ BROWSERS = {
     "chromium": Browser(
         key="chromium",
         label="Chromium",
+        # No sign-in to offer: Chromium ships without Google's API keys, so there is
+        # no account sync to point anyone at.
+        sign_in="keep in mind that Chromium has no account sync, so its profile stays here",
         app_name="Chromium.app",
         executable="Chromium",
         archive="zip",
@@ -152,6 +161,7 @@ ALL = "all"
 BROWSERS[ALL] = Browser(
     key=ALL,
     label="every browser",
+    sign_in="sign each browser into its own account",
     app_name="",
     executable="",
     archive="",
@@ -234,7 +244,7 @@ FIREFOX_PROFILES_INI = """\
 [Profile0]
 Name=default-release
 IsRelative=1
-Path=Profiles/cib.default-release
+Path=Profiles/bib.default-release
 Default=1
 
 [General]
