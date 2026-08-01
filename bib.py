@@ -1234,7 +1234,8 @@ def _create_offline(tart: str, vm: VmConfig) -> None:
     # the fallback is empty for exactly the user who ran one command and walked away.
     remember_ip(ip)
     print(
-        f"Setting up {vm.user}@{ip}: {chosen_browser().label}, the clipboard agent "
+        f"Setting up {vm.user}@{ip}: {bibbrowsers.BROWSERS[vm.browser].label}, "
+        "the clipboard agent "
         "and downloads ..."
     )
     if install_browsers(vm, ip, password) != 0:
@@ -2286,7 +2287,7 @@ def cmd_vm_setup(tart: str, vm: VmConfig) -> None:
             "itself was refused, re-install both with 'bib vm down', then "
             "'bib vm prepare', then 'bib vm up'."
         )
-    print(f"Done. In the guest, {chosen_browser().sign_in}.")
+    print(f"Done. In the guest, {bibbrowsers.BROWSERS[vm.browser].sign_in}.")
 
 
 def cmd_vm_down(tart: str, vm: VmConfig) -> None:
@@ -2401,12 +2402,13 @@ generated, so you never have to type it.
 anything after it from a second terminal. `create` does not: it starts the guest
 as a child that outlives it, which is what lets one command finish the job.
 
-`create` finishes with a running guest that has Chrome in it: it boots the VM
-itself, waits for it to answer, and installs Chrome, the clipboard agent and the
-shared downloads folder. `up`, `setup` and `prepare` are still there for redoing
-one part without the rest. That connection is by key, not by password: the build generates
-one and installs it, along with the guest's own host key, so bib can verify the
-guest on the very first connection. Nothing asks you to type anything.
+`create` finishes with a running guest that has the browser in it: it boots the VM
+itself, waits for it to answer, and installs whatever BIB_BROWSER names — all three
+of them under `all` — the clipboard agent and the shared downloads folder. `up`,
+`setup` and `prepare` are still there for redoing one part without the rest. That
+connection is by key, not by password: the build generates one and installs it,
+along with the guest's own host key, so bib can verify the guest on the very first
+connection. Nothing asks you to type anything.
 
 Downloads in the guest land in ~/Downloads/browser-vm on the host (BIB_VM_SHARE).
 
