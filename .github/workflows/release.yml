@@ -186,8 +186,12 @@ jobs:
           git diff --stat
       - name: commit
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # The repository owner, not github-actions[bot]. GitHub builds the
+          # contributor list out of the commit authors on the default branch, so
+          # committing as the bot put a machine account on the front page of a
+          # one-person project, once per release and forever.
+          git config user.name "Sebastian Winterberger"
+          git config user.email "sapn95@users.noreply.github.com"
           git add Formula/cib.rb
           git commit -m "chore: point the Homebrew formula at ${GITHUB_REF_NAME}" || exit 0
           git push origin main
