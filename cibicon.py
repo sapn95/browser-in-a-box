@@ -17,12 +17,15 @@ import math
 
 SIZE = 1024
 
-# Google's four, so the mark reads as Chrome at a glance.
+WHITE = (1.0, 1.0, 1.0)
+
+# Kept for the tests and for anything that wants the default without importing the
+# browser table. The palette a drawing actually uses comes in as an argument.
 RED = (0.918, 0.263, 0.208)
 YELLOW = (0.984, 0.737, 0.020)
 GREEN = (0.204, 0.659, 0.325)
 BLUE = (0.259, 0.522, 0.957)
-WHITE = (1.0, 1.0, 1.0)
+DEFAULT_PALETTE = (RED, GREEN, YELLOW, BLUE)
 
 # Corrugated cardboard, lit from above: the flaps catch more light than the face.
 CARTON_FACE = (0.776, 0.541, 0.275)
@@ -109,8 +112,13 @@ def _flap(x: float, y: float, base: float, reach: float, lean: tuple[float, floa
     return [(x, y), (x + base, y), (x + base + dx, y + dy), (x + dx, y + dy)]
 
 
-def _artwork() -> list[str]:
-    """Back to front: plate, the flaps behind, the browser, then the box in front."""
+def _artwork(palette: tuple = ()) -> list[str]:
+    """Back to front: plate, the flaps behind, the browser, then the box in front.
+
+    The palette is the browser's own — top, lower left, lower right, centre — so
+    the icon says which browser is in the box, not just that one is.
+    """
+    top, lower_left, lower_right, centre = palette or DEFAULT_PALETTE
     ball_x, ball_y, ball_r = 512.0, 636.0, 196.0
     box_left, box_right = 246.0, 778.0
     box_bottom, box_top = 214.0, 524.0
@@ -134,11 +142,11 @@ def _artwork() -> list[str]:
     )
 
     # The browser. Red on top, green to the lower left, yellow to the lower right.
-    ops += _wedge(ball_x, ball_y, ball_r, math.radians(30), math.radians(150), RED)
-    ops += _wedge(ball_x, ball_y, ball_r, math.radians(150), math.radians(270), GREEN)
-    ops += _wedge(ball_x, ball_y, ball_r, math.radians(270), math.radians(390), YELLOW)
+    ops += _wedge(ball_x, ball_y, ball_r, math.radians(30), math.radians(150), top)
+    ops += _wedge(ball_x, ball_y, ball_r, math.radians(150), math.radians(270), lower_left)
+    ops += _wedge(ball_x, ball_y, ball_r, math.radians(270), math.radians(390), lower_right)
     ops += _circle(ball_x, ball_y, ball_r * 0.46, WHITE)
-    ops += _circle(ball_x, ball_y, ball_r * 0.37, BLUE)
+    ops += _circle(ball_x, ball_y, ball_r * 0.37, centre)
 
     # The near wall last, over the browser, so the bottom of it is inside the box.
     ops += _polygon(
@@ -164,9 +172,9 @@ def _artwork() -> list[str]:
     return ops
 
 
-def pdf() -> bytes:
+def pdf(palette: tuple = ()) -> bytes:
     """The whole icon as a one-page PDF."""
-    content = "\n".join(_artwork()).encode()
+    content = "\n".join(_artwork(palette)).encode()
     objects = [
         b"<</Type/Catalog/Pages 2 0 R>>",
         b"<</Type/Pages/Kids[3 0 R]/Count 1>>",

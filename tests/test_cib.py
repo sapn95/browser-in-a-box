@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -22,6 +23,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import cib
+import cibbrowsers
 import cibicon
 
 
@@ -120,9 +122,18 @@ def test_settings_that_kill_the_container_are_rejected(field, value, expected):
         cib.Config(**{field: value}).check()
 
 
-def test_the_image_is_pinned_to_a_version():
-    assert ":latest" not in cib.DEFAULT_IMAGE
-    assert cib.DEFAULT_IMAGE.startswith("docker.io/kasmweb/chrome:")
+def test_every_browser_image_is_pinned_to_a_version():
+    # A floating :latest turns "it worked yesterday" into a coin toss, and a broken
+    # image would arrive without a commit anywhere to point at.
+    for browser in cibbrowsers.BROWSERS.values():
+        assert ":latest" not in browser.image, browser.key
+        assert browser.image.startswith(f"docker.io/kasmweb/{browser.key}:"), browser.key
+
+
+def test_an_unknown_browser_is_refused_by_name(monkeypatch):
+    monkeypatch.setenv("CIB_BROWSER", "safari")
+    with pytest.raises(cib.Failure, match="chrome, chromium, firefox"):
+        cib.chosen_browser()
 
 
 def test_the_jpeg_quality_stays_in_the_range_kasmvnc_accepts():
@@ -894,7 +905,9 @@ chmod 0755 "$dst"
 """
 
 
-def _run_guest_script(script: str, home, share_exists: bool, extra_bin=None, override_bin=None):
+def _run_guest_script(
+    script: str, home, share_exists: bool, extra_bin=None, override_bin=None, browser=None
+):
     """Execute the guest script the way ssh would: /bin/sh -e, with fakes."""
     bin_dir = home / "fakebin"
     bin_dir.mkdir(parents=True, exist_ok=True)
@@ -925,8 +938,14 @@ def _run_guest_script(script: str, home, share_exists: bool, extra_bin=None, ove
         (bin_dir / name).chmod(0o755)
     share = Path(cib.GUEST_SHARE)
     body = script.replace(str(share), str(home / "share"))
-    body = body.replace("'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'", "true")
-    body = body.replace("'/Applications/Google Chrome.app'", f"'{home / 'chrome.app'}'")
+    # Per browser, not hard-coded to Chrome: the point of running the script at all
+    # is that it works for whichever one it was rendered for.
+    chosen = browser or cibbrowsers.BROWSERS["chrome"]
+    # Through shlex.quote, because that is what the script did: it only adds quotes
+    # when the path needs them, so Chrome's is quoted and Firefox's is not.
+    body = body.replace(shlex.quote(chosen.binary), "true")
+    body = body.replace(shlex.quote(chosen.app), shlex.quote(str(home / "browser.app")))
+    body = body.replace(chosen.app, str(home / "browser.app"))
     body = body.replace(cib.AGENT_BIN, str(home / "agent"))
     body = body.replace(cib.AGENT_PLIST_PATH, str(home / "agent.plist"))
     # launchctl needs a real session to talk to, which an ssh-less test does not
@@ -4063,3 +4082,60 @@ def test_the_old_remembered_address_is_carried_into_the_state_file(tmp_path):
     cib.migrate_flat_secrets()
     assert cib.read_state()["last_ip"] == "10.0.0.9"
     assert not (cib.SECRETS / "vm-last-ip").exists()
+
+
+@pytest.mark.parametrize("key", sorted(cibbrowsers.BROWSERS))
+def test_every_browser_installs_from_a_script_that_actually_runs(key, tmp_path):
+    """Rendering is not running. Firefox and Chromium take different shapes —
+    a different archive, a different profile, a different way of being made the
+    default — and a template can look right and still be unrunnable shell."""
+    (tmp_path / "Downloads").mkdir()
+    browser = cibbrowsers.BROWSERS[key]
+    result = _run_guest_script(
+        cib.guest_install_script("pw", browser=browser),
+        tmp_path,
+        share_exists=True,
+        browser=browser,
+        # Chromium looks its build number up first, and ditto unpacks the zip.
+        override_bin={
+            "curl": '#!/bin/sh\nfor a in "$@"; do prev="$last"; last="$a"; done\n'
+            'case "$prev" in -o) : ;; esac\n'
+            "echo 1234567\n",
+            # Real enough that the move after it is a real move: a ditto that only
+            # exits 0 would let a broken unpack-and-install sequence pass.
+            "ditto": '#!/bin/sh\nfor a in "$@"; do dest="$a"; done\n'
+            f'mkdir -p "$dest/{browser.inside}"\n',
+        },
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("key", sorted(cibbrowsers.BROWSERS))
+def test_every_browser_is_pointed_at_the_shared_downloads_folder(key):
+    """The whole point of the share is that what you download lands on the host."""
+    script = cib.guest_install_script("pw", browser=cibbrowsers.BROWSERS[key])
+    assert cib.GUEST_SHARE in script
+
+
+def test_firefox_gets_a_profiles_ini_and_chromium_does_not():
+    # Firefox ignores a profile directory it has not been told about, so the files
+    # alone would be written and never read.
+    firefox = cib.guest_install_script("pw", browser=cibbrowsers.BROWSERS["firefox"])
+    chrome = cib.guest_install_script("pw", browser=cibbrowsers.BROWSERS["chrome"])
+    assert "profiles.ini" in firefox
+    assert "user_pref" in firefox
+    assert "profiles.ini" not in chrome
+    assert "Local State" in chrome
+
+
+def test_each_browser_draws_a_different_icon():
+    """A launcher per browser is useless if they all look the same in the Dock."""
+    drawn = {key: cibicon.pdf(browser.palette) for key, browser in cibbrowsers.BROWSERS.items()}
+    assert len(set(drawn.values())) == len(drawn), "two browsers render identically"
+
+
+@pytest.mark.parametrize("key", sorted(cibbrowsers.BROWSERS))
+def test_every_browser_has_a_full_palette(key):
+    # _artwork unpacks exactly four: top, lower left, lower right, centre. A short
+    # one would raise at draw time, which is after the bundle has been written.
+    assert len(cibbrowsers.BROWSERS[key].palette) == 4
