@@ -289,6 +289,7 @@ Overridable: `CIB_PORT`, `CIB_RESOLUTION`, `CIB_WAIT_SECS`, `CIB_ENGINE`,
 `CIB_IMAGE`, `CIB_NAME`, `CIB_VOLUME`, `CIB_PASSWORD`, `CIB_LOG_TAIL`, `CIB_FORCE`,
 and for the VM `CIB_VM_NAME`, `CIB_VM_CPUS`, `CIB_VM_MEMORY`, `CIB_VM_DISK`,
 `CIB_VM_DISPLAY`, `CIB_VM_NET`, `CIB_VM_INTERFACE`, `CIB_VM_USER`, `CIB_VM_SHARE`,
+`CIB_BROWSER` (chrome, firefox or chromium),
 `CIB_VM_PASSWORD` (a password of your own instead of a generated one; letters and
 digits only, and no y or z, because the packer path types it as keystrokes),
 `CIB_VM_CAPTURE_KEYS` (send Cmd+Space, Cmd+Tab and the rest to the guest while
@@ -298,6 +299,24 @@ launcher on Cmd+Space becomes unreachable until you click away),
 state before the disk is patched — 180 s, raise it on a slow disk) and
 `CIB_VM_IPSW` (the macOS installer: `latest` by default, or a URL or `.ipsw` path
 to pin the guest to one version).
+
+### Which browser
+
+`CIB_BROWSER` picks it: `chrome` (the default), `firefox` or `chromium`. It
+applies to both variants — the container serves the matching Kasm image, and the
+VM downloads and configures that browser instead. The launcher `cib vm icon`
+writes gets the browser's own colours, so three of them side by side in the Dock
+are told apart at a glance.
+
+```bash
+CIB_BROWSER=firefox cib box up
+CIB_BROWSER=chromium CIB_VM_NAME=chromium-vm cib vm create
+```
+
+Chromium is the odd one: it has no release for macOS, only per-commit snapshots,
+so the build number is looked up before the download. Firefox keeps its settings
+in a `user.js` and a `profiles.ini` rather than JSON, and is made the default
+browser with its own switch.
 
 ### The settings file
 

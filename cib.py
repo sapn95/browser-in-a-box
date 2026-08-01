@@ -48,12 +48,21 @@ from typing import NoReturn
 from urllib.parse import quote
 from xml.parsers.expat import ExpatError
 
+import cibbrowsers
 import cibicon
 
 __version__ = "1.4.0"
 
-# renovate: datasource=docker depName=kasmweb/chrome
-DEFAULT_IMAGE = "docker.io/kasmweb/chrome:1.19.0"
+
+def chosen_browser() -> cibbrowsers.Browser:
+    """Which browser goes in the box. The images live in cibbrowsers, one row each."""
+    key = _env("CIB_BROWSER", cibbrowsers.DEFAULT_BROWSER).strip().lower()
+    if key not in cibbrowsers.BROWSERS:
+        raise Failure(
+            f"CIB_BROWSER must be one of {', '.join(sorted(cibbrowsers.BROWSERS))}, got {key!r}"
+        )
+    return cibbrowsers.BROWSERS[key]
+
 
 # KasmVNC ships fixed modes only up to this size; anything larger silently falls
 # back to 1024x768, and this image ignores VNC_RESOLUTION entirely, so the mode is
@@ -197,7 +206,10 @@ def _env_int(name: str, default: str, minimum: int = 1) -> int:
 @dataclass(frozen=True)
 class Config:
     # Read at instantiation, not at import, so the environment is always current.
-    image: str = field(default_factory=lambda: _env("CIB_IMAGE", DEFAULT_IMAGE))
+    browser: str = field(default_factory=lambda: chosen_browser().key)
+    # CIB_IMAGE still wins, for a fork or a pinned digest — but the default now
+    # follows the browser rather than being Chrome's whatever CIB_BROWSER says.
+    image: str = field(default_factory=lambda: _env("CIB_IMAGE", chosen_browser().image))
     name: str = field(default_factory=lambda: _env("CIB_NAME", "chrome-in-a-box"))
     volume: str = field(default_factory=lambda: _env("CIB_VOLUME", "chrome-in-a-box-profile"))
     port: int = field(default_factory=lambda: _env_int("CIB_PORT", "6901"))
@@ -1408,10 +1420,6 @@ def cmd_vm_up(tart: str, vm: VmConfig) -> None:
         )
 
 
-CHROME_APP = "/Applications/Google Chrome.app"
-CHROME_EXE = f"{CHROME_APP}/Contents/MacOS/Google Chrome"
-
-
 # Chrome's own preference file, written before its first launch. prompt_for_download
 # stays off so a download does not open a panel pointing at the guest's own disk.
 FIRST_RUN_PREFS = json.dumps(
@@ -1465,7 +1473,70 @@ AGENT_PLIST = f"""<?xml version="1.0" encoding="UTF-8"?>
 </plist>"""
 
 
-def guest_install_script(password: str, time_zone: str = "") -> str:
+def _fetch_browser(browser: cibbrowsers.Browser) -> str:
+    """The shell that gets the app into /Applications, whatever it ships as.
+
+    Staged aside and moved into place as the last step, so an interruption cannot
+    leave half a browser at the path everything else looks at.
+    """
+    work = '"$CIB_WORK'
+    if browser.archive == "dmg":
+        lines = [
+            f'  curl -fsSL -o {work}/browser.dmg" {shlex.quote(browser.url)}',
+            f'  hdiutil attach -nobrowse -quiet {work}/browser.dmg" -mountpoint {work}/mount"',
+            f'  mkdir -p {work}/staging"',
+            f'  cp -R {work}/mount/{browser.inside}" {work}/staging/"',
+            f'  hdiutil detach -quiet {work}/mount"',
+        ]
+        return "\n".join(lines)
+    # Chromium publishes no release for macOS, only per-commit snapshots, so the
+    # newest build number has to be read before there is a URL to fetch at all.
+    url = browser.url.replace("{revision}", "$CIB_REVISION")
+    return "\n".join(
+        [
+            f'  CIB_REVISION="$(curl -fsSL {shlex.quote(browser.revision_url)})"',
+            f'  [ -n "$CIB_REVISION" ] || {{ echo "no {browser.label} build found" >&2; exit 1; }}',
+            f'  curl -fsSL -o {work}/browser.zip" "{url}"',
+            f'  mkdir -p {work}/staging"',
+            f'  ditto -x -k {work}/browser.zip" {work}/unpacked"',
+            f'  mv {work}/unpacked/{browser.inside}" {work}/staging/"',
+        ]
+    )
+
+
+def _first_run_settings(browser: cibbrowsers.Browser) -> str:
+    """Downloads and privacy, written before the browser's first launch.
+
+    Before rather than after, so it starts with the settings instead of being
+    reconfigured once it has already phoned home.
+    """
+    profile = f'"$HOME/{browser.profile}"'
+    if browser.settings == "firefox":
+        # profiles.ini as well as the directory: Firefox will not use a profile it
+        # has not been told about, so the files alone would be ignored.
+        support = '"$HOME/Library/Application Support/Firefox/profiles.ini"'
+        return "\n".join(
+            [
+                f"    mkdir -p {profile}",
+                f"    printf '%s' {shlex.quote(cibbrowsers.firefox_preferences(GUEST_SHARE))}"
+                f" > {profile}/user.js",
+                f"    printf '%s' {shlex.quote(cibbrowsers.FIREFOX_PROFILES_INI)} > {support}",
+            ]
+        )
+    return "\n".join(
+        [
+            f"    mkdir -p {profile}",
+            f"    printf '%s' {shlex.quote(cibbrowsers.chromium_preferences(GUEST_SHARE))}"
+            f" > {profile}/Preferences",
+            f"    printf '%s' {shlex.quote(cibbrowsers.CHROMIUM_LOCAL_STATE)}"
+            f' > {profile}/../"Local State"',
+        ]
+    )
+
+
+def guest_install_script(
+    password: str, time_zone: str = "", browser: cibbrowsers.Browser | None = None
+) -> str:
     """Chrome, the clipboard agent and the shared Downloads folder, as a script the
     guest runs.
 
@@ -1489,6 +1560,21 @@ def guest_install_script(password: str, time_zone: str = "") -> str:
         if time_zone
         else ":"
     )
+    browser = browser or chosen_browser()
+    # Written out here rather than branched on inside the shell: the script is
+    # already the hardest thing in this file to read, and a second dimension of
+    # conditionals in it would not survive the next change.
+    fetch = _fetch_browser(browser)
+    settings = _first_run_settings(browser)
+    # Chrome and Chromium are asked through the app; Firefox has its own switch and
+    # ignores the Chromium one entirely.
+    default_browser_step = (
+        f"{shlex.quote(browser.binary)} --setDefaultBrowser >/dev/null 2>&1 || true"
+        if browser.settings == "firefox"
+        else f"open -a {shlex.quote(browser.app)} --args --make-default-browser"
+        " >/dev/null 2>&1 || true"
+    )
+
     return f"""set -eu
 CIB_SUDO_PW={shlex.quote(password)}
 # Scratch space under the account's own home rather than /tmp, which every user in
@@ -1514,16 +1600,10 @@ sudo_pw() {{ printf '%s\\n' "$CIB_SUDO_PW" | sudo -S -p '' "$@"; }}
 if [ -d "{GUEST_SHARE}" ]; then
   ln -sfn "{GUEST_SHARE}" "$HOME/Downloads/on-the-host" 2>/dev/null ||
     echo "could not link the shared folder into ~/Downloads" >&2
-  CIB_PROFILE="$HOME/Library/Application Support/Google/Chrome/Default"
-  if [ -e "$CIB_PROFILE/Preferences" ]; then
-    echo "Chrome already has a profile; leaving its download folder alone" >&2
+  if [ -e "$HOME/{browser.profile}" ]; then
+    echo "{browser.label} already has a profile; leaving its settings alone" >&2
   else
-    # Written before Chrome's first launch, so it starts with the setting rather
-    # than being reconfigured afterwards. A user preference, not a managed policy:
-    # a policy is the one thing this VM exists to be free of.
-    mkdir -p "$CIB_PROFILE"
-    printf '%s' {shlex.quote(FIRST_RUN_PREFS)} > "$CIB_PROFILE/Preferences"
-    printf '%s' {shlex.quote(LOCAL_STATE_PREFS)} > "$CIB_PROFILE/../Local State"
+{settings}
   fi
 else
   echo "the shared downloads folder is not mounted; start the VM with 'cib vm up'" >&2
@@ -1532,21 +1612,14 @@ fi
 # Tested on the binary, not the bundle: an interrupted `cp -R` leaves a directory
 # that exists but cannot run, and a directory test would call that "installed"
 # for ever.
-if [ -x {shlex.quote(CHROME_EXE)} ]; then
-  echo 'Chrome is already installed'
+if [ -x {shlex.quote(browser.binary)} ]; then
+  echo '{browser.label} is already installed'
 else
-  rm -rf {shlex.quote(CHROME_APP)}
-  curl -fsSL -o "$CIB_WORK/chrome.dmg" \
-    'https://dl.google.com/chrome/mac/universal/stable/GGRO/googlechrome.dmg'
-  hdiutil attach -nobrowse -quiet "$CIB_WORK/chrome.dmg" -mountpoint "$CIB_WORK/mount"
-  # Copied aside and moved into place as the last step, so an interruption cannot
-  # leave half a Chrome at the path everything else looks at.
-  mkdir -p "$CIB_WORK/staging"
-  cp -R "$CIB_WORK/mount/Google Chrome.app" "$CIB_WORK/staging/"
-  hdiutil detach -quiet "$CIB_WORK/mount"
-  mv "$CIB_WORK/staging/Google Chrome.app" {shlex.quote(CHROME_APP)}
+  rm -rf {shlex.quote(browser.app)}
+{fetch}
+  mv "$CIB_WORK/staging/{browser.app_name}" {shlex.quote(browser.app)}
 fi
-{shlex.quote(CHROME_EXE)} --version
+{shlex.quote(browser.binary)} --version
 if [ ! -x {AGENT_BIN} ]; then
   # Host/guest copy-paste needs an agent inside the guest. Without it the generated
   # password would have to be typed by hand at every passkey prompt, which is the
@@ -1608,13 +1681,13 @@ defaults write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add 64 \\
 
 # Chrome opens the links, since a guest whose default browser is Safari defeats the
 # point. macOS takes this without a prompt only because Chrome asks for it itself.
-open -a {shlex.quote(CHROME_APP)} --args --make-default-browser >/dev/null 2>&1 || true
+{default_browser_step}
 
 # One thing in the Dock, because there is one thing to do here. The default row is
 # Apple's whole suite, none of which this VM is for.
 defaults write com.apple.dock persistent-apps -array \\
   '<dict><key>tile-data</key><dict><key>file-data</key><dict>'\\
-'<key>_CFURLString</key><string>{CHROME_APP}</string>'\\
+'<key>_CFURLString</key><string>{browser.app}</string>'\\
 '<key>_CFURLStringType</key><integer>0</integer></dict></dict>'\\
 '<key>tile-type</key><string>file-tile</string></dict>'
 defaults write com.apple.dock persistent-others -array
@@ -1911,12 +1984,12 @@ def cmd_vm_icon(tart: str, vm: VmConfig) -> None:
     result = run("/usr/bin/osacompile", "-o", str(bundle), "-e", script, check=False, capture=True)
     if result.returncode != 0:
         raise Failure(f"could not write {bundle}: {(result.stderr or result.stdout).strip()}")
-    draw_icon(bundle)
+    draw_icon(bundle, chosen_browser())
     print(f"Wrote {bundle}")
     print("Drag it to the Dock to keep it there.")
 
 
-def draw_icon(bundle: Path) -> None:
+def draw_icon(bundle: Path, browser: cibbrowsers.Browser) -> None:
     """Give the launcher an icon that says what it opens.
 
     Chrome's own icns stops at 256 px, so copying it leaves the Dock upscaling —
@@ -1929,7 +2002,7 @@ def draw_icon(bundle: Path) -> None:
         return
     try:
         with tempfile.TemporaryDirectory() as scratch:
-            _build_icns(resources / "applet.icns", Path(scratch))
+            _build_icns(resources / "applet.icns", Path(scratch), browser.palette)
         # osacompile writes both CFBundleIconFile and CFBundleIconName, and on
         # modern macOS the name wins — it resolves out of the asset catalog, where
         # the AppleScript applet artwork lives. Replacing applet.icns alone then
@@ -1955,7 +2028,7 @@ def draw_icon(bundle: Path) -> None:
 ICON_SIZES = (16, 32, 64, 128, 256, 512, 1024)
 
 
-def _build_icns(target: Path, scratch: Path) -> None:
+def _build_icns(target: Path, scratch: Path, palette: tuple = ()) -> None:
     """Rasterise the drawing at every size macOS wants, then pack it."""
     source = scratch / "icon.pdf"
     source.write_bytes(cibicon.pdf())
