@@ -112,13 +112,45 @@ def _flap(x: float, y: float, base: float, reach: float, lean: tuple[float, floa
     return [(x, y), (x + base, y), (x + base + dx, y + dy), (x + dx, y + dy)]
 
 
-def _artwork(palette: tuple = ()) -> list[str]:
+def _wheel(cx: float, cy: float, r: float, palette: tuple) -> list[str]:
+    """Chrome's, and Chromium's: three sectors around a ringed centre."""
+    top, lower_left, lower_right, centre = palette
+    return [
+        *_wedge(cx, cy, r, math.radians(30), math.radians(150), top),
+        *_wedge(cx, cy, r, math.radians(150), math.radians(270), lower_left),
+        *_wedge(cx, cy, r, math.radians(270), math.radians(390), lower_right),
+        *_circle(cx, cy, r * 0.46, WHITE),
+        *_circle(cx, cy, r * 0.37, centre),
+    ]
+
+
+def _flame(cx: float, cy: float, r: float, palette: tuple) -> list[str]:
+    """Firefox's: a tail swept round a globe, open where the tail ends.
+
+    Not a wheel with different colours. The gap at the lower right is the whole
+    difference — it is what makes the ring read as something wrapped around the
+    globe rather than a pie chart of it.
+    """
+    top, lower_left, lower_right, centre = palette
+    return [
+        # The tail, in three tones, warm at the top and cool where it trails off.
+        *_wedge(cx, cy, r, math.radians(-40), math.radians(60), lower_right),
+        *_wedge(cx, cy, r, math.radians(60), math.radians(165), top),
+        *_wedge(cx, cy, r, math.radians(165), math.radians(250), lower_left),
+        *_circle(cx, cy, r * 0.60, centre),
+    ]
+
+
+MARKS = {"wheel": _wheel, "flame": _flame}
+
+
+def _artwork(palette: tuple = (), mark: str = "wheel") -> list[str]:
     """Back to front: plate, the flaps behind, the browser, then the box in front.
 
-    The palette is the browser's own — top, lower left, lower right, centre — so
-    the icon says which browser is in the box, not just that one is.
+    The mark is the browser's own shape, not a recolour of one shape: Chrome and
+    Chromium really are the same wheel in different colours, but Firefox is not a
+    wheel at all, and colouring one orange would just look like a broken Chrome.
     """
-    top, lower_left, lower_right, centre = palette or DEFAULT_PALETTE
     ball_x, ball_y, ball_r = 512.0, 636.0, 196.0
     box_left, box_right = 246.0, 778.0
     box_bottom, box_top = 214.0, 524.0
@@ -141,12 +173,7 @@ def _artwork(palette: tuple = ()) -> list[str]:
         CARTON_INSIDE,
     )
 
-    # The browser. Red on top, green to the lower left, yellow to the lower right.
-    ops += _wedge(ball_x, ball_y, ball_r, math.radians(30), math.radians(150), top)
-    ops += _wedge(ball_x, ball_y, ball_r, math.radians(150), math.radians(270), lower_left)
-    ops += _wedge(ball_x, ball_y, ball_r, math.radians(270), math.radians(390), lower_right)
-    ops += _circle(ball_x, ball_y, ball_r * 0.46, WHITE)
-    ops += _circle(ball_x, ball_y, ball_r * 0.37, centre)
+    ops += MARKS[mark](ball_x, ball_y, ball_r, palette or DEFAULT_PALETTE)
 
     # The near wall last, over the browser, so the bottom of it is inside the box.
     ops += _polygon(
@@ -172,9 +199,9 @@ def _artwork(palette: tuple = ()) -> list[str]:
     return ops
 
 
-def pdf(palette: tuple = ()) -> bytes:
+def pdf(palette: tuple = (), mark: str = "wheel") -> bytes:
     """The whole icon as a one-page PDF."""
-    content = "\n".join(_artwork(palette)).encode()
+    content = "\n".join(_artwork(palette, mark)).encode()
     objects = [
         b"<</Type/Catalog/Pages 2 0 R>>",
         b"<</Type/Pages/Kids[3 0 R]/Count 1>>",
