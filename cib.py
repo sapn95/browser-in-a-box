@@ -92,21 +92,55 @@ VNC_OPTIONS = "-DisableBasicAuth=1 -DynamicQualityMin=8 -DynamicQualityMax=9 -DL
 # renovate: datasource=github-releases depName=cirruslabs/tart-guest-agent
 GUEST_AGENT_VERSION = "0.11.0"
 
-CHROME_BIN = "/opt/google/chrome/google-chrome"
-PROFILE_DIR = "/home/kasm-user/.config/google-chrome"
+# The container user, whose home holds the profile the volume keeps.
+KASM_HOME = "/home/kasm-user"
+# How long to give the browser to appear in the process table before calling the
+# launch failed. A cold start on a fresh volume is a second or two; ten is slack
+# for a loaded host, and it is only ever waited out when something is wrong.
+LAUNCH_WAIT_SECS = 10
 
-# Clears a stale profile lock (which makes Chrome exit into a black desktop),
-# applies the resolution, and starts Chrome if the image's own launch did not.
-DESKTOP_SCRIPT = f"""
+
+def desktop_script(browser: cibbrowsers.Browser) -> str:
+    """What `box up` runs inside the container: apply the resolution, clear a stale
+    profile lock (which makes the browser exit into a black desktop), and start the
+    browser if the image's own launch did not.
+
+    Per browser, all of it. This was Chrome's binary, Chrome's profile and Chrome's
+    process name on all three images, so `CIB_BROWSER=firefox cib box up` reached a
+    desktop with nothing on it — and said nothing, because `nohup ... &` is a
+    success the moment the shell forks, whatever happens next.
+    """
+    profile = f"{KASM_HOME}/{browser.container_profile}"
+    if browser.settings == "firefox":
+        # Firefox takes neither --user-data-dir nor --start-maximized: the profile
+        # comes from profiles.ini, and Kasm's own startup maximises the window with
+        # wmctrl afterwards. Its stale lock is a pair of files inside the profile.
+        launch = browser.container_bin
+        locks = f"{profile}/*/.parentlock {profile}/*/lock"
+    else:
+        launch = f"{browser.container_bin} --no-sandbox --start-maximized --user-data-dir={profile}"
+        locks = f"{profile}/Singleton*"
+    return f"""
 export DISPLAY=:1
+CIB_LOG=/tmp/{browser.key}.log
 if [ -n "$RES" ]; then
   xrandr -s "$RES" >/dev/null ||
     echo "could not set mode $RES (KasmVNC ships a fixed mode list)" >&2
 fi
-if ! pgrep chrome >/dev/null 2>&1; then
-  rm -f {PROFILE_DIR}/Singleton*
-  nohup {CHROME_BIN} --no-sandbox --start-maximized \
-    --user-data-dir={PROFILE_DIR} >/tmp/chrome.log 2>&1 &
+if ! pgrep -x {browser.container_process} >/dev/null 2>&1; then
+  rm -f {locks}
+  nohup {launch} >"$CIB_LOG" 2>&1 &
+  # Wait for it rather than trust the fork: a binary that is not in this image at
+  # all exits immediately, and without this that was indistinguishable from a
+  # browser that started fine.
+  for _ in $(seq {LAUNCH_WAIT_SECS * 2}); do
+    pgrep -x {browser.container_process} >/dev/null 2>&1 && break
+    sleep 0.5
+  done
+  if ! pgrep -x {browser.container_process} >/dev/null 2>&1; then
+    echo "{browser.label} did not start; last lines of $CIB_LOG:" >&2
+    tail -n 20 "$CIB_LOG" >&2
+  fi
 fi
 """
 
@@ -116,7 +150,19 @@ class Failure(Exception):
 
 
 def env_flag(name: str) -> bool:
-    return os.environ.get(name, "0") == "1"
+    """A yes/no setting, from the environment or the settings file.
+
+    Through _env rather than os.environ, for the reason _env_int already carries a
+    note about: read directly, CIB_FORCE and CIB_VM_PACKER were parsed out of the
+    settings file, stored, and then never looked at — the file appeared to work and
+    those two keys quietly did nothing.
+
+    "true" counts as well as "1", because yaml reads `packer: yes` as a boolean and
+    load_config writes booleans out as "true".
+    """
+    # Defined above _env and CONFIG, which is fine: the lookup happens when this is
+    # called, and nothing calls it at import time.
+    return _env(name, "0").strip().lower() in ("1", "true")
 
 
 # The project was called chrome-in-a-box before it grew Firefox and Chromium.
@@ -293,7 +339,8 @@ class Config:
 
 def find_engine() -> str:
     """Return the container engine to use."""
-    preferred = os.environ.get("CIB_ENGINE")
+    # Through _env, so a settings file can name the engine like every other key.
+    preferred = _env("CIB_ENGINE", "")
     if preferred:
         path = shutil.which(preferred)
         if not path:
@@ -378,7 +425,7 @@ def wait_for_ui(engine: str, cfg: Config) -> None:
 
 
 def ensure_desktop(engine: str, cfg: Config) -> bool:
-    """Apply the resolution and make sure Chrome is running. Returns False and
+    """Apply the resolution and make sure the browser is running. Returns False and
     warns on trouble, rather than failing the whole command."""
     result = run(
         engine,
@@ -390,7 +437,7 @@ def ensure_desktop(engine: str, cfg: Config) -> bool:
         cfg.name,
         "bash",
         "-c",
-        DESKTOP_SCRIPT,
+        desktop_script(cibbrowsers.BROWSERS[cfg.browser]),
         check=False,
         capture=True,
     )
@@ -428,7 +475,7 @@ def ensure_image(engine: str, cfg: Config) -> None:
 def cmd_up(engine: str, cfg: Config) -> None:
     cfg.check()
     if container_running(engine, cfg) and not env_flag("CIB_FORCE") and ui_is_up(cfg):
-        ensure_desktop(engine, cfg)  # still re-applies the mode and revives Chrome
+        ensure_desktop(engine, cfg)  # still re-applies the mode and revives the browser
         print(f"Already running. Open {cfg.url}")
         return
 
@@ -1589,16 +1636,21 @@ def install_browsers(vm: VmConfig, ip: str, password: str) -> int:
     conditionals nobody can read.
     """
     zone = host_time_zone()[0]
-    for browser in cibbrowsers.expand(vm.browser):
+    for position, browser in enumerate(cibbrowsers.expand(vm.browser)):
         print(f"Installing {browser.label} on {vm.user}@{ip} ...")
-        failed = guest_ssh(vm, ip, guest_install_script(password, zone, browser))
+        failed = guest_ssh(
+            vm, ip, guest_install_script(password, zone, browser, first=position == 0)
+        )
         if failed:
             return failed
     return 0
 
 
 def guest_install_script(
-    password: str, time_zone: str = "", browser: cibbrowsers.Browser | None = None
+    password: str,
+    time_zone: str = "",
+    browser: cibbrowsers.Browser | None = None,
+    first: bool = True,
 ) -> str:
     """Chrome, the clipboard agent and the shared Downloads folder, as a script the
     guest runs.
@@ -1624,19 +1676,40 @@ def guest_install_script(
         else ":"
     )
     browser = browser or chosen_browser()
+    # `all` is a choice, not a browser: its row carries no app name, so every path
+    # below that names the bundle would come out as "/Applications" itself — and one
+    # of them is `rm -rf`. install_browsers expands the choice and calls this once
+    # per browser; nothing else may call it with the sentinel.
+    if not browser.app_name:
+        raise Failure(
+            f"guest_install_script needs one browser, not {browser.key!r}; "
+            "expand the choice with cibbrowsers.expand() first"
+        )
     # Written out here rather than branched on inside the shell: the script is
     # already the hardest thing in this file to read, and a second dimension of
     # conditionals in it would not survive the next change.
     fetch = _fetch_browser(browser)
     settings = _first_run_settings(browser)
-    # Chrome and Chromium are asked through the app; Firefox has its own switch and
-    # ignores the Chromium one entirely.
-    default_browser_step = (
-        f"{shlex.quote(browser.binary)} --setDefaultBrowser >/dev/null 2>&1 || true"
-        if browser.settings == "firefox"
-        else f"open -a {shlex.quote(browser.app)} --args --make-default-browser"
-        " >/dev/null 2>&1 || true"
-    )
+    # Only the first pass asks. Under CIB_BROWSER=all this script runs once per
+    # browser, and asking every one of them in turn left whichever happened to be
+    # installed last as the default — Chromium, by dict order, which is not the
+    # browser anyone chose.
+    if not first:
+        default_browser_step = ": # the first browser of this run already asked"
+    elif browser.settings == "firefox":
+        # Firefox has its own switch and ignores the Chromium one entirely.
+        default_browser_step = (
+            f"{shlex.quote(browser.binary)} --setDefaultBrowser >/dev/null 2>&1 || true"
+        )
+    else:
+        default_browser_step = (
+            f"open -a {shlex.quote(browser.app)} --args --make-default-browser"
+            " >/dev/null 2>&1 || true"
+        )
+    # -array replaces the whole row, -array-add appends to it. The first pass clears
+    # Apple's suite out, the rest add themselves — otherwise the last browser
+    # installed was the only one in the Dock, and re-running would stack duplicates.
+    dock_verb = "-array" if first else "-array-add"
 
     return f"""set -eu
 CIB_SUDO_PW={shlex.quote(password)}
@@ -1746,9 +1819,9 @@ defaults write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add 64 \\
 # point. macOS takes this without a prompt only because Chrome asks for it itself.
 {default_browser_step}
 
-# One thing in the Dock, because there is one thing to do here. The default row is
-# Apple's whole suite, none of which this VM is for.
-defaults write com.apple.dock persistent-apps -array \\
+# The browsers this VM is for, and nothing else. The default row is Apple's whole
+# suite, none of which it is for.
+defaults write com.apple.dock persistent-apps {dock_verb} \\
   '<dict><key>tile-data</key><dict><key>file-data</key><dict>'\\
 '<key>_CFURLString</key><string>{browser.app}</string>'\\
 '<key>_CFURLStringType</key><integer>0</integer></dict></dict>'\\

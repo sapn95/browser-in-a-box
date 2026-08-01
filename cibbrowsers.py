@@ -40,6 +40,16 @@ class Browser:
     settings: str = "chromium"
     # Relative to the guest's home. Chrome and Chromium differ only here.
     profile: str = ""
+    # The container variant runs a Linux package inside Kasm's image, not a macOS
+    # bundle, so none of the three fields above apply to it. Command names rather
+    # than absolute paths, because that is what the image's own startup script uses
+    # (/dockerstartup/custom_startup.sh), and it is the thing that is known to work.
+    container_bin: str = ""
+    # What `pgrep -x` sees, which is not always the command: Chrome is started as
+    # google-chrome and appears as chrome.
+    container_process: str = ""
+    # Relative to the container user's home, /home/kasm-user.
+    container_profile: str = ""
     # The icon's palette, clockwise from the top, and the shape it fills. Chrome
     # and Chromium share a shape and differ only in colour; Firefox does not.
     palette: tuple[tuple[float, float, float], ...] = ()
@@ -82,6 +92,9 @@ BROWSERS = {
         image="docker.io/kasmweb/chrome:1.19.0",
         settings="chromium",
         profile="Library/Application Support/Google/Chrome/Default",
+        container_bin="google-chrome",
+        container_process="chrome",
+        container_profile=".config/google-chrome",
         palette=(GOOGLE_RED, GOOGLE_GREEN, GOOGLE_YELLOW, GOOGLE_BLUE),
     ),
     "firefox": Browser(
@@ -96,6 +109,11 @@ BROWSERS = {
         image="docker.io/kasmweb/firefox:1.19.0",
         settings="firefox",
         profile="Library/Application Support/Firefox/Profiles/cib.default-release",
+        container_bin="firefox",
+        container_process="firefox",
+        # The root, not one profile: which profile inside it is current is Firefox's
+        # own business, recorded in profiles.ini and named with a random prefix.
+        container_profile=".mozilla/firefox",
         palette=(FIREFOX_ORANGE, FIREFOX_PURPLE, FIREFOX_RED, FIREFOX_GLOBE),
         mark="flame",
     ),
@@ -121,6 +139,9 @@ BROWSERS = {
         image="docker.io/kasmweb/chromium:1.19.0",
         settings="chromium",
         profile="Library/Application Support/Chromium/Default",
+        container_bin="chromium",
+        container_process="chromium",
+        container_profile=".config/chromium",
         palette=(CHROMIUM_BLUE, CHROMIUM_DARK, CHROMIUM_GREY, CHROMIUM_BLUE),
     ),
 }
