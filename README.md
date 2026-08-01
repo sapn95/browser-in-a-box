@@ -1,4 +1,4 @@
-# chrome-in-a-box
+# browser-in-a-box
 
 Real Google Chrome in a box, so the browser you use for your own things is not the
 one your machine's policy manages. One command up, one command down, and the
@@ -163,16 +163,16 @@ Four ways, pick one:
 
 ```bash
 # 1. from a checkout — nothing to install
-git clone https://github.com/sapn95/chrome-in-a-box && cd chrome-in-a-box
+git clone https://github.com/sapn95/browser-in-a-box && cd browser-in-a-box
 ./cib.py box up
 
 # 2. with Homebrew (the tap lives in this repo, no second repo to add)
-brew tap sapn95/tap https://github.com/sapn95/chrome-in-a-box
+brew tap sapn95/tap https://github.com/sapn95/browser-in-a-box
 brew install sapn95/tap/cib     # the full name is what grants trust; plain
 cib box up                      # `brew install cib` asks you to `brew trust` first
 
 # 3. as a command, in its own environment
-uv tool install git+https://github.com/sapn95/chrome-in-a-box    # or: pipx install ...
+uv tool install git+https://github.com/sapn95/browser-in-a-box    # or: pipx install ...
 cib box up
 
 # 4. a compiled build — no Python needed to run it
@@ -294,7 +294,7 @@ Neither `cib vm setup` nor `cib vm ssh` asks you to type anything. `vm create`
 generates an SSH key pair, installs the public half in the guest, and plants the
 guest's own **host key** as well — so the very first connection is verified rather
 than trusted. Everything lives beside the password in
-`~/.config/chrome-in-a-box/<CIB_VM_NAME>/` — a directory per VM, so a second one
+`~/.config/browser-in-a-box/<CIB_VM_NAME>/` — a directory per VM, so a second one
 cannot reuse the first's key — and `cib vm delete` removes all of it. An older
 cib kept them one level up; the first VM command you run moves them.
 
@@ -349,7 +349,7 @@ browser with its own switch.
 
 ### The settings file
 
-Everything above can live in `~/.config/chrome-in-a-box/cib.yaml` instead of your
+Everything above can live in `~/.config/browser-in-a-box/cib.yaml` instead of your
 shell profile. `CIB_CONFIG` points somewhere else.
 
 ```yaml

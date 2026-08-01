@@ -138,7 +138,7 @@ source "tart-cli" "chrome-vm" {
     # Data & Privacy
     "<wait10s><leftShiftOn><tab><leftShiftOff><spacebar>",
     # Create a Mac Account
-    "<wait10s><tab><tab><tab><tab><tab><tab>chrome-in-a-box<tab>${var.username}<tab>${var.password}<tab>${var.password}<tab><tab><spacebar><tab><tab><spacebar>",
+    "<wait10s><tab><tab><tab><tab><tab><tab>browser-in-a-box<tab>${var.username}<tab>${var.password}<tab>${var.password}<tab><tab><spacebar><tab><tab><spacebar>",
     # VoiceOver on: the remaining panes are navigated by keyboard, and VoiceOver
     # makes the focus deterministic.
     "<wait120s><leftAltOn><f5><leftAltOff>",

@@ -29,7 +29,7 @@ import cibicon
 
 @pytest.fixture(autouse=True)
 def isolate_secrets(tmp_path, monkeypatch):
-    """No test may reach the real ~/.config/chrome-in-a-box.
+    """No test may reach the real ~/.config/browser-in-a-box.
 
     Found the hard way, during a real build: running `pytest` deleted a live VM's
     password and both key pairs, because two delete tests called cmd_vm_delete
@@ -37,7 +37,7 @@ def isolate_secrets(tmp_path, monkeypatch):
     hold for every test, including ones written later.
     """
     home = tmp_path / "isolated-home"
-    secrets_dir = home / ".config" / "chrome-in-a-box" / "chrome-vm"
+    secrets_dir = home / ".config" / "browser-in-a-box" / "chrome-vm"
     secrets_dir.mkdir(parents=True)
     monkeypatch.setattr(cib.Path, "home", classmethod(lambda cls: home))
     # Derived, not a hand-written list of names. The list version held CREDENTIALS,
@@ -261,13 +261,13 @@ def test_wait_for_ui_gives_up_after_the_deadline(monkeypatch):
 
 def test_logs_does_not_follow_by_default(calls):
     cib.cmd_logs("podman", cib.Config())
-    assert "logs --tail 200 chrome-in-a-box" in flat(calls)
+    assert "logs --tail 200 browser-in-a-box" in flat(calls)
     assert "-f" not in flat(calls)
 
 
 def test_logs_follows_when_asked(calls):
     cib.cmd_logs("podman", cib.Config(), follow=True)
-    assert "logs -f chrome-in-a-box" in flat(calls)
+    assert "logs -f browser-in-a-box" in flat(calls)
 
 
 def test_reset_needs_confirmation(calls, monkeypatch, capsys):
@@ -280,7 +280,7 @@ def test_reset_needs_confirmation(calls, monkeypatch, capsys):
 def test_reset_deletes_the_volume_when_confirmed(calls, monkeypatch):
     monkeypatch.setattr("builtins.input", lambda prompt: "y")
     cib.cmd_reset("podman", cib.Config())
-    assert "volume rm chrome-in-a-box-profile" in flat(calls)
+    assert "volume rm browser-in-a-box-profile" in flat(calls)
 
 
 def test_reset_treats_a_closed_stdin_as_no(calls, monkeypatch):
@@ -294,7 +294,7 @@ def test_reset_treats_a_closed_stdin_as_no(calls, monkeypatch):
 
 def test_down_removes_the_container(calls):
     cib.cmd_down("podman", cib.Config())
-    assert "rm -f chrome-in-a-box" in flat(calls)
+    assert "rm -f browser-in-a-box" in flat(calls)
 
 
 def test_ensure_desktop_clears_a_stale_profile_lock_and_sets_the_mode():
@@ -691,7 +691,7 @@ def test_no_module_level_path_still_points_at_the_real_home(tmp_path):
     """The guard has to cover paths nobody has written yet.
 
     Twice now a path added to cib.py was not added to the fixture, and the suite
-    wrote into the real ~/.config/chrome-in-a-box — the second time replacing a
+    wrote into the real ~/.config/browser-in-a-box — the second time replacing a
     live VM's remembered address with 10.0.0.9. This fails the moment a new
     module-level path escapes, instead of waiting for a user to notice.
     """
@@ -699,7 +699,7 @@ def test_no_module_level_path_still_points_at_the_real_home(tmp_path):
     # and every path would look safe. os.path.expanduser reads HOME, untouched here.
     # PATCHER and PACKER_TEMPLATE are deliberately not covered: they are read-only
     # paths into the installed package, and cib never writes to them.
-    real = Path(os.path.expanduser("~")) / ".config" / "chrome-in-a-box"
+    real = Path(os.path.expanduser("~")) / ".config" / "browser-in-a-box"
     escaped = [
         name
         for name, value in vars(cib).items()
@@ -1117,14 +1117,14 @@ def test_the_template_no_longer_carries_a_second_copy_of_the_install():
     # It kept `--install-daemon=launchd` for three rounds after the guest script's
     # copy was fixed, because there were two copies. Chrome and the agent are now
     # installed in one place, by 'cib vm setup', for both build paths.
-    template = (Path(cib.__file__).resolve().parent / "packer" / "chrome-vm.pkr.hcl").read_text()
+    template = (Path(cib.__file__).resolve().parent / "packer" / "browser-vm.pkr.hcl").read_text()
     assert "--install-daemon" not in template
     assert "googlechrome.dmg" not in template
     assert "tart-guest-agent" not in template
 
 
 def test_the_template_installs_the_key_cib_will_connect_with():
-    template = (Path(cib.__file__).resolve().parent / "packer" / "chrome-vm.pkr.hcl").read_text()
+    template = (Path(cib.__file__).resolve().parent / "packer" / "browser-vm.pkr.hcl").read_text()
     assert "authorized_keys" in template
     assert "ssh_host_ed25519_key" in template
     for name in ("authorized_key", "host_private_key", "host_public_key"):
@@ -1844,7 +1844,7 @@ def test_the_guest_agent_is_pinned_in_exactly_one_place():
     # asserting the two agreed. The template no longer installs the agent at all,
     # so the twin — and the way it could drift — is gone.
     root = Path(cib.__file__).resolve().parent
-    template = (root / "packer" / "chrome-vm.pkr.hcl").read_text()
+    template = (root / "packer" / "browser-vm.pkr.hcl").read_text()
     assert "guest_agent_version" not in template
     assert re.search(r'^GUEST_AGENT_VERSION = "[\d.]+"$', (root / "cib.py").read_text(), re.M)
 
@@ -1862,7 +1862,7 @@ def test_every_renovate_marker_anywhere_has_a_manager_that_matches_it():
         by_file.setdefault(target, []).extend(manager["matchStrings"])
     marked = {
         str(path.relative_to(root))
-        for path in (root / "cib.py", root / "packer" / "chrome-vm.pkr.hcl")
+        for path in (root / "cib.py", root / "packer" / "browser-vm.pkr.hcl")
         if "# renovate:" in path.read_text()
     }
     assert marked, "no renovate markers found at all — has the layout changed?"
@@ -2833,7 +2833,7 @@ def test_secrets_an_older_cib_left_flat_go_to_the_default_vm(monkeypatch, tmp_pa
     # name runs first takes them away from the guest actually using them — whose
     # disk was patched with that key pair, and which has no password fallback left.
     monkeypatch.setattr(cib.Path, "home", classmethod(lambda c: tmp_path))
-    flat = tmp_path / ".config" / "chrome-in-a-box"
+    flat = tmp_path / ".config" / "browser-in-a-box"
     flat.mkdir(parents=True)
     for name in cib.SECRET_NAMES:
         (flat / name).write_text(f"old {name}\n")
@@ -2847,7 +2847,7 @@ def test_secrets_an_older_cib_left_flat_go_to_the_default_vm(monkeypatch, tmp_pa
 
 def test_the_migration_does_not_overwrite_what_is_already_there(monkeypatch, tmp_path):
     monkeypatch.setattr(cib.Path, "home", classmethod(lambda c: tmp_path))
-    flat = tmp_path / ".config" / "chrome-in-a-box"
+    flat = tmp_path / ".config" / "browser-in-a-box"
     (flat / cib.DEFAULT_VM_NAME).mkdir(parents=True)
     (flat / "vm-credentials").write_text("old\n")
     (flat / cib.DEFAULT_VM_NAME / "vm-credentials").write_text("current\n")
@@ -2859,7 +2859,7 @@ def test_delete_removes_what_an_older_cib_left_flat_too(credentials, monkeypatch
     # It used to unlink per-name paths that did not exist yet, print "Deleted.",
     # and the next command migrated the flat originals back in.
     monkeypatch.setattr(cib.Path, "home", classmethod(lambda c: tmp_path))
-    flat = tmp_path / ".config" / "chrome-in-a-box"
+    flat = tmp_path / ".config" / "browser-in-a-box"
     flat.mkdir(parents=True)
     for name in cib.SECRET_NAMES:
         (flat / name).write_text("old\n")
@@ -3171,7 +3171,7 @@ def test_every_vm_command_migrates_an_older_installs_secrets(monkeypatch, tmp_pa
     # guest_password(), so it was the one command that failed on a pre-1.4 install
     # while every other one repaired it on the way past.
     monkeypatch.setattr(cib.Path, "home", classmethod(lambda c: tmp_path))
-    flat = tmp_path / ".config" / "chrome-in-a-box"
+    flat = tmp_path / ".config" / "browser-in-a-box"
     flat.mkdir(parents=True)
     for name in cib.SECRET_NAMES:
         (flat / name).write_text(f"old {name}\n")
@@ -3217,7 +3217,7 @@ def test_the_templates_key_provisioner_writes_what_ssh_will_look_for(tmp_path):
     # writes it somewhere sshd never reads.
     import re as _re
 
-    template = (Path(cib.__file__).resolve().parent / "packer" / "chrome-vm.pkr.hcl").read_text()
+    template = (Path(cib.__file__).resolve().parent / "packer" / "browser-vm.pkr.hcl").read_text()
     lines = _re.findall(
         r'^\s*"(mkdir -p ~/\.ssh.*?|printf .*?authorized_keys)",\s*$', template, _re.M
     )
@@ -3340,7 +3340,7 @@ def test_the_templates_keyboard_provisioner_keeps_the_two_things_that_make_it_wo
     # The offline copy of this logic is pinned by three tests; the packer copy was
     # only grepped for a variable name. Rounds 8/9 and 14/15 were both keyboard
     # regressions.
-    template = (Path(cib.__file__).resolve().parent / "packer" / "chrome-vm.pkr.hcl").read_text()
+    template = (Path(cib.__file__).resolve().parent / "packer" / "browser-vm.pkr.hcl").read_text()
     line = next(ln for ln in template.splitlines() if "AppleEnabledInputSources" in ln)
     # An integer, not a string: `defaults write` stores it as a string and HIToolbox
     # then ignores the entry, which is why PlistBuddy is used at all.
@@ -3598,7 +3598,7 @@ def test_the_suite_cannot_reach_the_real_secrets():
     # Running pytest once deleted a live VM's password and both key pairs. The
     # autouse fixture is what stops that; this is what stops the fixture being
     # dropped.
-    real = Path(os.path.expanduser("~")) / ".config" / "chrome-in-a-box"
+    real = Path(os.path.expanduser("~")) / ".config" / "browser-in-a-box"
     for path in (cib.SECRETS, cib.CREDENTIALS, cib.VM_KEY, cib.VM_HOST_KEY, cib.KNOWN_HOSTS):
         assert real not in path.parents and path != real, f"{path} is the user's own"
     assert cib.Path.home() != Path(os.path.expanduser("~")), "Path.home() is not redirected"
@@ -3952,7 +3952,7 @@ def test_the_icon_is_a_real_app_bundle_rather_than_a_script(tmp_path, monkeypatc
     """
     monkeypatch.setattr(cib, "APPS_DIR", tmp_path / "Applications")
     cib.cmd_vm_icon("tart", cib.VmConfig())
-    bundle = tmp_path / "Applications" / "Chrome in a Box.app"
+    bundle = tmp_path / "Applications" / "Google Chrome in a Box.app"
     assert (bundle / "Contents" / "MacOS" / "applet").exists()
     compiled = cib.run(
         "/usr/bin/osadecompile",
@@ -3970,7 +3970,7 @@ def test_a_second_vm_gets_its_own_icon(tmp_path, monkeypatch):
     monkeypatch.setattr(cib, "APPS_DIR", tmp_path / "Applications")
     monkeypatch.setenv("CIB_VM_NAME", "work-vm")
     cib.cmd_vm_icon("tart", cib.VmConfig())
-    assert (tmp_path / "Applications" / "Chrome in a Box (work-vm).app").exists()
+    assert (tmp_path / "Applications" / "Google Chrome in a Box (work-vm).app").exists()
 
 
 def test_an_applescript_string_escapes_its_two_special_characters():

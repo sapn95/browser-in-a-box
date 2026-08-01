@@ -67,7 +67,7 @@ class PatchError(Exception):
 class Account:
     name: str
     password: str
-    full_name: str = "chrome-in-a-box"
+    full_name: str = "browser-in-a-box"
     uid: int = UID
     gid: int = GID
 
