@@ -125,7 +125,8 @@ def test_settings_that_kill_the_container_are_rejected(field, value, expected):
 def test_every_browser_image_is_pinned_to_a_version():
     # A floating :latest turns "it worked yesterday" into a coin toss, and a broken
     # image would arrive without a commit anywhere to point at.
-    for browser in cibbrowsers.BROWSERS.values():
+    # expand(), not BROWSERS: "all" is a VM mode, not a browser, and has no image.
+    for browser in cibbrowsers.expand(cibbrowsers.ALL):
         assert ":latest" not in browser.image, browser.key
         assert browser.image.startswith(f"docker.io/kasmweb/{browser.key}:"), browser.key
 
@@ -4084,7 +4085,7 @@ def test_the_old_remembered_address_is_carried_into_the_state_file(tmp_path):
     assert not (cib.SECRETS / "vm-last-ip").exists()
 
 
-@pytest.mark.parametrize("key", sorted(cibbrowsers.BROWSERS))
+@pytest.mark.parametrize("key", sorted(cibbrowsers.BROWSERS.keys() - {cibbrowsers.ALL}))
 def test_every_browser_installs_from_a_script_that_actually_runs(key, tmp_path):
     """Rendering is not running. Firefox and Chromium take different shapes —
     a different archive, a different profile, a different way of being made the
@@ -4110,7 +4111,7 @@ def test_every_browser_installs_from_a_script_that_actually_runs(key, tmp_path):
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("key", sorted(cibbrowsers.BROWSERS))
+@pytest.mark.parametrize("key", sorted(cibbrowsers.BROWSERS.keys() - {cibbrowsers.ALL}))
 def test_every_browser_is_pointed_at_the_shared_downloads_folder(key):
     """The whole point of the share is that what you download lands on the host."""
     script = cib.guest_install_script("pw", browser=cibbrowsers.BROWSERS[key])
@@ -4130,11 +4131,14 @@ def test_firefox_gets_a_profiles_ini_and_chromium_does_not():
 
 def test_each_browser_draws_a_different_icon():
     """A launcher per browser is useless if they all look the same in the Dock."""
-    drawn = {key: cibicon.pdf(browser.palette) for key, browser in cibbrowsers.BROWSERS.items()}
+    drawn = {
+        key: cibicon.pdf(browser.palette, browser.mark)
+        for key, browser in cibbrowsers.BROWSERS.items()
+    }
     assert len(set(drawn.values())) == len(drawn), "two browsers render identically"
 
 
-@pytest.mark.parametrize("key", sorted(cibbrowsers.BROWSERS))
+@pytest.mark.parametrize("key", sorted(cibbrowsers.BROWSERS.keys() - {cibbrowsers.ALL}))
 def test_every_browser_has_a_full_palette(key):
     # _artwork unpacks exactly four: top, lower left, lower right, centre. A short
     # one would raise at draw time, which is after the bundle has been written.
@@ -4178,3 +4182,40 @@ def test_every_browser_names_a_mark_that_exists():
     # written and the launcher already looks installed.
     for browser in cibbrowsers.BROWSERS.values():
         assert browser.mark in cibicon.MARKS, browser.key
+
+
+def test_the_all_mode_installs_every_browser_and_the_container_refuses_it():
+    """One image serves one browser, so 'all' can only mean the VM."""
+    assert [b.key for b in cibbrowsers.expand(cibbrowsers.ALL)] == ["chrome", "firefox", "chromium"]
+    assert cibbrowsers.BROWSERS[cibbrowsers.ALL].mark == "globe"
+
+
+def test_the_container_says_why_it_cannot_hold_every_browser(monkeypatch):
+    monkeypatch.setenv("CIB_BROWSER", "all")
+    with pytest.raises(cib.Failure, match="VM mode"):
+        cib.Config()
+
+
+def test_the_vm_installs_one_browser_per_pass(monkeypatch, tmp_path):
+    """The script stays single-browser; the loop is outside it.
+
+    A script that installed three would need a second dimension of conditionals
+    inside shell that is already the hardest thing here to read.
+    """
+    monkeypatch.setenv("CIB_BROWSER", "all")
+    seen = []
+    monkeypatch.setattr(cib, "guest_ssh", lambda vm, ip, script=None: seen.append(script) or 0)
+    monkeypatch.setattr(cib, "host_time_zone", lambda: ("Europe/Zurich", "Zurich"))
+    assert cib.install_browsers(cib.VmConfig(), "10.0.0.5", "pw") == 0
+    assert len(seen) == 3
+    for browser in cibbrowsers.expand(cibbrowsers.ALL):
+        assert any(browser.app in script for script in seen), browser.key
+
+
+def test_a_failing_browser_stops_the_rest(monkeypatch):
+    # Otherwise the run reports the last browser's exit code and the earlier
+    # failure disappears, which is the one thing a loop must not do.
+    monkeypatch.setenv("CIB_BROWSER", "all")
+    monkeypatch.setattr(cib, "guest_ssh", lambda vm, ip, script=None: 1)
+    monkeypatch.setattr(cib, "host_time_zone", lambda: ("Europe/Zurich", "Zurich"))
+    assert cib.install_browsers(cib.VmConfig(), "10.0.0.5", "pw") == 1

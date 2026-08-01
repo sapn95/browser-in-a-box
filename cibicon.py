@@ -141,7 +141,47 @@ def _flame(cx: float, cy: float, r: float, palette: tuple) -> list[str]:
     ]
 
 
-MARKS = {"wheel": _wheel, "flame": _flame}
+def _globe(cx: float, cy: float, r: float, palette: tuple) -> list[str]:
+    """Every browser at once: a globe under a net, because no one mark fits.
+
+    Meridians as narrowing ellipses and parallels as flat bands, both drawn as
+    thin strokes over the sphere rather than as separate shapes, so it still reads
+    at 16 px where anything finer turns to mush.
+    """
+    top, _, _, centre = palette
+    ops = [*_circle(cx, cy, r, centre)]
+    ops.append(_fill(top))
+    ops.append(f"{top[0]:.3f} {top[1]:.3f} {top[2]:.3f} RG")
+    # Parallels: straight bands, shortened towards the poles by the sphere's width
+    # at that height, which is what stops them looking like a barcode.
+    for fraction in (-0.62, -0.31, 0.0, 0.31, 0.62):
+        y = cy + r * fraction
+        half = r * math.sqrt(max(0.0, 1 - fraction * fraction))
+        ops += [f"{cx - half:.2f} {y - r * 0.022:.2f} {half * 2:.2f} {r * 0.044:.2f} re", "f"]
+    # Meridians: ellipses of the same height and decreasing width, which is what a
+    # sphere's lines of longitude project to.
+    for width in (1.0, 0.62, 0.24):
+        for side in (1, -1):
+            rx = r * width * side
+            ops += [
+                f"{cx + rx:.2f} {cy:.2f} m",
+                f"{cx + rx:.2f} {cy + r * 0.552:.2f} {cx + rx * 0.552:.2f} {cy + r:.2f} "
+                f"{cx:.2f} {cy + r:.2f} c",
+                f"{cx - rx * 0.552:.2f} {cy + r:.2f} {cx - rx:.2f} {cy + r * 0.552:.2f} "
+                f"{cx - rx:.2f} {cy:.2f} c",
+                f"{cx - rx:.2f} {cy - r * 0.552:.2f} {cx - rx * 0.552:.2f} {cy - r:.2f} "
+                f"{cx:.2f} {cy - r:.2f} c",
+                f"{cx + rx * 0.552:.2f} {cy - r:.2f} {cx + rx:.2f} {cy - r * 0.552:.2f} "
+                f"{cx + rx:.2f} {cy:.2f} c",
+                f"{r * 0.044:.2f} w",
+                "S",
+            ]
+            if width == 1.0:
+                break
+    return ops
+
+
+MARKS = {"wheel": _wheel, "flame": _flame, "globe": _globe}
 
 
 def _artwork(palette: tuple = (), mark: str = "wheel") -> list[str]:
