@@ -30,6 +30,30 @@ built-in password manager, autofill and account sync all work normally. Nothing 
 the host is modified, disabled or worked around — it is simply a second browser
 that happens to live in a box.
 
+## What you need, before anything else
+
+- **The container works anywhere** podman or docker runs — Mac, Linux, Windows.
+- **The VM works only on a Mac with Apple silicon** (M1 and later). Not on an
+  Intel Mac, not on Linux, not on Windows. That is not a missing feature: it uses
+  Apple's own Virtualization framework to run macOS, and only Apple hardware may
+  legally and technically do that.
+- Everything is optional except the one you pick. You do not need both.
+
+## What you get
+
+- A **second browser** that your machine's policy does not manage: password
+  manager on, autofill on, settings not greyed out.
+- **Chrome, Firefox or Chromium** — `CIB_BROWSER` picks it. The VM can also take
+  `all` and install the three side by side.
+- Its **profile survives** restarts, and the box surviving is the point: this is
+  a browser you keep, not a throwaway one.
+- **Downloads land on your Mac**, in `~/Downloads/<vm name>`.
+- **Copy and paste** between host and guest.
+- With the VM, **your passkeys**: it signs into your Apple Account, so iCloud
+  Keychain syncs in and passkeys work.
+- A **clickable app** in `~/Applications`, so none of this needs a terminal after
+  the first build.
+
 ## Two variants
 
 There is no single box that does everything, because the isolation that keeps host
