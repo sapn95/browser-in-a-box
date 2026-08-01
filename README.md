@@ -233,35 +233,35 @@ that is running perfectly well, and the only way back in rewrites the account.
 
 ## Commands
 
-| Command          | What it does                                             |
-| ---------------- | -------------------------------------------------------- |
+| Command          | What it does                                                  |
+| ---------------- | ------------------------------------------------------------- |
 | `bib box up`     | start the container, wait for the desktop, launch the browser |
-| `bib box down`   | stop and remove the container (profile is kept)          |
-| `bib box open`   | open the web UI in your browser                          |
-| `bib box status` | show container state                                     |
-| `bib box logs`   | show the last 200 log lines (`-f` follows instead)       |
-| `bib box shell`  | shell into the container                                 |
-| `bib box engine` | print the container engine that will be used             |
-| `bib box reset`  | delete the browser profile (asks first)                  |
+| `bib box down`   | stop and remove the container (profile is kept)               |
+| `bib box open`   | open the web UI in your browser                               |
+| `bib box status` | show container state                                          |
+| `bib box logs`   | show the last 200 log lines (`-f` follows instead)            |
+| `bib box shell`  | shell into the container                                      |
+| `bib box engine` | print the container engine that will be used                  |
+| `bib box reset`  | delete the browser profile (asks first)                       |
 
 The macOS VM variant (Apple silicon):
 
-| Command           | What it does                                     |
-| ----------------- | ------------------------------------------------ |
+| Command           | What it does                                          |
+| ----------------- | ----------------------------------------------------- |
 | `bib vm create`   | build it, start it, install the browser — one command |
-| `bib vm prepare`  | redo just the offline preparation of a built VM  |
-| `bib vm up`       | start it again — a window opens, shell blocks    |
-| `bib vm setup`    | redo just the browser install, over SSH         |
-| `bib vm open`     | start it if stopped, then show its screen        |
-| `bib vm icon`     | write a clickable app into `~/Applications`      |
-| `bib vm password` | print the generated guest password               |
-| `bib vm login`    | print the guest account name and password        |
-| `bib vm ssh`      | open a shell in the guest                        |
-| `bib vm ip`       | print the guest's address                        |
-| `bib vm viewer`   | reprint the screen address (`BIB_VM_VIEWER=vnc`) |
-| `bib vm down`     | stop it                                          |
-| `bib vm status`   | list VMs and their state                         |
-| `bib vm delete`   | delete the VM and everything in it (asks first)  |
+| `bib vm prepare`  | redo just the offline preparation of a built VM       |
+| `bib vm up`       | start it again — a window opens, shell blocks         |
+| `bib vm setup`    | redo just the browser install, over SSH               |
+| `bib vm open`     | start it if stopped, then show its screen             |
+| `bib vm icon`     | write a clickable app into `~/Applications`           |
+| `bib vm password` | print the generated guest password                    |
+| `bib vm login`    | print the guest account name and password             |
+| `bib vm ssh`      | open a shell in the guest                             |
+| `bib vm ip`       | print the guest's address                             |
+| `bib vm viewer`   | reprint the screen address (`BIB_VM_VIEWER=vnc`)      |
+| `bib vm down`     | stop it                                               |
+| `bib vm status`   | list VMs and their state                              |
+| `bib vm delete`   | delete the VM and everything in it (asks first)       |
 
 `vm create` is **unattended**, and it never shows Setup Assistant at all. Setup
 Assistant cannot be skipped without MDM, and driving it with synthetic keystrokes is
