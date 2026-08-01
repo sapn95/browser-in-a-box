@@ -3916,6 +3916,14 @@ def test_no_settings_file_is_normal_and_silent(tmp_path, monkeypatch):
     assert cib.load_config() == {}
 
 
+# The icon is built with osacompile, sips and iconutil, none of which exist off
+# macOS — and CI runs the suite on Linux. Skipped rather than faked: what these
+# assert is that macOS itself accepts what cib writes, and a fake would assert
+# nothing.
+macos_only = pytest.mark.skipif(sys.platform != "darwin", reason="needs macOS tooling")
+
+
+@macos_only
 def test_the_icon_is_a_real_app_bundle_rather_than_a_script(tmp_path, monkeypatch):
     """A shell script named in CFBundleExecutable is launched and then does not run.
 
@@ -3937,6 +3945,7 @@ def test_the_icon_is_a_real_app_bundle_rather_than_a_script(tmp_path, monkeypatc
     assert "vm open" in compiled
 
 
+@macos_only
 def test_a_second_vm_gets_its_own_icon(tmp_path, monkeypatch):
     monkeypatch.setattr(cib, "APPS_DIR", tmp_path / "Applications")
     monkeypatch.setenv("CIB_VM_NAME", "work-vm")
@@ -3950,6 +3959,7 @@ def test_an_applescript_string_escapes_its_two_special_characters():
     assert cib.applescript_string(r'a"b\c') == r'"a\"b\\c"'
 
 
+@macos_only
 def test_the_icon_is_a_valid_pdf_that_sips_can_rasterise(tmp_path):
     """Hand-written PDF, so a malformed one would fail silently as a missing icon.
 
@@ -3978,6 +3988,7 @@ def test_the_icon_is_a_valid_pdf_that_sips_can_rasterise(tmp_path):
     assert "yes" in alpha
 
 
+@macos_only
 def test_the_icon_holds_every_size_macos_asks_for(tmp_path):
     """Chrome's own icns stops at 256, which is what made the Dock look soft."""
     target = tmp_path / "applet.icns"
