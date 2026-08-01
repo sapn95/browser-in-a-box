@@ -43,7 +43,7 @@
       "description": "Keep the pinned packer-plugin-tart version up to date. Packer has no built-in Renovate manager, and an open version bound has no lock file behind it.",
       "customType": "regex",
       "managerFilePatterns": [
-        "/^packer/chrome-vm\\.pkr\\.hcl$/"
+        "/^packer/browser-vm\\.pkr\\.hcl$/"
       ],
       "matchStrings": [
         "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\n\\s*version\\s*=\\s*\"(?<currentValue>[^\"]+)\""

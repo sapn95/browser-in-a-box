@@ -69,8 +69,8 @@ jobs:
           PACKER_GITHUB_API_TOKEN: ${{ github.token }}
         run: |
           packer fmt -check packer/
-          packer init packer/chrome-vm.pkr.hcl
-          packer validate -var 'password=validation-only' packer/chrome-vm.pkr.hcl
+          packer init packer/browser-vm.pkr.hcl
+          packer validate -var 'password=validation-only' packer/browser-vm.pkr.hcl
 
   secrets:
     name: secret scan
@@ -146,7 +146,7 @@ jobs:
       - name: Chrome is running
         run: |
           eng=$(./cib.py box engine)
-          n=$("$eng" exec chrome-in-a-box bash -c 'pgrep -c chrome || true')
+          n=$("$eng" exec browser-in-a-box bash -c 'pgrep -c chrome || true')
           echo "chrome processes: ${n:-0}"
           test "${n:-0}" -gt 0
       - name: desktop is at the requested resolution
@@ -154,7 +154,7 @@ jobs:
           eng=$(./cib.py box engine)
           mode=""
           for _ in $(seq 1 10); do
-            mode=$("$eng" exec -e DISPLAY=:1 chrome-in-a-box xrandr --current |
+            mode=$("$eng" exec -e DISPLAY=:1 browser-in-a-box xrandr --current |
                    awk '/\*/{print $1; exit}')
             [ "$mode" = "1920x1200" ] && break
             sleep 2

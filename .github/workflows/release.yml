@@ -34,7 +34,7 @@ jobs:
           test "$tag" = "$code" || { echo "cib.py says $code, the tag says $tag"; exit 1; }
           test "$tag" = "$meta" || { echo "pyproject says $meta, the tag says $tag"; exit 1; }
           # uv.lock carries a third copy of the version and is committed.
-          lock=$(python3 -c "import re,pathlib;print(re.search(r'name = \"chrome-in-a-box\"\nversion = \"([^\"]+)\"', pathlib.Path('uv.lock').read_text()).group(1))")
+          lock=$(python3 -c "import re,pathlib;print(re.search(r'name = \"browser-in-a-box\"\nversion = \"([^\"]+)\"', pathlib.Path('uv.lock').read_text()).group(1))")
           test "$tag" = "$lock" || { echo "uv.lock says $lock, the tag says $tag"; exit 1; }
 
   linux:
@@ -92,7 +92,7 @@ jobs:
           # way to know it is needed. Without it 'cib vm create' builds a whole
           # guest and only then reports the patcher missing.
           test -f ./dist/cib.dist/cibpatch.py
-          test -f ./dist/cib.dist/packer/chrome-vm.pkr.hcl
+          test -f ./dist/cib.dist/packer/browser-vm.pkr.hcl
       - name: package
         run: |
           # A top-level directory on purpose: this is a standalone build, ~44 files,
@@ -127,7 +127,7 @@ jobs:
           # This is the build that can actually run 'cib vm', so the two files the
           # VM path spawns rather than imports have to be verified present.
           test -f ./dist/cib.dist/cibpatch.py
-          test -f ./dist/cib.dist/packer/chrome-vm.pkr.hcl
+          test -f ./dist/cib.dist/packer/browser-vm.pkr.hcl
       - name: package
         run: |
           # A top-level directory on purpose: this is a standalone build, ~44 files,

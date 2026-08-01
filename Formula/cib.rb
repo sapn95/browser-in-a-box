@@ -8,7 +8,7 @@
 # unpack anything and starts in well under a second.
 class Cib < Formula
   desc "Real Google Chrome in a box — a Linux container or a macOS VM"
-  homepage "https://github.com/sapn95/chrome-in-a-box"
+  homepage "https://github.com/sapn95/browser-in-a-box"
   version "1.4.0"
   license "MIT"
 
@@ -20,18 +20,18 @@ class Cib < Formula
     end
 
     on_arm do
-      url "https://github.com/sapn95/chrome-in-a-box/releases/download/v1.4.0/cib-macos-arm64.tar.gz"
+      url "https://github.com/sapn95/browser-in-a-box/releases/download/v1.4.0/cib-macos-arm64.tar.gz"
       sha256 "2426f6e66e3499d8368a931266741110004956bed9b0165bb56a8483b3847433"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/sapn95/chrome-in-a-box/releases/download/v1.4.0/cib-linux-arm64.tar.gz"
+      url "https://github.com/sapn95/browser-in-a-box/releases/download/v1.4.0/cib-linux-arm64.tar.gz"
       sha256 "60cc61d9123436e632ffb9863bc99fe2877a574e54667e1b5d2d62c198d0301c"
     end
     on_intel do
-      url "https://github.com/sapn95/chrome-in-a-box/releases/download/v1.4.0/cib-linux-x86_64.tar.gz"
+      url "https://github.com/sapn95/browser-in-a-box/releases/download/v1.4.0/cib-linux-x86_64.tar.gz"
       sha256 "01863de6367a8a0731816e26c27a6ee7e3f493a142ea375059ab7a35282d9307"
     end
   end

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""chrome-in-a-box — a second Google Chrome that your machine's policy does not manage.
+"""browser-in-a-box — a second browser that your machine's policy does not manage.
 
 Every command says which of the two variants it acts on, because they are not
 interchangeable:
@@ -119,13 +119,33 @@ def env_flag(name: str) -> bool:
     return os.environ.get(name, "0") == "1"
 
 
+# The project was called chrome-in-a-box before it grew Firefox and Chromium.
+FORMER_NAME = "chrome-in-a-box"
+PROJECT = "browser-in-a-box"
+
+
+def config_root() -> Path:
+    """Where everything cib keeps lives, moving it off the old name if it is there.
+
+    Renamed rather than left behind: that directory holds the guest's password and
+    both key pairs, and its disk was patched with that key. A rename that quietly
+    started a fresh directory would lock cib out of a VM that is still running,
+    with no password fallback to get back in.
+    """
+    root = Path.home() / ".config" / PROJECT
+    former = Path.home() / ".config" / FORMER_NAME
+    if former.is_dir() and not root.exists():
+        former.replace(root)
+    return root
+
+
 def config_path() -> Path:
     """Where the settings file lives. CIB_CONFIG is read straight from the
     environment, because everything else is read through the file it names."""
     named = os.environ.get("CIB_CONFIG", "")
     if named:
         return Path(named).expanduser()
-    return Path.home() / ".config" / "chrome-in-a-box" / "cib.yaml"
+    return config_root() / "cib.yaml"
 
 
 # Sections rather than one flat list, because the two variants share a prefix but
@@ -212,6 +232,8 @@ class Config:
     image: str = field(default_factory=lambda: _env("CIB_IMAGE", chosen_browser().image))
 
     def __post_init__(self) -> None:
+        if not self.volume:
+            object.__setattr__(self, "volume", f"{PROJECT}-profile")
         if self.browser == cibbrowsers.ALL:
             raise Failure(
                 "CIB_BROWSER=all is a VM mode: a container image serves exactly one "
@@ -219,8 +241,11 @@ class Config:
                 "name one browser here."
             )
 
-    name: str = field(default_factory=lambda: _env("CIB_NAME", "chrome-in-a-box"))
-    volume: str = field(default_factory=lambda: _env("CIB_VOLUME", "chrome-in-a-box-profile"))
+    name: str = field(default_factory=lambda: _env("CIB_NAME", PROJECT))
+    # The old name is kept when a volume under it already exists, because that
+    # volume is the browser profile: passwords, sessions, extensions. Defaulting to
+    # the new name would start an empty one and look like the profile was lost.
+    volume: str = field(default_factory=lambda: _env("CIB_VOLUME", ""))
     port: int = field(default_factory=lambda: _env_int("CIB_PORT", "6901"))
     # Empty means "follow the browser window": KasmVNC resizes the desktop to the
     # client, which is what ?resize=remote asks for. Pinning a mode as well would
@@ -574,7 +599,7 @@ class VmConfig:
 
     def check(self) -> None:
         """Reject what would fail later, or quietly do the wrong thing."""
-        # The name is a path component: SECRETS is ~/.config/chrome-in-a-box/<name>,
+        # The name is a path component: SECRETS is ~/.config/browser-in-a-box/<name>,
         # and 'cib vm delete' removes that directory whole. Empty would make it every
         # VM's secrets, and ".." would make it ~/.config.
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", self.name):
@@ -621,7 +646,7 @@ class VmConfig:
     capture_keys: str = field(default_factory=lambda: _env("CIB_VM_CAPTURE_KEYS", "false"))
 
 
-PACKER_TEMPLATE = Path(__file__).resolve().parent / "packer" / "chrome-vm.pkr.hcl"
+PACKER_TEMPLATE = Path(__file__).resolve().parent / "packer" / "browser-vm.pkr.hcl"
 
 
 # Where the generated guest password is kept, so it survives between commands and
@@ -634,7 +659,7 @@ DEFAULT_VM_NAME = "chrome-vm"
 
 def secrets_dir() -> Path:
     """Where this VM's password and keys live."""
-    return Path.home() / ".config" / "chrome-in-a-box" / _env("CIB_VM_NAME", DEFAULT_VM_NAME)
+    return config_root() / _env("CIB_VM_NAME", DEFAULT_VM_NAME)
 
 
 SECRETS = secrets_dir()
@@ -842,7 +867,7 @@ SECRET_NAMES = (
 def migrate_flat_secrets() -> None:
     """Move what an older cib left one directory up.
 
-    It kept them flat under ~/.config/chrome-in-a-box, shared by every VM name, so
+    It kept them flat under the config directory, shared by every VM name, so
     nothing on disk says which guest they belong to. They go to the *default* name
     rather than to whichever name happens to run first: moving them into the first
     name would take them away from the guest that is actually using them, whose
@@ -851,7 +876,7 @@ def migrate_flat_secrets() -> None:
 
     Moved rather than regenerated, for the same reason.
     """
-    flat = Path.home() / ".config" / "chrome-in-a-box"
+    flat = config_root()
     for name in SECRET_NAMES:
         old, current = flat / name, flat / DEFAULT_VM_NAME / name
         if old.is_file() and not current.exists():
@@ -1985,7 +2010,13 @@ def cmd_vm_icon(tart: str, vm: VmConfig) -> None:
     almost none of a login shell's environment, so a CIB_VM_NAME that only exists
     in the user's shell profile would silently open the wrong VM.
     """
-    name = f"Chrome in a Box ({vm.name})" if vm.name != DEFAULT_VM_NAME else "Chrome in a Box"
+    browser = chosen_browser()
+    # Named for what it opens: three launchers called the same thing would be a
+    # worse Dock than none, and the icon alone is not enough at Dock size.
+    label = "Browsers" if browser.key == cibbrowsers.ALL else browser.label
+    name = f"{label} in a Box"
+    if vm.name != DEFAULT_VM_NAME:
+        name = f"{name} ({vm.name})"
     bundle = APPS_DIR / f"{name}.app"
     settings = " ".join(
         f"{key}={shlex.quote(value)}"
@@ -2011,7 +2042,7 @@ def cmd_vm_icon(tart: str, vm: VmConfig) -> None:
     result = run("/usr/bin/osacompile", "-o", str(bundle), "-e", script, check=False, capture=True)
     if result.returncode != 0:
         raise Failure(f"could not write {bundle}: {(result.stderr or result.stdout).strip()}")
-    draw_icon(bundle, chosen_browser())
+    draw_icon(bundle, browser)
     print(f"Wrote {bundle}")
     print("Drag it to the Dock to keep it there.")
 
@@ -2174,7 +2205,7 @@ def cmd_vm_delete(tart: str, vm: VmConfig) -> None:
     # Checked again right here, not just in VmConfig.check(): SECRETS is built at
     # import from the raw environment, so a name that would widen this to every VM's
     # secrets — or to ~/.config — must not reach rmtree even if the check moves.
-    expected = Path.home() / ".config" / "chrome-in-a-box" / vm.name
+    expected = config_root() / vm.name
     if SECRETS.resolve() != expected.resolve():
         raise Failure(f"refusing to delete {SECRETS}: that is not {vm.name!r}'s own directory")
     shutil.rmtree(SECRETS, ignore_errors=True)

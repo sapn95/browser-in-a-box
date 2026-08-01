@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.10"
 
 [[package]]
-name = "chrome-in-a-box"
+name = "browser-in-a-box"
 version = "1.4.0"
 source = { editable = "." }
 dependencies = [
