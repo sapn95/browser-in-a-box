@@ -212,30 +212,50 @@ build {
     ]
   }
 
+  # cib reaches the guest by key, and checks the guest's host key against one it
+  # generated itself — so both are installed here, exactly as the offline path
+  # installs them. Without this, the `cib vm setup` this build tells you to run next
+  # can never connect.
+  #
+  # 0700 before anything lands in it. The private key goes through this directory
+  # rather than /tmp, so there is no moment when another local user could read it —
+  # an upload cannot be given a mode, but it can be put somewhere unreadable.
+  provisioner "shell" {
+    inline = ["install -d -m 0700 ~/.ssh"]
+  }
+
+  # Uploaded, not interpolated. A key whose comment holds a single quote would end
+  # the quoting of an inline command and the rest of it would run as shell — and the
+  # one thing this file must never do is take key material for instructions. The
+  # file provisioner never goes near a shell. `~` is not expanded by the upload, so
+  # the path is written out.
+  provisioner "file" {
+    content     = "${var.authorized_key}\n"
+    destination = "/Users/${var.username}/.ssh/authorized_keys"
+  }
+
+  provisioner "file" {
+    content     = var.host_private_key
+    destination = "/Users/${var.username}/.ssh/host_key"
+  }
+
+  provisioner "file" {
+    content     = "${var.host_public_key}\n"
+    destination = "/Users/${var.username}/.ssh/host_key.pub"
+  }
+
   provisioner "shell" {
     inline = [
-      # cib reaches the guest by key, and checks the guest's host key against one it
-      # generated itself — so both are installed here, exactly as the offline path
-      # installs them. Without this, the `cib vm setup` this build tells you to run
-      # next can never connect.
-      # Refused here rather than checked afterwards: `printf '%s\n' ''` writes a
-      # newline, so the file is never empty and every size test on it passes. A
-      # build that got no key would have finished and handed over a guest nothing
-      # can log into.
-      "test -n '${var.authorized_key}' || { echo 'no authorized_key was passed; cib could never log in to this guest'; exit 1; }",
-      "test -n '${var.host_private_key}' || { echo 'no host_private_key was passed; cib could not verify this guest'; exit 1; }",
-      "mkdir -p ~/.ssh && chmod 700 ~/.ssh",
-      "printf '%s\\n' '${var.authorized_key}' > ~/.ssh/authorized_keys",
       "chmod 600 ~/.ssh/authorized_keys",
-      # 0600 before there is anything to read, not after: the private key spent the
-      # gap between the printf and the install world-readable. Same fix as cib.py
-      # makes with os.open, which this path missed.
-      "install -m 0600 /dev/null /tmp/host_key",
-      "printf '%s' '${var.host_private_key}' > /tmp/host_key",
-      "printf '%s\\n' '${var.host_public_key}' > /tmp/host_key.pub",
-      "echo '${var.password}' | sudo -S install -m 0600 -o root -g wheel /tmp/host_key /etc/ssh/ssh_host_ed25519_key",
-      "echo '${var.password}' | sudo -S install -m 0644 -o root -g wheel /tmp/host_key.pub /etc/ssh/ssh_host_ed25519_key.pub",
-      "rm -f /tmp/host_key /tmp/host_key.pub",
+      # Content, not size: an empty key still leaves the newline above, so the file
+      # is not empty and `test -s` called it installed. A build that got no key
+      # finished and handed over a guest nothing can log into.
+      "grep -q '[^[:space:]]' ~/.ssh/authorized_keys || { echo 'no authorized_key was passed; cib could never log in to this guest'; exit 1; }",
+      # No newline is added to this one, so an empty value really is an empty file.
+      "test -s ~/.ssh/host_key || { echo 'no host_private_key was passed; cib could not verify this guest'; exit 1; }",
+      "echo '${var.password}' | sudo -S install -m 0600 -o root -g wheel ~/.ssh/host_key /etc/ssh/ssh_host_ed25519_key",
+      "echo '${var.password}' | sudo -S install -m 0644 -o root -g wheel ~/.ssh/host_key.pub /etc/ssh/ssh_host_ed25519_key.pub",
+      "rm -f ~/.ssh/host_key ~/.ssh/host_key.pub",
     ]
   }
 
@@ -246,8 +266,8 @@ build {
       # Chrome and the clipboard agent are installed by 'cib vm setup', the same
       # way the offline path installs them — there is no second copy here to
       # drift out of step.
-      # Content, not size: the newline printf writes makes an empty key a non-empty
-      # file, and `test -s` called that installed.
+      # The same check as the guard above, at the end rather than at the cause: a
+      # whole install ran in between, and this is the file the guest is reachable by.
       "grep -q '[^[:space:]]' ~/.ssh/authorized_keys || { echo 'authorized_keys holds no key'; exit 1; }",
       # Not `sudo -n true || ...`: whenever sudo happened not to need a password
       # the first half succeeded and the check itself was never run, so a host key
