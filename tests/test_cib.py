@@ -4139,3 +4139,20 @@ def test_every_browser_has_a_full_palette(key):
     # _artwork unpacks exactly four: top, lower left, lower right, centre. A short
     # one would raise at draw time, which is after the bundle has been written.
     assert len(cibbrowsers.BROWSERS[key].palette) == 4
+
+
+def test_every_module_is_in_the_wheel():
+    """Twice now a new module shipped in a wheel that did not contain it.
+
+    The failure is invisible until someone installs it: the tests import from the
+    source tree and pass, and only the packaged console script raises
+    ModuleNotFoundError. Read with a regex rather than tomllib, which needs 3.11
+    while cib supports 3.10.
+    """
+    root = Path(__file__).resolve().parent.parent
+    manifest = (root / "pyproject.toml").read_text()
+    listed = re.search(r"only-include = \[([^\]]*)\]", manifest)
+    assert listed, "the wheel manifest has moved"
+    shipped = set(re.findall(r'"([^"]+)"', listed.group(1)))
+    present = {module.name for module in root.glob("cib*.py")}
+    assert present <= shipped, f"not in the wheel: {sorted(present - shipped)}"
