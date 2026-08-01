@@ -427,6 +427,15 @@ def test_every_vm_action_dispatches(action, monkeypatch):
     assert called == [action]
 
 
+def test_the_readme_documents_every_command_the_cli_registers():
+    # `cib vm viewer` was registered and left out of the table for two releases. A
+    # list maintained by hand beside a dict is a list that drifts.
+    readme = (Path(cib.__file__).resolve().parent / "README.md").read_text()
+    for variant, actions in (("box", cib.BOX_ACTIONS), ("vm", cib.VM_ACTIONS)):
+        for action in actions:
+            assert f"`cib {variant} {action}`" in readme, f"cib {variant} {action} is undocumented"
+
+
 def test_the_help_names_both_variants_and_their_trade_off(capsys):
     with pytest.raises(SystemExit):
         cib.main(["--help"])

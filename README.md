@@ -224,6 +224,7 @@ The macOS VM variant (Apple silicon):
 | `cib vm login`    | print the guest account name and password        |
 | `cib vm ssh`      | open a shell in the guest                        |
 | `cib vm ip`       | print the guest's address                        |
+| `cib vm viewer`   | reprint the screen address (`CIB_VM_VIEWER=vnc`) |
 | `cib vm down`     | stop it                                          |
 | `cib vm status`   | list VMs and their state                         |
 | `cib vm delete`   | delete the VM and everything in it (asks first)  |
