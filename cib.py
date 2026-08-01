@@ -2002,7 +2002,7 @@ def draw_icon(bundle: Path, browser: cibbrowsers.Browser) -> None:
         return
     try:
         with tempfile.TemporaryDirectory() as scratch:
-            _build_icns(resources / "applet.icns", Path(scratch), browser.palette)
+            _build_icns(resources / "applet.icns", Path(scratch), browser.palette, browser.mark)
         # osacompile writes both CFBundleIconFile and CFBundleIconName, and on
         # modern macOS the name wins — it resolves out of the asset catalog, where
         # the AppleScript applet artwork lives. Replacing applet.icns alone then
@@ -2028,7 +2028,7 @@ def draw_icon(bundle: Path, browser: cibbrowsers.Browser) -> None:
 ICON_SIZES = (16, 32, 64, 128, 256, 512, 1024)
 
 
-def _build_icns(target: Path, scratch: Path, palette: tuple = ()) -> None:
+def _build_icns(target: Path, scratch: Path, palette: tuple = (), mark: str = "wheel") -> None:
     """Rasterise the drawing at every size macOS wants, then pack it."""
     source = scratch / "icon.pdf"
     source.write_bytes(cibicon.pdf())

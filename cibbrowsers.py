@@ -40,8 +40,10 @@ class Browser:
     settings: str = "chromium"
     # Relative to the guest's home. Chrome and Chromium differ only here.
     profile: str = ""
-    # The icon's palette, clockwise from the top. Drawn rather than shipped.
+    # The icon's palette, clockwise from the top, and the shape it fills. Chrome
+    # and Chromium share a shape and differ only in colour; Firefox does not.
     palette: tuple[tuple[float, float, float], ...] = ()
+    mark: str = "wheel"
 
     @property
     def app(self) -> str:
@@ -95,6 +97,7 @@ BROWSERS = {
         settings="firefox",
         profile="Library/Application Support/Firefox/Profiles/cib.default-release",
         palette=(FIREFOX_ORANGE, FIREFOX_PURPLE, FIREFOX_RED, FIREFOX_GLOBE),
+        mark="flame",
     ),
     "chromium": Browser(
         key="chromium",

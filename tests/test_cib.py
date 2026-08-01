@@ -4156,3 +4156,25 @@ def test_every_module_is_in_the_wheel():
     shipped = set(re.findall(r'"([^"]+)"', listed.group(1)))
     present = {module.name for module in root.glob("cib*.py")}
     assert present <= shipped, f"not in the wheel: {sorted(present - shipped)}"
+
+
+def test_firefox_is_a_different_shape_and_not_a_recoloured_chrome():
+    """Colouring Chrome's wheel orange looks like a broken Chrome, not a Firefox.
+
+    The shapes are compared with one palette held constant, so what differs can
+    only be the geometry.
+    """
+    palette = cibicon.DEFAULT_PALETTE
+    wheel = cibicon.pdf(palette, "wheel")
+    flame = cibicon.pdf(palette, "flame")
+    assert wheel != flame
+    assert cibbrowsers.BROWSERS["firefox"].mark == "flame"
+    # Chromium's real mark is Chrome's, in blue and grey. Same shape is correct.
+    assert cibbrowsers.BROWSERS["chromium"].mark == cibbrowsers.BROWSERS["chrome"].mark
+
+
+def test_every_browser_names_a_mark_that_exists():
+    # An unknown one raises inside the drawing, which is after the bundle has been
+    # written and the launcher already looks installed.
+    for browser in cibbrowsers.BROWSERS.values():
+        assert browser.mark in cibicon.MARKS, browser.key
