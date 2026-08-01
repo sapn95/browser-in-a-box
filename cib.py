@@ -122,7 +122,9 @@ def desktop_script(browser: cibbrowsers.Browser) -> str:
         locks = f"{profile}/Singleton*"
     return f"""
 export DISPLAY=:1
-CIB_LOG=/tmp/{browser.key}.log
+# Overridable the same way RES is, so this can be pointed somewhere a test owns
+# rather than writing into the container's /tmp for real.
+CIB_LOG=${{CIB_LOG:-/tmp/{browser.key}.log}}
 if [ -n "$RES" ]; then
   xrandr -s "$RES" >/dev/null ||
     echo "could not set mode $RES (KasmVNC ships a fixed mode list)" >&2
