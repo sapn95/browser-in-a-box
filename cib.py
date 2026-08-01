@@ -2058,7 +2058,7 @@ ICON_SIZES = (16, 32, 64, 128, 256, 512, 1024)
 def _build_icns(target: Path, scratch: Path, palette: tuple = (), mark: str = "wheel") -> None:
     """Rasterise the drawing at every size macOS wants, then pack it."""
     source = scratch / "icon.pdf"
-    source.write_bytes(cibicon.pdf())
+    source.write_bytes(cibicon.pdf(palette, mark))
     iconset = scratch / "cib.iconset"
     iconset.mkdir()
     for size in ICON_SIZES:
