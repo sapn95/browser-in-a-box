@@ -124,12 +124,27 @@ jobs:
           "${HOME}/.local/bin/cib" --help > /dev/null
 
   smoke:
-    name: smoke (real container)
+    name: smoke (real ${{ matrix.browser }} container)
     # Runs directly on the host: it needs a container engine, so it cannot itself
     # live inside a container.
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # Chrome on every push; all three on the weekly run and on demand. Each one
+        # pulls ~3GB and boots an emulated desktop, so running the set every time
+        # would triple the slowest job in this workflow for a regression that is
+        # nearly always shared between them.
+        # Firefox and Chromium being here at all is the point: the box ran Chrome's
+        # binary, Chrome's profile and Chrome's process name whatever browser was
+        # asked for, and a smoke test that only ever started Chrome could not see it.
+        browser: >-
+          ${{ fromJSON((github.event_name == 'schedule' || github.event_name ==
+          'workflow_dispatch') && '["chrome","firefox","chromium"]' ||
+          '["chrome"]') }}
     env:
+      CIB_BROWSER: ${{ matrix.browser }}
       # Pulling ~3GB and booting an amd64 desktop takes a while on a cold runner.
       CIB_WAIT_SECS: "300"
       # Pin a size so the assertion below has something deterministic to check.
@@ -143,11 +158,16 @@ jobs:
           code=$(curl -sk -o /dev/null -w '%{http_code}' https://localhost:6901/)
           echo "HTTP $code"
           test "$code" = "200" || { echo "expected 200 (401 = login prompt is back)"; exit 1; }
-      - name: Chrome is running
+      - name: the browser is running
         run: |
           eng=$(./cib.py box engine)
-          n=$("$eng" exec browser-in-a-box bash -c 'pgrep -c chrome || true')
-          echo "chrome processes: ${n:-0}"
+          # Asked of the table the code itself uses, not spelled out again here: the
+          # command and the process name differ (chrome is started as google-chrome),
+          # and a second copy of that in YAML is a second thing to keep true.
+          proc=$(python3 -c \
+            "import cibbrowsers;print(cibbrowsers.BROWSERS['$CIB_BROWSER'].container_process)")
+          n=$("$eng" exec browser-in-a-box bash -c "pgrep -xc $proc || true")
+          echo "$proc processes: ${n:-0}"
           test "${n:-0}" -gt 0
       - name: desktop is at the requested resolution
         run: |
