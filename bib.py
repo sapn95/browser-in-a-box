@@ -1207,8 +1207,10 @@ def _create_offline(tart: str, vm: VmConfig) -> None:
         if boot.poll() is not None:
             raise Failure(
                 f"the guest's first boot stopped before it was ready (tart exit "
-                f"{boot.returncode})"
-                + (f": {(boot.stderr.read() or '').strip()}" if boot.stderr else "")
+                f"{boot.returncode})" + (f": {detail}" if (detail := boot_log_tail()) else "")
+                # From the log, not from boot.stderr: that is None now that the child
+                # writes into the log instead of a pipe, so this read the empty branch
+                # and dropped tart's reason on the floor.
             )
         run(tart, "stop", vm.name, check=False, capture=True)
         try:
@@ -1708,6 +1710,12 @@ def guest_install_script(
     # conditionals in it would not survive the next change.
     fetch = _fetch_browser(browser)
     settings = _first_run_settings(browser)
+    # Two tests, not one: browser.profile is where this version writes, and
+    # profile_marker is what an older one leaves behind under a different name.
+    # Either means "already set up", and overwriting either loses saved logins.
+    profile_exists = f'[ -e "$HOME/{browser.profile}" ]'
+    if browser.profile_marker:
+        profile_exists += f' || [ -e "$HOME/{browser.profile_marker}" ]'
     # Only the first pass asks. Under BIB_BROWSER=all this script runs once per
     # browser, and asking every one of them in turn left whichever happened to be
     # installed last as the default — Chromium, by dict order, which is not the
@@ -1754,7 +1762,7 @@ sudo_pw() {{ printf '%s\\n' "$BIB_SUDO_PW" | sudo -S -p '' "$@"; }}
 if [ -d "{GUEST_SHARE}" ]; then
   ln -sfn "{GUEST_SHARE}" "$HOME/Downloads/on-the-host" 2>/dev/null ||
     echo "could not link the shared folder into ~/Downloads" >&2
-  if [ -e "$HOME/{browser.profile}" ]; then
+  if {profile_exists}; then
     echo "{browser.label} already has a profile; leaving its settings alone" >&2
   else
 {settings}

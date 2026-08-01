@@ -165,9 +165,9 @@ Four ways, pick one:
 git clone https://github.com/sapn95/browser-in-a-box && cd browser-in-a-box
 ./bib.py box up
 
-# 2. with Homebrew (the tap lives in this repo, no second repo to add)
-brew tap sapn95/bib https://github.com/sapn95/browser-in-a-box
-brew install sapn95/bib/bib     # the full name is what grants trust; plain
+# 2. with Homebrew
+brew tap sapn95/tap
+brew install sapn95/tap/bib     # the full name is what grants trust; plain
 bib box up                      # `brew install bib` asks you to `brew trust` first
 
 # 3. as a command, in its own environment
@@ -207,7 +207,7 @@ for you — a name that half-works is worse than one that clearly does not.
 What that means in practice:
 
 ```bash
-brew uninstall cib && brew install sapn95/bib/bib   # the command
+brew uninstall cib && brew install sapn95/tap/bib   # the command
 BIB_VM_NAME=chrome-vm bib vm up                     # keep an existing guest
 mv ~/.config/browser-in-a-box/cib.yaml ~/.config/browser-in-a-box/bib.yaml
 ```
@@ -217,6 +217,19 @@ The container and its profile volume are **not** renamed — they have been
 If you are coming from 1.x, where they were named after Chrome, the old ones are
 still there and this will not find them: either point at them with `BIB_NAME` and
 `BIB_VOLUME`, or start fresh and sign in again.
+
+One thing from 1.x cannot be recreated. Its configuration directory was
+`~/.config/chrome-in-a-box`, and it holds the **only** copy of a built VM's
+generated password and both key pairs — the guest's disk was patched with that key.
+Version 2 moved it for you; version 3 does not. If you skipped 2.x, move it by hand
+before running anything:
+
+```bash
+mv ~/.config/chrome-in-a-box ~/.config/browser-in-a-box
+```
+
+Without it `bib vm password` and `bib vm setup` report no saved password for a guest
+that is running perfectly well, and the only way back in rewrites the account.
 
 ## Commands
 

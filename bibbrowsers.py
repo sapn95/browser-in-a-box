@@ -40,6 +40,14 @@ class Browser:
     settings: str = "chromium"
     # Relative to the guest's home. Chrome and Chromium differ only here.
     profile: str = ""
+    # A second path that also means "this browser is already set up here", checked
+    # as well as `profile`. Firefox needs it because its profile directory carries
+    # this project's name: renaming the project renamed the directory, so the guard
+    # stopped recognising a profile written by an older version and overwrote the
+    # profiles.ini pointing at it — leaving the real profile, and every saved login
+    # in it, orphaned on disk. profiles.ini is the name Mozilla chose, not one of
+    # ours, so it cannot drift again.
+    profile_marker: str = ""
     # What to tell the user once the guest is up. Not one sentence with the name
     # swapped: the three browsers sync into three different things, and Chromium
     # into none at all, so a single line would be wrong for two of them.
@@ -115,6 +123,7 @@ BROWSERS = {
         image="docker.io/kasmweb/firefox:1.19.0",
         settings="firefox",
         profile="Library/Application Support/Firefox/Profiles/bib.default-release",
+        profile_marker="Library/Application Support/Firefox/profiles.ini",
         container_bin="firefox",
         container_process="firefox",
         # The root, not one profile: which profile inside it is current is Firefox's

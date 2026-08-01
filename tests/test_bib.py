@@ -519,6 +519,22 @@ def _updater():
     return update_formula
 
 
+def test_the_formula_points_at_the_version_this_code_is(monkeypatch):
+    # The fourth place the version is written, and the only one nothing checked.
+    # The rename rewrote the formula's asset names to bib-* and left version "2.0.0"
+    # in place, so every url pointed at a v2.0.0 release that published cib-* — a
+    # 404 for anyone following the README's `brew install`. The release guard checks
+    # bib.py, pyproject.toml and uv.lock against the tag; this covers the formula.
+    formula = _formula()
+    assert f'version "{bib.__version__}"' in formula
+    for arch in ("macos-arm64", "linux-arm64", "linux-x86_64"):
+        expected = (
+            f"https://github.com/sapn95/browser-in-a-box/releases/download/"
+            f"v{bib.__version__}/bib-{arch}.tar.gz"
+        )
+        assert expected in formula, f"{arch} url does not match the version"
+
+
 ZERO = "0" * 64
 ONE = "1" * 64
 
@@ -1920,12 +1936,24 @@ def test_every_renovate_marker_anywhere_has_a_manager_that_matches_it():
     for manager in config["customManagers"]:
         target = manager["managerFilePatterns"][0].strip("/^$").replace("\\", "")
         by_file.setdefault(target, []).extend(manager["matchStrings"])
-    marked = {
-        str(path.relative_to(root))
-        for path in (root / "bib.py", root / "packer" / "browser-vm.pkr.hcl")
-        if "# renovate:" in path.read_text()
-    }
+    # Every tracked file, not a list of two. "Anywhere" excluded bibbrowsers.py,
+    # which is where the per-browser split moved the three kasmweb image pins — so
+    # the one file whose markers were managed by nothing was the one not looked at,
+    # and this test passed while the box's images were frozen for good.
+    marked = set()
+    for path in root.rglob("*"):
+        relative = path.relative_to(root)
+        if not path.is_file() or any(part.startswith(".") for part in relative.parts):
+            continue
+        if "__pycache__" in relative.parts or relative.parts[0] in ("dist", "build"):
+            continue
+        try:
+            if "# renovate:" in path.read_text():
+                marked.add(str(relative))
+        except (OSError, UnicodeDecodeError):
+            continue
     assert marked, "no renovate markers found at all — has the layout changed?"
+    assert "bibbrowsers.py" in marked, "the browser table's image pins carry markers"
     for name in marked:
         source = (root / name).read_text()
         covered = {
@@ -3861,6 +3889,33 @@ def test_an_existing_chrome_profile_is_not_overwritten(tmp_path):
     assert result.returncode == 0, result.stderr
     assert prefs.read_text() == '{"mine": true}'
     assert "already has a profile" in result.stderr
+
+
+def test_a_firefox_profile_from_an_older_version_is_not_orphaned(tmp_path):
+    # The profile directory carries this project's name, so the rename moved it:
+    # a guest set up by 2.x has Profiles/cib.default-release and the guard, which
+    # tests the new path, did not fire. profiles.ini was then rewritten to point at
+    # a fresh empty profile and every saved login became unreachable, with the real
+    # profile still sitting on disk.
+    (tmp_path / "Downloads").mkdir()
+    support = tmp_path / "Library/Application Support/Firefox"
+    old = support / "Profiles/cib.default-release"
+    old.mkdir(parents=True)
+    (old / "logins.json").write_text('{"logins": ["mine"]}')
+    ini = support / "profiles.ini"
+    ini.write_text(
+        "[Profile0]\nName=default-release\nIsRelative=1\nPath=Profiles/cib.default-release\n"
+    )
+    result = _run_guest_script(
+        bib.guest_install_script("pw", browser=bibbrowsers.BROWSERS["firefox"]),
+        tmp_path,
+        share_exists=True,
+        browser=bibbrowsers.BROWSERS["firefox"],
+    )
+    assert result.returncode == 0, result.stderr
+    assert "already has a profile" in result.stderr
+    assert "cib.default-release" in ini.read_text(), "profiles.ini was repointed"
+    assert (old / "logins.json").exists()
 
 
 def test_the_chromium_preferences_are_valid_json_and_send_nothing_home():
