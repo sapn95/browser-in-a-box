@@ -222,7 +222,7 @@ still there and this will not find them: either point at them with `BIB_NAME` an
 
 One thing from 1.x cannot be recreated. Its configuration directory was
 `~/.config/chrome-in-a-box`, and it holds the **only** copy of a built VM's
-generated password and both key pairs — the guest's disk was patched with that key.
+guest password and both key pairs — the guest's disk was patched with that key.
 Version 2 moved it for you; version 3 does not. If you skipped 2.x, move it by hand
 before running anything:
 
@@ -256,7 +256,7 @@ The macOS VM variant (Apple silicon):
 | `bib vm setup`    | redo just the browser install, over SSH               |
 | `bib vm open`     | start it if stopped, then show its screen             |
 | `bib vm icon`     | write a clickable app into `~/Applications`           |
-| `bib vm password` | print the generated guest password                    |
+| `bib vm password` | print the guest account password                      |
 | `bib vm login`    | print the guest account name and password             |
 | `bib vm ssh`      | open a shell in the guest                             |
 | `bib vm ip`       | print the guest's address                             |
@@ -273,7 +273,7 @@ Assistant would have produced straight onto its disk, before the guest ever reac
 a login window. That is deterministic — no timing, no OCR, nothing to re-learn when
 Apple moves a button.
 
-What gets written: an account with a **generated** password, autologin, Remote
+What gets written: the account and its password, autologin, Remote
 Login, bib's SSH key and the guest's host key, and **this host's keyboard layout**
 (so the guest types where your fingers already do). Only that one step needs
 `sudo`.
@@ -352,8 +352,13 @@ Overridable: `BIB_PORT`, `BIB_RESOLUTION`, `BIB_WAIT_SECS`, `BIB_ENGINE`,
 and for the VM `BIB_VM_NAME`, `BIB_VM_CPUS`, `BIB_VM_MEMORY`, `BIB_VM_DISK`,
 `BIB_VM_DISPLAY`, `BIB_VM_NET`, `BIB_VM_INTERFACE`, `BIB_VM_USER`, `BIB_VM_SHARE`,
 `BIB_BROWSER` (chrome, firefox or chromium),
-`BIB_VM_PASSWORD` (a password of your own instead of a generated one; letters and
-digits only, and no y or z, because the packer path types it as keystrokes),
+`BIB_VM_PASSWORD` (the guest account password, `admin` by default; `random` asks
+for a generated one instead, and anything else is taken as your own choice —
+letters and digits only, and no y or z, because the packer path types it as
+keystrokes),
+`BIB_VM_DEFAULT_BROWSER` (hand the guest's default browser to the one being
+installed — off, so Safari stays the default as it would on a fresh macOS; under
+`all` there is no sensible answer anyway),
 `BIB_VM_CAPTURE_KEYS` (send Cmd+Space, Cmd+Tab and the rest to the guest while
 its window has focus — off by default, because it is all-or-nothing and a host
 launcher on Cmd+Space becomes unreachable until you click away),
@@ -398,7 +403,7 @@ box:
 vm:
   name: browser-vm
   user: admin
-  password: admin        # or leave it out for a generated one
+  password: admin        # the default; `random` generates one instead
   display: 1280x800
   net: bridged
   share: ~/Downloads/browser-vm

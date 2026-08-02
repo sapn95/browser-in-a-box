@@ -208,16 +208,48 @@ def chromium_preferences(share: str) -> str:
             # 2 is "do not preconnect or prefetch", which otherwise resolves and
             # opens connections to whatever a page merely hints at.
             "net": {"network_prediction_options": 2},
-            "browser": {"has_seen_welcome_page": True},
+            # The onboarding run: the welcome page, the sign-in pitch, the default
+            # browser question and the "make it yours" tour. Every one of them is a
+            # click between opening the box and using it.
+            "browser": {
+                "has_seen_welcome_page": True,
+                "check_default_browser": False,
+                "show_home_button": False,
+            },
             "credentials_enable_service": False,
             "profile": {"password_manager_leak_detection": False},
+            "distribution": {
+                "skip_first_run_ui": True,
+                "suppress_first_run_default_browser_prompt": True,
+                "import_bookmarks": False,
+                "import_history": False,
+                "import_search_engine": False,
+                "make_chrome_default": False,
+                "make_chrome_default_for_user": False,
+                "suppress_first_run_bubble": True,
+                "do_not_create_desktop_shortcut": True,
+                "do_not_launch_chrome": True,
+            },
+            "signin": {"allowed": True},
         }
     )
 
 
-# Metrics consent is not a profile preference — it lives in Local State, beside the
-# profiles rather than inside one, so writing it into Preferences does nothing.
-CHROMIUM_LOCAL_STATE = json.dumps({"user_experience_metrics": {"reporting_enabled": False}})
+# Beside the profiles rather than inside one, so nothing here works from Preferences.
+CHROMIUM_LOCAL_STATE = json.dumps(
+    {
+        "user_experience_metrics": {"reporting_enabled": False},
+        # The consent record itself. Without it the first launch asks, and a dialog
+        # that asks about sending usage data is one more thing to click away.
+        "metrics": {"reporting_enabled": False},
+        "browser": {"first_run_finished": True},
+    }
+)
+
+# An empty sentinel beside the profile directory. Chrome and Chromium test for its
+# presence, not its contents: if it is missing they run the whole first-run
+# experience whatever Preferences says, because Preferences is read after it.
+CHROMIUM_FIRST_RUN_SENTINEL = "First Run"
 
 
 def firefox_preferences(share: str) -> str:
@@ -241,6 +273,38 @@ def firefox_preferences(share: str) -> str:
         "browser.aboutwelcome.enabled": False,
         "network.prefetch-next": False,
         "network.dns.disablePrefetch": True,
+        # The rest of the onboarding run. mstone=ignore is what stops the "what's
+        # new" page on every update, and the two datareporting lines below are what
+        # stop the privacy notice that otherwise appears on the very first launch.
+        "browser.startup.homepage_override.mstone": "ignore",
+        "startup.homepage_welcome_url": "",
+        "startup.homepage_welcome_url.additional": "",
+        "browser.startup.firstrunSkipsHomepage": True,
+        "trailhead.firstrun.didSeeAboutWelcome": True,
+        "datareporting.policy.dataSubmissionPolicyBypassNotification": True,
+        "toolkit.telemetry.reportingpolicy.firstRun": False,
+        # Studies are code Mozilla ships to a subset of users, and the coverage ping
+        # is a separate report from telemetry with its own opt-out.
+        "app.shield.optoutstudies.enabled": False,
+        "app.normandy.enabled": False,
+        "app.normandy.first_run": False,
+        "toolkit.telemetry.archive.enabled": False,
+        "toolkit.telemetry.newProfilePing.enabled": False,
+        "toolkit.telemetry.shutdownPingSender.enabled": False,
+        "toolkit.telemetry.updatePing.enabled": False,
+        "toolkit.telemetry.bhrPing.enabled": False,
+        "toolkit.telemetry.firstShutdownPing.enabled": False,
+        "toolkit.coverage.opt-out": True,
+        "toolkit.coverage.endpoint.base": "",
+        # Sponsored tiles and the recommendation feed on the new-tab page, both of
+        # which fetch from Mozilla's servers before you have typed anything.
+        "browser.newtabpage.activity-stream.telemetry": False,
+        "browser.newtabpage.activity-stream.feeds.section.topstories": False,
+        "browser.newtabpage.activity-stream.showSponsored": False,
+        "browser.newtabpage.activity-stream.showSponsoredTopSites": False,
+        "browser.discovery.enabled": False,
+        "browser.contentblocking.report.lockwise.enabled": False,
+        "browser.crashReports.unsubmittedCheck.autoSubmit2": False,
     }
     return "".join(
         f"user_pref({json.dumps(key)}, {json.dumps(value)});\n" for key, value in settings.items()

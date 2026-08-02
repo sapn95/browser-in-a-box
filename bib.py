@@ -811,7 +811,7 @@ DEFAULT_TIME_ZONE = ("Europe/Zurich", "Zurich")
 def host_keyboard_layout() -> tuple[int, str]:
     """The layout this host types in, to give the guest the same one.
 
-    The generated password is pasted, but everything typed in the guest afterwards
+    The guest password is pasted, but everything typed in the guest afterwards
     is typed by hand, and a guest on a different layout moves the punctuation.
 
     Read through `defaults export` rather than straight from the plist: cfprefsd
@@ -1004,9 +1004,26 @@ def ensure_vm_keys() -> None:
     KNOWN_HOSTS.chmod(0o600)
 
 
+# admin/admin, because this is a scratch VM you open, use and throw away, and a
+# password you have to look up is one more step in front of every sudo prompt and
+# every unlock. Weigh it against where the guest sits: BIB_VM_NET defaults to
+# bridged, so it has its own address on the same network as everything else in the
+# house. SSH into it is key-only and a guessed password does not open that. Screen
+# Sharing does take exactly this password, from anywhere on that network — but it
+# is off unless you turn it on inside the guest yourself.
+DEFAULT_VM_PASSWORD = "admin"  # noqa: S105 — a default, and a deliberate one
+# BIB_VM_PASSWORD=random asks for a generated one instead. Not a length: any real
+# password would be a legal value, so it has to be a word no one would choose.
+RANDOM_PASSWORD = "random"  # noqa: S105 — a sentinel, not a password
+
+
 def guest_password(create: bool = False) -> str:
-    """The guest account password. Generated once, then remembered — you paste it,
-    you never type it."""
+    """The guest account password.
+
+    admin by default, yours through BIB_VM_PASSWORD, or generated with
+    BIB_VM_PASSWORD=random. Written down either way, so `bib vm password` can hand
+    it to you and you never have to type it.
+    """
     migrate_flat_secrets()
     if CREDENTIALS.exists():
         saved = CREDENTIALS.read_text().strip()
@@ -1020,12 +1037,10 @@ def guest_password(create: bool = False) -> str:
     # character whose key moves between the US and Swiss German layouts: -, _, y, z
     # and their capitals all do.
     alphabet = "abcdefghijklmnopqrstuvwxABCDEFGHIJKLMNOPQRSTUVWX0123456789"
-    chosen = _env("BIB_VM_PASSWORD", "")
-    if chosen:
-        # Yours to choose, and yours to weigh: a bridged guest sits on the same
-        # network as everyone else on it. SSH here is key-only, so a guessable
-        # password does not open that — but Screen Sharing, if you ever turn it on
-        # inside the guest, takes exactly this password from anywhere on the LAN.
+    chosen = _env("BIB_VM_PASSWORD", DEFAULT_VM_PASSWORD)
+    if chosen == RANDOM_PASSWORD:
+        password = "".join(secrets.choice(alphabet) for _ in range(24))
+    else:
         if set(chosen) - set(alphabet):
             raise Failure(
                 "BIB_VM_PASSWORD may only hold letters and digits, and not y or z: "
@@ -1033,8 +1048,6 @@ def guest_password(create: bool = False) -> str:
                 "US and Swiss German layouts"
             )
         password = chosen
-    else:
-        password = "".join(secrets.choice(alphabet) for _ in range(24))
     CREDENTIALS.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     # Created 0600 rather than chmod-ed afterwards, so it is never briefly readable.
     with os.fdopen(os.open(CREDENTIALS, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
@@ -1139,7 +1152,13 @@ def boot_once(tart: str, vm: VmConfig) -> subprocess.Popen[str]:
         log = open_boot_log()
         try:
             boot = subprocess.Popen(  # noqa: S603
-                [tart, "run", "--no-graphics", vm.name],
+                # --no-audio as well as --no-graphics: this boot exists only so the
+                # guest lays down its first-boot state, and Setup Assistant starts
+                # VoiceOver by itself when nothing types at it. With no window there
+                # is no way to stop it, and tart passes the guest's audio through to
+                # the host regardless — so an unattended build talks out loud at you
+                # for three minutes.
+                [tart, "run", "--no-graphics", "--no-audio", vm.name],
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -1645,6 +1664,12 @@ def _first_run_settings(browser: bibbrowsers.Browser) -> str:
             f" > {profile}/Preferences",
             f"    printf '%s' {shlex.quote(bibbrowsers.CHROMIUM_LOCAL_STATE)}"
             f' > {profile}/../"Local State"',
+            # An empty file beside Local State. Chrome and Chromium test for it and
+            # run the whole first-run experience when it is missing — the welcome
+            # tab, the sign-in pitch, the default-browser question — whatever
+            # Preferences says, because that decision is taken before Preferences
+            # is read.
+            f"    : > {profile}/../{shlex.quote(bibbrowsers.CHROMIUM_FIRST_RUN_SENTINEL)}",
         ]
     )
 
@@ -1658,10 +1683,13 @@ def install_browsers(vm: VmConfig, ip: str, password: str) -> int:
     conditionals nobody can read.
     """
     zone = host_time_zone()[0]
-    for position, browser in enumerate(bibbrowsers.expand(vm.browser)):
+    installing = bibbrowsers.expand(vm.browser)
+    for position, browser in enumerate(installing):
         print(f"Installing {browser.label} on {vm.user}@{ip} ...")
         failed = guest_ssh(
-            vm, ip, guest_install_script(password, zone, browser, first=position == 0)
+            vm,
+            ip,
+            guest_install_script(password, zone, browser, first=position == 0, dock=installing),
         )
         if failed:
             return failed
@@ -1673,6 +1701,7 @@ def guest_install_script(
     time_zone: str = "",
     browser: bibbrowsers.Browser | None = None,
     first: bool = True,
+    dock: list[bibbrowsers.Browser] | None = None,
 ) -> str:
     """The chosen browser, the clipboard agent and the shared Downloads folder, as a
     script the guest runs.
@@ -1698,6 +1727,9 @@ def guest_install_script(
         else ":"
     )
     browser = browser or chosen_browser()
+    # Everything this run puts in the Dock. Just this browser unless the caller
+    # names the whole set, which install_browsers does.
+    dock = dock or [browser]
     # `all` is a choice, not a browser: its row carries no app name, so every path
     # below that names the bundle would come out as "/Applications" itself — and one
     # of them is `rm -rf`. install_browsers expands the choice and calls this once
@@ -1718,12 +1750,15 @@ def guest_install_script(
     profile_exists = f'[ -e "$HOME/{browser.profile}" ]'
     if browser.profile_marker:
         profile_exists += f' || [ -e "$HOME/{browser.profile_marker}" ]'
-    # Only the first pass asks. Under BIB_BROWSER=all this script runs once per
-    # browser, and asking every one of them in turn left whichever happened to be
-    # installed last as the default — Chromium, by dict order, which is not the
-    # browser anyone chose.
-    if not first:
-        default_browser_step = ": # the first browser of this run already asked"
+    # Off unless asked for. Handing the guest's default browser to whatever bib
+    # installed is a decision about someone else's machine, and under `all` it is not
+    # even a decision anyone made — it would be whichever browser the loop reached
+    # first. Safari stays the default, which is what a fresh macOS does.
+    #
+    # Only the first pass asks when it is asked for at all: run per browser, each
+    # would take the title from the last, leaving Chromium by dict order.
+    if not env_flag("BIB_VM_DEFAULT_BROWSER") or not first:
+        default_browser_step = ": # BIB_VM_DEFAULT_BROWSER=1 to hand it the default"
     elif browser.settings == "firefox":
         # Firefox has its own switch and ignores the Chromium one entirely.
         default_browser_step = (
@@ -1734,10 +1769,19 @@ def guest_install_script(
             f"open -a {shlex.quote(browser.app)} --args --make-default-browser"
             " >/dev/null 2>&1 || true"
         )
-    # -array replaces the whole row, -array-add appends to it. The first pass clears
-    # Apple's suite out, the rest add themselves — otherwise the last browser
-    # installed was the only one in the Dock, and re-running would stack duplicates.
-    dock_verb = "-array" if first else "-array-add"
+    # The whole row, every pass, rather than clear-then-append. Appending assumed the
+    # first pass's clear had survived, and on a fresh guest it does not: the Dock
+    # writes its own default layout the first time it starts for a new account, and
+    # that landed on top of pass one. Passes two and three then appended to Apple's
+    # eighteen. Writing the complete row each time is idempotent and self-healing —
+    # whatever clobbers it, the next pass puts it right, and the last pass is right.
+    dock_tiles = " \\\n  ".join(
+        "'<dict><key>tile-data</key><dict><key>file-data</key><dict>'"
+        "'<key>_CFURLString</key><string>" + app.app + "</string>'"
+        "'<key>_CFURLStringType</key><integer>0</integer></dict></dict>'"
+        "'<key>tile-type</key><string>file-tile</string></dict>'"
+        for app in dock
+    )
 
     return f"""set -eu
 BIB_SUDO_PW={shlex.quote(password)}
@@ -1756,6 +1800,50 @@ cleanup
 mkdir -p "$BIB_WORK"
 trap cleanup EXIT
 sudo_pw() {{ printf '%s\\n' "$BIB_SUDO_PW" | sudo -S -p '' "$@"; }}
+# First, with the clipboard agent, and for the same reason. A guest that locks asks
+# for the guest password, and a VM has no Touch ID to shortcut it.
+# Set after the browsers, it took a browser download — three of them under `all` —
+# before the lock was off, and the guest could and did lock inside that window: no
+# clipboard yet, so the one password you cannot paste is the one you have to type.
+# A guest that locks its screen asks for the account password, and
+# a VM has no Touch ID to shortcut it. The screensaver never starts, the display
+# never sleeps, and neither does the machine.
+# All three are ByHost preferences, so all three need -currentHost. Two of them
+# used to go without it, which writes a domain nothing reads: the guest kept
+# asking for the password however many times the setting was turned off.
+defaults -currentHost write com.apple.screensaver idleTime -int 0
+defaults -currentHost write com.apple.screensaver askForPassword -int 0
+defaults -currentHost write com.apple.screensaver askForPasswordDelay -int 0
+sudo_pw pmset -a displaysleep 0 sleep 0 >/dev/null ||
+  echo "could not turn off display sleep" >&2
+# macOS 14 and later keep the lock behind sysadminctl as well; older ones do not
+# have the flag at all, so its absence is not a failure.
+sudo_pw sysadminctl -screenLock off -password {shlex.quote(password)} >/dev/null 2>&1 || true
+
+# Before the browser, not after it. This is what makes host-to-guest paste work,
+# and the browser downloads are hundreds of megabytes — three times over under
+# `all`. Installed last, the guest spent the whole install with no clipboard,
+# which is exactly the window in which an Apple Account password has to be typed.
+if [ ! -x {AGENT_BIN} ]; then
+  # Host/guest copy-paste needs an agent inside the guest. Without it the generated
+  # password would have to be typed by hand at every passkey prompt, which is the
+  # one thing generating it was meant to avoid.
+  curl -fsSL -o "$BIB_WORK/agent.tar.gz" \
+    "https://github.com/cirruslabs/tart-guest-agent/releases/download/v{GUEST_AGENT_VERSION}/tart-guest-agent-darwin-all.tar.gz"
+  tar -xzf "$BIB_WORK/agent.tar.gz" -C "$BIB_WORK"
+  # BSD install does not create the target directory, and a fresh guest may have
+  # /usr/local without a bin in it.
+  sudo_pw install -d -m 0755 "$(dirname {AGENT_BIN})"
+  sudo_pw install -m 0755 "$BIB_WORK/tart-guest-agent" {AGENT_BIN}
+fi
+# The agent has no self-install flag — it is started by launchd, from a plist. It
+# runs as a LaunchAgent rather than a daemon on purpose: the pasteboard belongs to
+# the logged-in session, and a root daemon cannot reach it.
+printf '%s\n' {shlex.quote(AGENT_PLIST)} > "$BIB_WORK/agent.plist"
+sudo_pw install -m 0644 -o root -g wheel "$BIB_WORK/agent.plist" {AGENT_PLIST_PATH}
+# Already loaded from an earlier run, or not yet: neither is an error.
+launchctl bootout "gui/$(id -u)/{AGENT_LABEL}" >/dev/null 2>&1 || true
+launchctl bootstrap "gui/$(id -u)" {AGENT_PLIST_PATH} >/dev/null 2>&1 || true
 # Downloads land on the host. Not by replacing ~/Downloads: macOS protects that
 # folder against being renamed, and a process arriving over ssh has no TCC grant
 # for it, so `mv` there fails with EPERM however the permissions look. Chrome is
@@ -1784,42 +1872,7 @@ else
   mv "$BIB_WORK/staging/{browser.app_name}" {shlex.quote(browser.app)}
 fi
 {shlex.quote(browser.binary)} --version
-if [ ! -x {AGENT_BIN} ]; then
-  # Host/guest copy-paste needs an agent inside the guest. Without it the generated
-  # password would have to be typed by hand at every passkey prompt, which is the
-  # one thing generating it was meant to avoid.
-  curl -fsSL -o "$BIB_WORK/agent.tar.gz" \
-    "https://github.com/cirruslabs/tart-guest-agent/releases/download/v{GUEST_AGENT_VERSION}/tart-guest-agent-darwin-all.tar.gz"
-  tar -xzf "$BIB_WORK/agent.tar.gz" -C "$BIB_WORK"
-  # BSD install does not create the target directory, and a fresh guest may have
-  # /usr/local without a bin in it.
-  sudo_pw install -d -m 0755 "$(dirname {AGENT_BIN})"
-  sudo_pw install -m 0755 "$BIB_WORK/tart-guest-agent" {AGENT_BIN}
-fi
-# The agent has no self-install flag — it is started by launchd, from a plist. It
-# runs as a LaunchAgent rather than a daemon on purpose: the pasteboard belongs to
-# the logged-in session, and a root daemon cannot reach it.
-printf '%s\n' {shlex.quote(AGENT_PLIST)} > "$BIB_WORK/agent.plist"
-sudo_pw install -m 0644 -o root -g wheel "$BIB_WORK/agent.plist" {AGENT_PLIST_PATH}
-# Already loaded from an earlier run, or not yet: neither is an error.
-launchctl bootout "gui/$(id -u)/{AGENT_LABEL}" >/dev/null 2>&1 || true
-launchctl bootstrap "gui/$(id -u)" {AGENT_PLIST_PATH} >/dev/null 2>&1 || true
 {time_zone_step}
-# A guest that locks its screen asks for the generated 24-character password, and
-# a VM has no Touch ID to shortcut it. The screensaver never starts, the display
-# never sleeps, and neither does the machine.
-# All three are ByHost preferences, so all three need -currentHost. Two of them
-# used to go without it, which writes a domain nothing reads: the guest kept
-# asking for the password however many times the setting was turned off.
-defaults -currentHost write com.apple.screensaver idleTime -int 0
-defaults -currentHost write com.apple.screensaver askForPassword -int 0
-defaults -currentHost write com.apple.screensaver askForPasswordDelay -int 0
-sudo_pw pmset -a displaysleep 0 sleep 0 >/dev/null ||
-  echo "could not turn off display sleep" >&2
-# macOS 14 and later keep the lock behind sysadminctl as well; older ones do not
-# have the flag at all, so its absence is not a failure.
-sudo_pw sysadminctl -screenLock off -password {shlex.quote(password)} >/dev/null 2>&1 || true
-
 # Updates apply themselves. An unpatched guest is the browser you do your banking
 # in, and the alternative is the update badge nagging in a VM you opened to do one
 # thing. Chrome brings its own updater (Keystone) with the install, so only macOS
@@ -1848,12 +1901,10 @@ defaults write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add 64 \\
 {default_browser_step}
 
 # The browsers this VM is for, and nothing else. The default row is Apple's whole
-# suite, none of which it is for.
-defaults write com.apple.dock persistent-apps {dock_verb} \\
-  '<dict><key>tile-data</key><dict><key>file-data</key><dict>'\\
-'<key>_CFURLString</key><string>{browser.app}</string>'\\
-'<key>_CFURLStringType</key><integer>0</integer></dict></dict>'\\
-'<key>tile-type</key><string>file-tile</string></dict>'
+# suite, none of which it is for. Finder is not in this list and cannot be: macOS
+# keeps it outside persistent-apps, so it stays whatever this says.
+defaults write com.apple.dock persistent-apps -array \\
+  {dock_tiles}
 defaults write com.apple.dock persistent-others -array
 defaults write com.apple.dock show-recents -bool false
 # Out of the way by default: the guest's window is already smaller than the screen
@@ -1866,7 +1917,7 @@ defaults write com.apple.dock orientation -string right
 killall Dock >/dev/null 2>&1 || true
 
 # Failing here rather than reporting success: without the agent there is no
-# copy-paste, and the generated password would have to be typed by hand.
+# copy-paste, and the password would have to be typed by hand.
 test -x {AGENT_BIN}
 if ! launchctl print "gui/$(id -u)/{AGENT_LABEL}" >/dev/null 2>&1; then
   echo "the clipboard agent is installed but not running yet;" \
@@ -2387,7 +2438,7 @@ VM_HELP = """\
   viewer   print the address of the guest's screen (BIB_VM_VIEWER=vnc only)
   open     start it if it is stopped, then put its screen in front of you
   icon     write a clickable app into ~/Applications that runs 'vm open'
-  password print the generated guest account password (copy it, do not retype it)
+  password print the guest account password (admin, unless you changed it)
   login    print the guest account name and password together
   down     stop it
   status   list VMs and their state
