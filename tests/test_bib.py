@@ -1022,6 +1022,13 @@ exec "$@"
 # observes whether the agent was really installed.
 _FAKE_INSTALL = """#!/bin/sh
 for dst in "$@"; do :; done
+# A destination outside this sandbox is a real system path — /etc/ssh/sshd_config.d
+# and /usr/local/bin. The script is being run to prove it runs, not to be given the
+# machine, so those are recorded as done and nothing is written.
+case "$dst" in
+  "$HOME"/*|/tmp/*|/private/tmp/*) ;;
+  /*) exit 0 ;;
+esac
 mkdir -p "$(dirname "$dst")"
 printf '#!/bin/sh\\nexit 0\\n' > "$dst"
 chmod 0755 "$dst"
@@ -3955,6 +3962,25 @@ def test_an_existing_chrome_profile_is_not_overwritten(tmp_path):
     assert result.returncode == 0, result.stderr
     assert prefs.read_text() == '{"mine": true}'
     assert "already has a profile" in result.stderr
+
+
+def test_ssh_into_the_guest_is_key_only(tmp_path):
+    # The account password is `admin` and BIB_VM_NET is bridged, so the guest has
+    # its own address on the house network. macOS sshd offers publickey, password
+    # and keyboard-interactive out of the box: turning Remote Login on without
+    # closing the other two handed that network an admin/admin login.
+    root = tmp_path / "guest"
+    (root / "private/var/db/com.apple.xpc.launchd").mkdir(parents=True)
+    bibpatch.enable_remote_login(root)
+    conf = root / "private/etc/ssh/sshd_config.d/bib.conf"
+    assert conf.exists(), "the disk patch must close it for a guest built from scratch"
+    for line in ("PasswordAuthentication no", "KbdInteractiveAuthentication no"):
+        assert line in conf.read_text()
+    # And again over ssh, so a guest built before this existed is closed by setup
+    # rather than left open.
+    script = bib.guest_install_script("pw")
+    assert "/etc/ssh/sshd_config.d/bib.conf" in script
+    assert "PasswordAuthentication no" in script
 
 
 def test_the_clipboard_agent_is_installed_before_the_browser():

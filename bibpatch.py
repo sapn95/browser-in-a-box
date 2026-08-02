@@ -355,11 +355,32 @@ def enable_autologin(root: Path, account: Account) -> None:
 
 
 def enable_remote_login(root: Path) -> None:
-    """Turn on sshd the way launchd records it, so bib can take over by SSH."""
+    """Turn on sshd the way launchd records it, so bib can take over by SSH — and
+    let it accept nothing but the key bib installs.
+
+    Both halves, always. The guest's password is `admin` unless someone chose
+    otherwise, and BIB_VM_NET defaults to bridged, which gives the guest its own
+    address on the same network as everything else in the house. sshd on macOS
+    offers publickey, password and keyboard-interactive out of the box, so turning
+    Remote Login on without this hands that network an admin/admin login. bib never
+    uses a password over SSH; it installs a key and uses that.
+    """
     relative = "private/var/db/com.apple.xpc.launchd/disabled.plist"
     record = read_plist(root, relative)
     record["com.openssh.sshd"] = False
     write_plist(root, relative, record)
+    # A drop-in rather than an edit to sshd_config: the shipped file carries
+    # `Include /etc/ssh/sshd_config.d/*` on its second line, so the first match wins
+    # and this is read before any of the defaults below it.
+    drop_in = guest_path(root, "private/etc/ssh/sshd_config.d/bib.conf", make_parents=True)
+    drop_in.write_text(
+        "# Written by bib. Key-only: the account password is a convenience for the\n"
+        "# guest's own screen, not a credential for the network it sits on.\n"
+        "PasswordAuthentication no\n"
+        "KbdInteractiveAuthentication no\n"
+        "ChallengeResponseAuthentication no\n"
+    )
+    drop_in.chmod(0o644)
 
 
 def create_account(root: Path, account: Account) -> None:
