@@ -186,15 +186,17 @@ them and Nuitka would otherwise leave them behind.
 Compiled with [Nuitka](https://nuitka.net) — Python translated to C — so it needs no
 interpreter and no dependencies to run.
 
+A compiled build is not a single file: the archive holds `bib` next to the shared
+objects it links against, so keep the folder together. Homebrew and the Linux builds
+handle that for you; the Linux ones are compiled inside UBI10 so they link against a
+supported base.
+
 One exception, and only for the VM: the patch step is a separate script that `bib`
 spawns rather than imports, so it needs a working `python3` on the machine. Every
 Mac has `/usr/bin/python3`, but without the Command Line Tools that is a stub that
 exits the moment it runs — `bib` checks and says so, rather than failing halfway
 through a build. `xcode-select --install` is enough. The container variant needs
-nothing. It is not a single file: the archive holds
-`bib` next to the shared objects it links against, so keep the folder together.
-Homebrew and the Linux builds handle that for you; the Linux ones are compiled
-inside UBI10 so they link against a supported base.
+nothing.
 
 ### Coming from 2.x
 

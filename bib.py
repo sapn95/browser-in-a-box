@@ -4,11 +4,12 @@
 Every command says which of the two variants it acts on, because they are not
 interchangeable:
 
-  bib box ...   A Linux container running Chrome behind KasmVNC, which you use from
-                a tab in your own browser at https://localhost:6901. Needs podman or
-                docker, starts in seconds, and runs anywhere. Google account sync and
-                the Google Password Manager work. The host keychain does not reach
-                into it, so Touch ID and iCloud Keychain passkeys are unavailable.
+  bib box ...   A Linux container running the browser behind KasmVNC, which you use
+                from a tab in your own browser at https://localhost:6901. Needs podman
+                or docker, starts in seconds, and runs anywhere. The browser's own
+                account sync and password manager work. The host keychain does not
+                reach into it, so Touch ID and iCloud Keychain passkeys are
+                unavailable.
 
   bib vm ...    A macOS guest VM on Apple silicon, driven by tart, which you use in
                 its own window. Needs ~40 GB and minutes to build. It is a real macOS
@@ -1412,7 +1413,7 @@ def _create_with_packer(tart: str, vm: VmConfig) -> None:
     print("  1. bib vm up")
     # No Keychain step: signing in switches it on and joins the sync circle itself.
     print("  2. sign in to your Apple Account            (interactive: 2FA)")
-    print("  3. bib vm setup    — installs Chrome, the clipboard agent and downloads")
+    print("  3. bib vm setup    — installs the browser, the clipboard agent and downloads")
 
 
 # Where a tart directory share appears inside a macOS guest.
@@ -1673,8 +1674,8 @@ def guest_install_script(
     browser: bibbrowsers.Browser | None = None,
     first: bool = True,
 ) -> str:
-    """Chrome, the clipboard agent and the shared Downloads folder, as a script the
-    guest runs.
+    """The chosen browser, the clipboard agent and the shared Downloads folder, as a
+    script the guest runs.
 
     The password is embedded in the script rather than passed as an argument,
     because the script is fed to ssh on stdin: nothing here reaches either host's
@@ -2136,7 +2137,7 @@ def cmd_vm_icon(tart: str, vm: VmConfig) -> None:
     almost none of a login shell's environment, so a BIB_VM_NAME that only exists
     in the user's shell profile would silently open the wrong VM.
     """
-    browser = chosen_browser()
+    browser = bibbrowsers.BROWSERS[vm.browser]
     # Named for what it opens: three launchers called the same thing would be a
     # worse Dock than none, and the icon alone is not enough at Dock size.
     label = "Browsers" if browser.key == bibbrowsers.ALL else browser.label
@@ -2377,10 +2378,10 @@ BOX_HELP = """\
   reset    delete the browser profile, losing every login (asks first)"""
 
 VM_HELP = """\
-  create   build it, start it and install Chrome — the whole thing, one command
+  create   build it, start it and install the browser — the whole thing, one command
   prepare  redo just the offline preparation on an already-built VM
   up       start it again after 'bib vm down'; a window opens
-  setup    redo just the Chrome and clipboard-agent install, over SSH
+  setup    redo just the browser and clipboard-agent install, over SSH
   ssh      open a shell in the guest
   ip       print the guest's address
   viewer   print the address of the guest's screen (BIB_VM_VIEWER=vnc only)
