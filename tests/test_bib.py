@@ -3964,6 +3964,49 @@ def test_an_existing_chrome_profile_is_not_overwritten(tmp_path):
     assert "already has a profile" in result.stderr
 
 
+def test_the_launcher_is_named_for_what_the_guest_actually_holds(credentials, monkeypatch):
+    # `BIB_BROWSER=all bib vm create` then a plain `bib vm icon`: the environment is
+    # back to its default by then, so the launcher for a guest with three browsers
+    # in it was called "Google Chrome in a Box". What a VM holds is a property of
+    # that VM, not of whichever shell asks about it later.
+    monkeypatch.setattr(bib, "host_time_zone", lambda: ("Europe/Zurich", "Zurich"))
+    monkeypatch.setattr(bib, "guest_ssh", lambda vm, ip, script: 0)
+    assert bib.install_browsers(bib.VmConfig(browser=bibbrowsers.ALL), "10.0.0.9", "pw") == 0
+    assert bib.read_state()["browser"] == bibbrowsers.ALL
+
+    monkeypatch.delenv("BIB_BROWSER", raising=False)
+    # The guest cannot be reached here, so this is the remembered answer.
+    monkeypatch.setattr(bib, "guest_answers", lambda *a, **k: False)
+    assert bib.installed_browser(bib.VmConfig()).key == bibbrowsers.ALL
+    # And a guest that has never been built still follows the request.
+    bib.STATE.unlink()
+    monkeypatch.setenv("BIB_BROWSER", "firefox")
+    assert bib.installed_browser(bib.VmConfig()).key == "firefox"
+
+
+def test_the_launcher_believes_the_guest_over_anything_written_down(credentials, monkeypatch):
+    # The disk is the only answer that stays right when a browser is added or
+    # removed by hand, so it is asked first and the written-down choice is only the
+    # fallback for a guest that is switched off.
+    bib.write_state(last_ip="10.0.0.9", browser="chrome")
+    monkeypatch.setattr(bib, "guest_answers", lambda *a, **k: True)
+
+    def answer(argv, **kwargs):
+        found = "firefox\nchromium\n"
+        return subprocess.CompletedProcess(argv, 0, stdout=found, stderr="")
+
+    monkeypatch.setattr(bib.subprocess, "run", answer)
+    # Two on the disk is `all`, whatever the state file says was asked for.
+    assert bib.installed_browser(bib.VmConfig()).key == bibbrowsers.ALL
+
+    monkeypatch.setattr(
+        bib.subprocess,
+        "run",
+        lambda argv, **k: subprocess.CompletedProcess(argv, 0, stdout="firefox\n", stderr=""),
+    )
+    assert bib.installed_browser(bib.VmConfig()).key == "firefox"
+
+
 def test_ssh_into_the_guest_is_key_only(tmp_path):
     # The account password is `admin` and BIB_VM_NET is bridged, so the guest has
     # its own address on the house network. macOS sshd offers publickey, password

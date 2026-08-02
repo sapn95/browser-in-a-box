@@ -1684,6 +1684,7 @@ def install_browsers(vm: VmConfig, ip: str, password: str) -> int:
     """
     zone = host_time_zone()[0]
     installing = bibbrowsers.expand(vm.browser)
+    remember_browser(vm.browser)
     for position, browser in enumerate(installing):
         print(f"Installing {browser.label} on {vm.user}@{ip} ...")
         failed = guest_ssh(
@@ -2030,6 +2031,59 @@ def remember_ip(ip: str) -> None:
     write_state(last_ip=ip)
 
 
+def remember_browser(choice: str) -> None:
+    """Keep what was installed into the guest.
+
+    Which browsers a VM holds is a property of that VM, not of whichever shell asks
+    about it later. Without this, `BIB_BROWSER=all bib vm create` followed by a
+    plain `bib vm icon` wrote a launcher called "Google Chrome in a Box" onto a
+    guest with three browsers in it, because BIB_BROWSER was back to its default.
+    """
+    write_state(browser=choice)
+
+
+def browsers_in_guest(vm: VmConfig) -> list[bibbrowsers.Browser]:
+    """Which browsers are on the guest's disk right now, asked of the guest itself.
+
+    Empty when it cannot be asked — stopped, unreachable, no key yet — which is a
+    fact about this moment, not about the guest, so callers fall back rather than
+    fail. One `test -x` per browser in a single connection.
+    """
+    ip = read_state().get("last_ip", "")
+    if not ip or not guest_answers(ip):
+        return []
+    known = bibbrowsers.expand(bibbrowsers.ALL)
+    probe = "\n".join(
+        f"[ -x {shlex.quote(browser.binary)} ] && echo {browser.key}" for browser in known
+    )
+    result = subprocess.run(  # noqa: S603
+        ssh_command(vm, ip, probe), input=probe, text=True, capture_output=True, check=False
+    )
+    if result.returncode != 0:
+        return []
+    found = set(result.stdout.split())
+    return [browser for browser in known if browser.key in found]
+
+
+def installed_browser(vm: VmConfig) -> bibbrowsers.Browser:
+    """What the guest holds, in order of how much it is worth trusting.
+
+    The guest's own disk first: it is the only answer that stays right when a
+    browser is added or removed by hand. Then what the last install put there, for
+    a guest that is switched off. Then what this shell asked for, for one that has
+    never been built.
+    """
+    present = browsers_in_guest(vm)
+    if len(present) > 1:
+        return bibbrowsers.BROWSERS[bibbrowsers.ALL]
+    if len(present) == 1:
+        return present[0]
+    remembered = read_state().get("browser", "")
+    if remembered in bibbrowsers.BROWSERS:
+        return bibbrowsers.BROWSERS[remembered]
+    return bibbrowsers.BROWSERS[vm.browser]
+
+
 def vm_ip(tart: str, vm: VmConfig) -> str:
     """Resolve the guest's address. Bridged guests get theirs from the real
     network, so the DHCP lease file the default resolver reads is empty."""
@@ -2207,7 +2261,7 @@ def cmd_vm_icon(tart: str, vm: VmConfig) -> None:
     almost none of a login shell's environment, so a BIB_VM_NAME that only exists
     in the user's shell profile would silently open the wrong VM.
     """
-    browser = bibbrowsers.BROWSERS[vm.browser]
+    browser = installed_browser(vm)
     # Named for what it opens: three launchers called the same thing would be a
     # worse Dock than none, and the icon alone is not enough at Dock size.
     label = "Browsers" if browser.key == bibbrowsers.ALL else browser.label
