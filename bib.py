@@ -52,7 +52,7 @@ from xml.parsers.expat import ExpatError
 import bibbrowsers
 import bibicon
 
-__version__ = "3.0.1"
+__version__ = "3.0.2"
 
 
 def chosen_browser() -> bibbrowsers.Browser:
@@ -1801,6 +1801,24 @@ cleanup
 mkdir -p "$BIB_WORK"
 trap cleanup EXIT
 sudo_pw() {{ printf '%s\\n' "$BIB_SUDO_PW" | sudo -S -p '' "$@"; }}
+# The Setup Assistant steps macOS re-runs at login when it thinks they were never
+# finished — the iCloud sign-in above all. The disk patch removes the AccountInfo
+# entry that relaunches the whole assistant, but these are per-step marks in the
+# user's own preferences, and a guest that was stopped mid-sign-in comes back to
+# the same screen. Signing in to iCloud is still a step this cannot do for you;
+# it belongs in System Settings, not across a full-screen window on every boot.
+defaults write com.apple.SetupAssistant DidSeeCloudSetup -bool true
+defaults write com.apple.SetupAssistant DidSeeAppearanceSetup -bool true
+defaults write com.apple.SetupAssistant DidSeePrivacy -bool true
+defaults write com.apple.SetupAssistant DidSeeSiriSetup -bool true
+defaults write com.apple.SetupAssistant DidSeeTouchIDSetup -bool true
+defaults write com.apple.SetupAssistant DidSeeAccessibility -bool true
+defaults write com.apple.SetupAssistant GestureMovieSeen none
+defaults write com.apple.SetupAssistant LastSeenCloudProductVersion \
+  -string "$(sw_vers -productVersion)"
+defaults write com.apple.SetupAssistant LastSeenBuddyBuildVersion \
+  -string "$(sw_vers -buildVersion)"
+
 # Key-only SSH, before anything else that takes time. The account password is
 # `admin` unless someone chose otherwise, and BIB_VM_NET is bridged by default, so
 # the guest has its own address on the same network as everything else in the
@@ -2281,10 +2299,31 @@ def cmd_vm_icon(tart: str, vm: VmConfig) -> None:
     # The timeout is generous because a cold start builds nothing but does wait for
     # the guest to answer, and the default would give up first.
     command = f"{settings} {launcher_command()} vm open"
+    # A progress window and an error dialog, because `do shell script` is silent in
+    # both directions. A cold start waits for the guest to answer the network, which
+    # is tens of seconds with nothing on screen — long enough to look like the icon
+    # did nothing and be clicked again. And when it does fail, the whole reason went
+    # to a shell nobody is watching.
+    #
+    # -1 steps is AppleScript's indeterminate bar: there is nothing to count, the
+    # point is only that something is happening.
+    #
+    # -128 is "user cancelled", which is not a failure worth a dialog.
     script = (
-        f"with timeout of {GUEST_WAIT_SECS + 60} seconds\n"
-        f"  do shell script {applescript_string(command)}\n"
-        f"end timeout\n"
+        f"set progress total steps to -1\n"
+        f"set progress description to {applescript_string(f'Starting {name} ...')}\n"
+        f"set progress additional description to "
+        f"{applescript_string('Waiting for the guest to answer. Its window opens by itself.')}\n"
+        f"try\n"
+        f"  with timeout of {GUEST_WAIT_SECS + 60} seconds\n"
+        f"    do shell script {applescript_string(command)}\n"
+        f"  end timeout\n"
+        f"on error report number code\n"
+        f"  if code is not -128 then\n"
+        f"    display alert {applescript_string(f'{name} could not start')} "
+        f"message report as critical\n"
+        f"  end if\n"
+        f"end try\n"
     )
     APPS_DIR.mkdir(parents=True, exist_ok=True)
     # Removed first: osacompile refuses to overwrite a bundle it did not write, and

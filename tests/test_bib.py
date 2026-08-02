@@ -3964,6 +3964,35 @@ def test_an_existing_chrome_profile_is_not_overwritten(tmp_path):
     assert "already has a profile" in result.stderr
 
 
+def test_the_launcher_says_something_while_it_waits_and_when_it_fails(credentials, monkeypatch):
+    # `do shell script` is silent in both directions. A cold start waits tens of
+    # seconds with nothing on screen, which looks like the icon did nothing and
+    # gets clicked again; and when it fails, the reason goes to a shell nobody is
+    # watching. -128 is "user cancelled", which is not worth a dialog.
+    written = {}
+    monkeypatch.setattr(
+        bib,
+        "run",
+        lambda *a, **k: written.update(script=a[-1]) or subprocess.CompletedProcess(a, 0),
+    )
+    monkeypatch.setattr(bib, "draw_icon", lambda *a, **k: None)
+    monkeypatch.setattr(bib, "guest_answers", lambda *a, **k: False)
+    bib.cmd_vm_icon("tart", bib.VmConfig())
+    script = written["script"]
+    assert "progress total steps to -1" in script
+    assert "display alert" in script
+    assert "-128" in script
+
+
+def test_the_setup_assistant_does_not_come_back_after_a_hard_stop():
+    # The disk patch drops AccountInfo, which relaunches the whole assistant. macOS
+    # also keeps a per-step mark in the user's own preferences, so a guest stopped
+    # mid-sign-in came back to the iCloud screen on every boot.
+    script = bib.guest_install_script("pw")
+    assert "com.apple.SetupAssistant DidSeeCloudSetup -bool true" in script
+    assert "LastSeenCloudProductVersion" in script
+
+
 def test_the_launcher_is_named_for_what_the_guest_actually_holds(credentials, monkeypatch):
     # `BIB_BROWSER=all bib vm create` then a plain `bib vm icon`: the environment is
     # back to its default by then, so the launcher for a guest with three browsers
