@@ -7,6 +7,7 @@ so the actual command construction is asserted instead of being described.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -748,9 +749,13 @@ def test_setup_passes_the_install_script_to_the_guest(credentials, monkeypatch):
     assert password in seen["script"]
 
 
-def test_the_guest_password_never_reaches_a_process_list(credentials):
+def test_the_guest_password_never_reaches_a_process_list(credentials, monkeypatch):
     # `ssh host "<script>"` would put the whole script, password included, in this
     # host's argv. It is read on stdin instead.
+    # A generated one on purpose: the default password is the word "admin", which is
+    # also the account name and therefore legitimately in the command. Asserting on
+    # that would pass on the username and prove nothing about the password.
+    monkeypatch.setenv("BIB_VM_PASSWORD", bib.RANDOM_PASSWORD)
     password = bib.guest_password(create=True)
     script = bib.guest_install_script(password)
     argv = bib.ssh_command(bib.VmConfig(), "192.168.1.50", script)
@@ -813,11 +818,20 @@ def test_no_module_level_path_still_points_at_the_real_home(tmp_path):
     assert bib.STATE.is_relative_to(tmp_path)
 
 
-def test_the_guest_password_is_generated_once_and_remembered(credentials):
+def test_the_guest_password_defaults_to_admin_and_is_remembered(credentials):
     first = bib.guest_password(create=True)
-    assert len(first) >= 20
+    assert first == "admin"
     assert bib.guest_password() == first
     assert credentials.stat().st_mode & 0o777 == 0o600
+
+
+def test_the_guest_password_can_be_generated_on_request(credentials, monkeypatch):
+    monkeypatch.setenv("BIB_VM_PASSWORD", bib.RANDOM_PASSWORD)
+    first = bib.guest_password(create=True)
+    assert len(first) >= 20
+    assert first != bib.DEFAULT_VM_PASSWORD
+    # Remembered like any other: the value is written down, not re-derived.
+    assert bib.guest_password() == first
 
 
 def test_asking_for_a_password_before_the_build_says_so(credentials):
@@ -905,16 +919,23 @@ def test_memory_is_rounded_up_not_truncated(calls, credentials, monkeypatch):
     assert "memory_gb=8" in flat(calls)
 
 
-def test_the_generated_password_avoids_layout_dependent_characters(credentials):
+def test_the_generated_password_avoids_layout_dependent_characters(credentials, monkeypatch):
     # It is typed into the guest as keystrokes, and -, _, y, z move between the US
     # and Swiss German layouts, so such a password would never match what was saved.
     # Generate real ones rather than restating the alphabet.
+    monkeypatch.setenv("BIB_VM_PASSWORD", bib.RANDOM_PASSWORD)
     forbidden = set("yzYZ-_/")
     for _ in range(200):
         credentials.unlink(missing_ok=True)
         password = bib.guest_password(create=True)
         assert len(password) >= 20
         assert not (set(password) & forbidden), password
+
+
+def test_the_default_password_is_typeable_in_the_guest_too():
+    # admin goes in through the same keystroke path as a generated one, so it has to
+    # obey the same rule about keys that move between layouts.
+    assert not set(bib.DEFAULT_VM_PASSWORD) & set("yzYZ-_/")
 
 
 def test_an_empty_credentials_file_is_not_treated_as_a_password(credentials):
@@ -1206,6 +1227,9 @@ def test_a_zero_resolution_is_rejected():
 
 
 def test_the_password_never_reaches_the_argument_list(calls, credentials, monkeypatch):
+    # Generated, so the assertion cannot pass on the account name: the default
+    # password is "admin" and so is the user.
+    monkeypatch.setenv("BIB_VM_PASSWORD", bib.RANDOM_PASSWORD)
     monkeypatch.setenv("BIB_VM_PACKER", "1")  # this covers the fallback path
     # argv is world-readable while the build runs, and is printed on failure.
     monkeypatch.setattr(bib, "vm_exists", lambda *a, **k: False)
@@ -3738,6 +3762,23 @@ def test_a_boot_blocked_by_the_installers_lock_is_retried(monkeypatch):
     assert len(attempts) == 3
 
 
+def test_the_first_boot_makes_no_sound(monkeypatch):
+    # Setup Assistant starts VoiceOver by itself when nothing types at it, and this
+    # boot is deliberately unattended and has no window to stop it in. tart passes
+    # the guest's audio to the host whatever --no-graphics says, so the build spent
+    # three minutes talking out loud at whoever started it.
+    seen = {}
+
+    def spawn(*a, **k):
+        seen["argv"] = a[0]
+        return _FakeBoot()
+
+    monkeypatch.setattr(bib.time, "sleep", lambda s: None)
+    monkeypatch.setattr(bib.subprocess, "Popen", spawn)
+    bib.boot_once("tart", bib.VmConfig())
+    assert "--no-audio" in seen["argv"]
+
+
 def test_the_first_boot_is_not_held_open_by_a_pipe(monkeypatch):
     # The child this returns is held for BIB_VM_FIRSTBOOT_SECS, three minutes by
     # default. With stderr on a pipe and nobody reading it, tart blocked once the
@@ -3916,6 +3957,20 @@ def test_an_existing_chrome_profile_is_not_overwritten(tmp_path):
     assert "already has a profile" in result.stderr
 
 
+def test_the_clipboard_agent_is_installed_before_the_browser():
+    # Paste is what carries the generated password and the Apple Account details
+    # into the guest, and the browser downloads are hundreds of megabytes — three
+    # times over under `all`. Installed after them, the clipboard came up at the end
+    # of a ten-minute wait, which is the whole window in which it was needed.
+    script = bib.guest_install_script("pw")
+    assert script.index("tart-guest-agent/releases") < script.index("googlechrome.dmg")
+    assert script.index("launchctl bootstrap") < script.index("googlechrome.dmg")
+    # The screen lock goes with it, and for the same reason: set after the browsers,
+    # the guest could lock during the download — and the one password you cannot
+    # paste, because the agent is not up either, is the one it then asks for.
+    assert script.index("askForPassword") < script.index("googlechrome.dmg")
+
+
 def test_a_firefox_profile_from_an_older_version_is_not_orphaned(tmp_path):
     # The profile directory carries this project's name, so the rename moved it:
     # a guest set up by 2.x has Profiles/cib.default-release and the guard, which
@@ -3965,6 +4020,47 @@ def test_the_chromium_preferences_are_valid_json_and_send_nothing_home():
     # Not in Preferences: metrics consent lives beside the profiles, not inside one,
     # so putting it in the profile would look right and do nothing.
     assert state["user_experience_metrics"]["reporting_enabled"] is False
+
+
+def test_no_browser_is_made_the_default_unless_asked(monkeypatch):
+    # Handing the guest's default browser to whatever bib installed is a decision
+    # about someone else's machine, and under `all` it would be whichever browser
+    # the loop reached first. Safari stays, which is what a fresh macOS does.
+    for key in ("chrome", "firefox", "chromium"):
+        script = bib.guest_install_script("pw", browser=bibbrowsers.BROWSERS[key])
+        assert "--make-default-browser" not in script
+        assert "--setDefaultBrowser" not in script
+    monkeypatch.setenv("BIB_VM_DEFAULT_BROWSER", "1")
+    asked = bib.guest_install_script("pw", browser=bibbrowsers.BROWSERS["chrome"])
+    assert "--make-default-browser" in asked
+
+
+def test_the_first_run_experience_is_skipped_for_every_browser():
+    # Every one of these is a click between opening the box and using it, and the
+    # welcome tab and sign-in pitch both talk to the vendor before you have typed.
+    chrome = bib.guest_install_script("pw", browser=bibbrowsers.BROWSERS["chrome"])
+    # The sentinel, not just the preference: the first-run decision is taken before
+    # Preferences is read, so without the file the tour runs whatever it says.
+    assert bibbrowsers.CHROMIUM_FIRST_RUN_SENTINEL in chrome
+    prefs = json.loads(bibbrowsers.chromium_preferences("/x"))
+    assert prefs["distribution"]["skip_first_run_ui"] is True
+    assert prefs["distribution"]["suppress_first_run_default_browser_prompt"] is True
+    assert prefs["browser"]["check_default_browser"] is False
+    assert json.loads(bibbrowsers.CHROMIUM_LOCAL_STATE)["browser"]["first_run_finished"] is True
+
+    firefox = dict(
+        line.removeprefix("user_pref(").removesuffix(");").split(", ", 1)
+        for line in bibbrowsers.firefox_preferences("/x").splitlines()
+    )
+    assert firefox['"browser.aboutwelcome.enabled"'] == "false"
+    assert firefox['"browser.startup.homepage_override.mstone"'] == '"ignore"'
+    # The privacy notice on the very first launch, which is its own dialog.
+    assert firefox['"datareporting.policy.dataSubmissionPolicyBypassNotification"'] == "true"
+    # Studies are code Mozilla ships to a subset of users; the coverage ping is a
+    # separate report from telemetry with its own opt-out.
+    assert firefox['"app.shield.optoutstudies.enabled"'] == "false"
+    assert firefox['"toolkit.coverage.opt-out"'] == "true"
+    assert firefox['"browser.newtabpage.activity-stream.showSponsored"'] == "false"
 
 
 def test_the_firefox_preferences_send_nothing_home_either():
@@ -4547,36 +4643,33 @@ def test_the_install_script_refuses_the_all_sentinel():
     assert "expand" in str(failure.value)
 
 
-def test_installing_every_browser_leaves_all_of_them_in_the_dock():
-    # -array replaces the row. One script per browser meant each pass threw the
-    # previous browser out again, so the Dock held whichever was installed last —
-    # and re-running with -array-add alone would instead stack duplicates.
-    first = bib.guest_install_script("pw", browser=bibbrowsers.BROWSERS["chrome"], first=True)
-    later = bib.guest_install_script("pw", browser=bibbrowsers.BROWSERS["firefox"], first=False)
-    assert "persistent-apps -array \\" in first, "the first pass clears Apple's suite out"
-    assert "persistent-apps -array-add \\" in later, "the rest add themselves to it"
-
-
-def test_only_the_first_browser_of_a_run_is_made_the_default():
-    first = bib.guest_install_script("pw", browser=bibbrowsers.BROWSERS["chrome"], first=True)
-    later = bib.guest_install_script("pw", browser=bibbrowsers.BROWSERS["chromium"], first=False)
-    firefox = bib.guest_install_script("pw", browser=bibbrowsers.BROWSERS["firefox"], first=False)
-    assert "--make-default-browser" in first
-    assert "--make-default-browser" not in later
-    assert "--setDefaultBrowser" not in firefox
-
-
-def test_installing_all_browsers_asks_exactly_one_of_them_to_be_the_default(monkeypatch):
-    # The wiring, not just the flag: every pass used to ask, so the default ended up
-    # being whichever browser the table happens to list last.
+def test_every_pass_writes_the_whole_dock_row(monkeypatch):
+    # Clear-on-the-first-pass, append-on-the-rest assumed the clear survived, and on
+    # a fresh guest it does not: the Dock writes its own default layout the first
+    # time it starts for a new account, and that landed on top of pass one. The
+    # result was Apple's eighteen apps plus the last two browsers, with the first
+    # one missing entirely — seen on a real build. Writing the complete row every
+    # pass is self-healing: whatever clobbers it, the next pass puts it right.
     scripts: list[str] = []
     monkeypatch.setattr(bib, "host_time_zone", lambda: ("Europe/Zurich", "Zurich"))
     monkeypatch.setattr(bib, "guest_ssh", lambda vm, ip, script: scripts.append(script) or 0)
     assert bib.install_browsers(bib.VmConfig(browser=bibbrowsers.ALL), "10.0.0.9", "pw") == 0
+
     assert len(scripts) == len(bibbrowsers.expand(bibbrowsers.ALL))
-    asked = [s for s in scripts if "--make-default-browser" in s or "--setDefaultBrowser" in s]
-    assert len(asked) == 1
-    assert sum("persistent-apps -array \\" in s for s in scripts) == 1
+    assert not any("-array-add" in s for s in scripts), "append cannot repair a clobber"
+    for script in scripts:
+        assert "persistent-apps -array \\" in script
+        # Split on the command, not the word: the comment above it says it too.
+        row = script.split("persistent-apps -array")[1].split("persistent-others")[0]
+        for browser in bibbrowsers.expand(bibbrowsers.ALL):
+            assert browser.app in row, browser.key
+
+
+def test_a_single_browser_run_puts_only_that_one_in_the_dock():
+    script = bib.guest_install_script("pw", browser=bibbrowsers.BROWSERS["firefox"])
+    row = script.split("persistent-apps -array")[1].split("persistent-others")[0]
+    assert bibbrowsers.BROWSERS["firefox"].app in row
+    assert bibbrowsers.BROWSERS["chrome"].app not in row
 
 
 def test_firefox_gets_a_profiles_ini_and_chromium_does_not():
