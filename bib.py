@@ -1800,6 +1800,25 @@ cleanup
 mkdir -p "$BIB_WORK"
 trap cleanup EXIT
 sudo_pw() {{ printf '%s\\n' "$BIB_SUDO_PW" | sudo -S -p '' "$@"; }}
+# Key-only SSH, before anything else that takes time. The account password is
+# `admin` unless someone chose otherwise, and BIB_VM_NET is bridged by default, so
+# the guest has its own address on the same network as everything else in the
+# house. macOS sshd offers publickey, password and keyboard-interactive, so Remote
+# Login without this hands that network an admin/admin login. bib itself never uses
+# a password over SSH.
+# The build's own patch writes this too; it is repeated here so a guest built
+# before that patch existed is fixed by 'bib vm setup' rather than staying open.
+sudo_pw install -d -m 0755 /etc/ssh/sshd_config.d
+printf '%s\n' \
+  '# Written by bib. Key-only: the account password is a convenience for the' \
+  "# guest's own screen, not a credential for the network it sits on." \
+  'PasswordAuthentication no' \
+  'KbdInteractiveAuthentication no' \
+  'ChallengeResponseAuthentication no' > "$BIB_WORK/sshd.conf"
+sudo_pw install -m 0644 -o root -g wheel "$BIB_WORK/sshd.conf" /etc/ssh/sshd_config.d/bib.conf
+# Applies to new connections without dropping this one.
+sudo_pw launchctl kickstart -k system/com.openssh.sshd >/dev/null 2>&1 || true
+
 # First, with the clipboard agent, and for the same reason. A guest that locks asks
 # for the guest password, and a VM has no Touch ID to shortcut it.
 # Set after the browsers, it took a browser download — three of them under `all` —
