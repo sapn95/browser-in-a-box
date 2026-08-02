@@ -72,7 +72,7 @@ opposite directions.
 
 ```mermaid
 flowchart TD
-    A{What do you need?} --> B[Google account sync,<br/>Password Manager]
+    A{What do you need?} --> B[the browser's own sync<br/>and password manager]
     A --> C[iCloud Keychain<br/>passkeys]
     A --> D[USB security key<br/>or Touch ID]
     B --> E([container<br/>bib box up])
@@ -90,10 +90,10 @@ flowchart LR
         B[your browser<br/>localhost:6901]
     end
     subgraph ctr [Linux container]
-        K[KasmVNC] --> C[Google Chrome]
+        K[KasmVNC] --> C[Chrome, Firefox<br/>or Chromium]
     end
     B -- "HTTPS + websocket" --> K
-    C -.-> G[(Google account:<br/>sync, passwords, passkeys)]
+    C -.-> G[(the browser's account:<br/>sync, passwords, passkeys)]
 ```
 
 [kasmweb/chrome](https://hub.docker.com/r/kasmweb/chrome) serves a
@@ -110,7 +110,7 @@ flowchart LR
         S[[Secure Enclave]]
     end
     subgraph vm [macOS guest, not MDM-enrolled]
-        C[Google Chrome] --> KC[iCloud Keychain]
+        C[Chrome, Firefox, Chromium<br/>or all three] --> KC[iCloud Keychain]
     end
     V --> vm
     S -- "identity only,<br/>no Touch ID" --> vm

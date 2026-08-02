@@ -519,6 +519,31 @@ def _updater():
     return update_formula
 
 
+def test_the_readme_documents_exactly_the_settings_and_commands_that_exist():
+    """The README is the only documentation there is, so a setting it forgets is a
+    setting nobody finds, and one it invents is worse.
+
+    Checked rather than proof-read: this file has been renamed twice and gained a
+    browser table, and every pass through it by hand missed something.
+    """
+    root = Path(bib.__file__).resolve().parent
+    readme = (root / "README.md").read_text()
+    code = (root / "bib.py").read_text()
+
+    in_code = set(re.findall(r'"(BIB_[A-Z_]+)"', code))
+    in_readme = set(re.findall(r"\bBIB_[A-Z_]+", readme))
+    assert not in_code - in_readme, f"undocumented settings: {sorted(in_code - in_readme)}"
+    assert not in_readme - in_code, f"settings that do not exist: {sorted(in_readme - in_code)}"
+
+    for noun, actions, pattern in (
+        ("box", bib.BOX_ACTIONS, r"`bib box (\w+)`"),
+        ("vm", bib.VM_ACTIONS, r"`bib vm (\w+)`"),
+    ):
+        documented = set(re.findall(pattern, readme))
+        assert not set(actions) - documented, f"{noun}: undocumented {set(actions) - documented}"
+        assert not documented - set(actions), f"{noun}: invented {documented - set(actions)}"
+
+
 def test_the_formula_points_at_the_version_this_code_is(monkeypatch):
     # The fourth place the version is written, and the only one nothing checked.
     # The rename rewrote the formula's asset names to bib-* and left version "2.0.0"
