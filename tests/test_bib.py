@@ -1723,6 +1723,9 @@ def test_a_missing_sudo_credential_is_named_before_anything_is_tried(
     # sudo prompts on its own tty and cannot ask for anything when bib runs
     # detached; that used to surface as a bare "preparing the guest failed".
     _fake_guest_disk(monkeypatch, tmp_path)
+    # Stubbed, so the failure asserted on is the sudo check rather than the
+    # interpreter probe, which runs first and would fail on the same fake.
+    monkeypatch.setattr(bib, "find_guest_python", lambda: "/usr/bin/python3")
     monkeypatch.setattr(
         bib.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1)
     )
@@ -1790,6 +1793,9 @@ def test_the_patcher_refuses_a_dangerous_name_itself(tmp_path, monkeypatch):
 def test_the_disk_is_looked_for_where_tart_actually_puts_it(credentials, monkeypatch, tmp_path):
     # tart honours TART_HOME; looking under ~/.tart would miss the disk entirely.
     monkeypatch.setenv("TART_HOME", str(tmp_path / "elsewhere"))
+    # Stubbed, so the failure this asserts on is the sudo check and not the
+    # interpreter probe, which runs first and uses the same faked subprocess.
+    monkeypatch.setattr(bib, "find_guest_python", lambda: "/usr/bin/python3")
     disk = tmp_path / "elsewhere" / "vms" / "browser-vm" / "disk.img"
     disk.parent.mkdir(parents=True)
     disk.touch()
@@ -4067,6 +4073,27 @@ def test_the_launcher_believes_the_guest_over_anything_written_down(credentials,
         lambda argv, **k: subprocess.CompletedProcess(argv, 0, stdout="firefox\n", stderr=""),
     )
     assert bib.installed_browser(bib.VmConfig()).key == "firefox"
+
+
+def test_the_patcher_interpreter_is_proven_to_run_before_sudo_gets_it(monkeypatch, tmp_path):
+    # Nuitka makes bib itself interpreter-free, but the patch step runs as root and
+    # a running process cannot elevate itself, so that one step spawns
+    # `sudo <python> bibpatch.py`. It used to take sys.executable whenever the name
+    # started with "python" — on a Homebrew install that was
+    # /opt/homebrew/bin/python, which does not exist, and it went to sudo as it was:
+    # "sudo: /opt/homebrew/bin/python: command not found" after a 20-minute build.
+    missing = tmp_path / "python"
+    monkeypatch.setattr(bib.sys, "executable", str(missing))
+    monkeypatch.setattr(bib.shutil, "which", lambda name: None)
+    assert bib.find_guest_python() == "/usr/bin/python3"
+
+    # And one that is there but cannot run — /usr/bin/python3 without the Command
+    # Line Tools is exactly this — is not chosen either.
+    monkeypatch.setattr(
+        bib.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "")
+    )
+    with pytest.raises(bib.Failure, match="no working python3"):
+        bib.find_guest_python()
 
 
 def test_ssh_into_the_guest_is_key_only(tmp_path):

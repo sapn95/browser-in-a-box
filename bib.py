@@ -52,7 +52,7 @@ from xml.parsers.expat import ExpatError
 import bibbrowsers
 import bibicon
 
-__version__ = "3.1.0"
+__version__ = "3.1.1"
 
 
 def chosen_browser() -> bibbrowsers.Browser:
@@ -765,8 +765,20 @@ def find_guest_python() -> str:
     no interpreter of its own — it spawns one — so this is checked rather than
     assumed, and named rather than surfacing as a patch that failed for no reason.
     """
-    for candidate in ("/usr/bin/python3", shutil.which("python3")):
-        if not candidate:
+    # /usr/bin/python3 first, and not for taste: this is handed to sudo, and it is
+    # the only candidate root owns. A Homebrew interpreter is writable by whoever
+    # installed it, so preferring one would mean anything that can write there can
+    # run as root. The others are the fallback for a Mac without the Command Line
+    # Tools, where the system one is a stub that exits the moment it is run.
+    #
+    # The running interpreter is tried before PATH, being the one already trusted to
+    # be executing. Under Nuitka it is the compiled binary; on a Homebrew install it
+    # was /opt/homebrew/bin/python, a name that starts with "python" and is not
+    # there, which the caller used to hand to sudo unchecked. Every candidate is
+    # both looked for and run before it is chosen: existing is not working.
+    running = sys.executable if Path(sys.executable).name.startswith("python") else ""
+    for candidate in ("/usr/bin/python3", running, shutil.which("python3")):
+        if not candidate or not Path(candidate).exists():
             continue
         probe = subprocess.run(  # noqa: S603
             [candidate, "-c", ""], check=False, capture_output=True
@@ -1312,15 +1324,10 @@ def _prepare_guest(vm: VmConfig, password: str) -> None:
     if not disk.exists():
         raise Failure(f"the guest's disk is not where it was expected: {disk}")
     patcher = find_patcher()
-    # sys.executable is the compiled binary itself under Nuitka, not an interpreter,
-    # so it cannot be used to run a script. Find a real python instead.
-    python = (
-        sys.executable
-        if Path(sys.executable).name.startswith("python")
-        # /usr/bin/python3 first: this is handed to sudo, so a PATH entry that came
-        # from anywhere else would be running as root.
-        else find_guest_python()
-    )
+    # One place decides, and it proves the interpreter runs before returning it.
+    # This is handed to sudo, so a name that merely looks like an interpreter is not
+    # good enough.
+    python = find_guest_python()
     # Only this step needs root — writing the guest's user database and setting
     # ownership inside it. The download and the boot do not, so sudo is asked for
     # here rather than for the whole command. sudo prompts on its own tty, so it
