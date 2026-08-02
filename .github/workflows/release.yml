@@ -84,14 +84,13 @@ jobs:
           uv run --locked --python "${PYTHON_VERSION}" --group dev \
             python -m nuitka \
             --standalone --remove-output --assume-yes-for-downloads \
-            --include-data-files=bibpatch.py=bibpatch.py \
             --include-data-dir=packer=packer \
             --output-filename=bib --output-dir=dist bib.py
           ./dist/bib.dist/bib --version
-          # bibpatch.py is spawned as a script, never imported, so Nuitka has no
-          # way to know it is needed. Without it 'bib vm create' builds a whole
-          # guest and only then reports the patcher missing.
-          test -f ./dist/bib.dist/bibpatch.py
+          # The patcher is compiled in, not shipped beside the binary: the build
+          # re-executes itself under sudo for the one step that needs root. Proved
+          # by calling the hidden entry, which only answers if the module is there.
+          ./dist/bib.dist/bib __patch --help > /dev/null
           test -f ./dist/bib.dist/packer/browser-vm.pkr.hcl
       - name: package
         run: |
@@ -120,13 +119,13 @@ jobs:
         run: |
           uv run --locked --python "${PYTHON_VERSION}" --group dev python -m nuitka \
             --standalone --remove-output --assume-yes-for-downloads \
-            --include-data-files=bibpatch.py=bibpatch.py \
             --include-data-dir=packer=packer \
             --output-filename=bib --output-dir=dist bib.py
           ./dist/bib.dist/bib --version
-          # This is the build that can actually run 'bib vm', so the two files the
-          # VM path spawns rather than imports have to be verified present.
-          test -f ./dist/bib.dist/bibpatch.py
+          # This is the build that can actually run 'bib vm'. The patcher is
+          # compiled in and answers on the hidden entry; the packer template is the
+          # one thing still spawned from beside the binary.
+          ./dist/bib.dist/bib __patch --help > /dev/null
           test -f ./dist/bib.dist/packer/browser-vm.pkr.hcl
       - name: package
         run: |

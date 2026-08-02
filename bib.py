@@ -52,7 +52,14 @@ from xml.parsers.expat import ExpatError
 import bibbrowsers
 import bibicon
 
-__version__ = "3.1.1"
+# Imported rather than shipped beside the binary as a script. The patch step runs
+# as root and a running process cannot elevate itself, so it is re-executed under
+# sudo — and re-executing this binary needs the patcher to be part of it. As a data
+# file it needed an interpreter to run, which is the one dependency the compiled
+# build exists to avoid.
+import bibpatch
+
+__version__ = "3.2.0"
 
 
 def chosen_browser() -> bibbrowsers.Browser:
@@ -754,6 +761,11 @@ STATE = SECRETS / "state.yaml"
 BOOT_LOG = SECRETS / "tart-boot.log"
 
 
+# Nuitka defines __compiled__ in every module it compiles, and nothing else does.
+# The difference matters exactly once: a compiled build can re-execute itself and a
+# checkout cannot, because there is no binary to re-execute.
+COMPILED = "__compiled__" in globals()
+
 PATCHER = Path(__file__).resolve().parent / "bibpatch.py"
 
 
@@ -1323,11 +1335,15 @@ def _prepare_guest(vm: VmConfig, password: str) -> None:
     disk = tart_home / "vms" / vm.name / "disk.img"
     if not disk.exists():
         raise Failure(f"the guest's disk is not where it was expected: {disk}")
-    patcher = find_patcher()
-    # One place decides, and it proves the interpreter runs before returning it.
-    # This is handed to sudo, so a name that merely looks like an interpreter is not
-    # good enough.
-    python = find_guest_python()
+    # Compiled, this binary re-executes itself: no interpreter is involved at all,
+    # which is the whole point of shipping a compiled build. From a checkout there
+    # is no binary to re-execute, so the patcher runs as the script it is, under an
+    # interpreter that has been proven to run — it is handed to sudo, so a name that
+    # merely looks like one is not good enough.
+    if COMPILED:
+        patch_argv = [sys.executable, PATCH_ENTRY]
+    else:
+        patch_argv = [find_guest_python(), str(find_patcher())]
     # Only this step needs root — writing the guest's user database and setting
     # ownership inside it. The download and the boot do not, so sudo is asked for
     # here rather than for the whole command. sudo prompts on its own tty, so it
@@ -1350,8 +1366,7 @@ def _prepare_guest(vm: VmConfig, password: str) -> None:
             # between would make sudo read the password off this pipe as its own,
             # and the patcher would then find nothing on stdin.
             "-n",
-            python,
-            str(patcher),
+            *patch_argv,
             "--disk",
             str(disk),
             "--user",
@@ -2711,9 +2726,18 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# How the binary calls itself back under sudo. Not a real subcommand: it takes
+# bibpatch's own arguments, not bib's, and belongs in no help text.
+PATCH_ENTRY = "__patch"
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    given = list(argv if argv is not None else sys.argv[1:])
+    if given and given[0] == PATCH_ENTRY:
+        # Already root here: this is the second half of the sudo call below.
+        return bibpatch.main(given[1:])
     parser = build_parser()
-    args = parser.parse_args(argv if argv is not None else sys.argv[1:])
+    args = parser.parse_args(given)
     if not args.variant:
         parser.print_help(sys.stderr)
         return 2

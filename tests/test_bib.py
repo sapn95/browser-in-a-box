@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import bib
 import bibbrowsers
 import bibicon
+import bibpatch
 
 
 @pytest.fixture(autouse=True)
@@ -1370,7 +1371,6 @@ def test_the_release_archive_has_a_top_level_directory():
 # --- the offline guest patcher ------------------------------------------------
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import bibpatch  # noqa: E402
 
 
 def test_the_password_verifier_matches_what_macos_expects():
@@ -4073,6 +4073,45 @@ def test_the_launcher_believes_the_guest_over_anything_written_down(credentials,
         lambda argv, **k: subprocess.CompletedProcess(argv, 0, stdout="firefox\n", stderr=""),
     )
     assert bib.installed_browser(bib.VmConfig()).key == "firefox"
+
+
+def test_a_compiled_build_re_executes_itself_instead_of_spawning_an_interpreter(
+    credentials, monkeypatch, tmp_path
+):
+    # The whole point of shipping a compiled build is not needing an interpreter.
+    # The patch step runs as root and a process cannot elevate itself, so it was
+    # spawning `sudo <python> bibpatch.py` — one dependency, on the one step where
+    # failing costs the entire build. Compiled, it calls itself back instead.
+    _fake_guest_disk(monkeypatch, tmp_path)
+    monkeypatch.setattr(bib, "COMPILED", True)
+    monkeypatch.setattr(bib.sys, "executable", "/opt/homebrew/bin/bib")
+    monkeypatch.setattr(bib, "sudo_is_cached", lambda: True)
+    monkeypatch.setattr(bib, "host_keyboard_layout", lambda: (5, "Swiss German"))
+    monkeypatch.setattr(
+        bib, "find_guest_python", lambda: pytest.fail("no interpreter may be looked for")
+    )
+    seen = {}
+    monkeypatch.setattr(
+        bib.subprocess,
+        "run",
+        lambda cmd, **kw: seen.update(argv=cmd) or subprocess.CompletedProcess(cmd, 0),
+    )
+    bib._prepare_guest(bib.VmConfig(), "pw")
+    argv = seen["argv"]
+    assert argv[:2] == ["/usr/bin/sudo", "-n"]
+    assert argv[2:4] == ["/opt/homebrew/bin/bib", bib.PATCH_ENTRY]
+    assert not any(str(a).endswith("bibpatch.py") for a in argv)
+
+
+def test_the_hidden_entry_runs_the_patcher_and_nothing_else(monkeypatch):
+    # It takes bibpatch's arguments, not bib's, and must not reach bib's parser —
+    # which would reject them and exit 2 under sudo, as root, with no explanation.
+    called = {}
+    monkeypatch.setattr(bibpatch, "main", lambda argv: called.update(argv=argv) or 0)
+    assert bib.main([bib.PATCH_ENTRY, "--disk", "/x", "--user", "admin"]) == 0
+    assert called["argv"] == ["--disk", "/x", "--user", "admin"]
+    # And it is not advertised: a hidden re-entry in the help is an invitation.
+    assert bib.PATCH_ENTRY not in bib.build_parser().format_help()
 
 
 def test_the_patcher_interpreter_is_proven_to_run_before_sudo_gets_it(monkeypatch, tmp_path):
