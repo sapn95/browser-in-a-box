@@ -52,7 +52,7 @@ from xml.parsers.expat import ExpatError
 import bibbrowsers
 import bibicon
 
-__version__ = "3.0.0"
+__version__ = "3.0.1"
 
 
 def chosen_browser() -> bibbrowsers.Browser:
