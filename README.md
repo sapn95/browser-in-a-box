@@ -351,7 +351,9 @@ Overridable: `BIB_PORT`, `BIB_RESOLUTION`, `BIB_WAIT_SECS`, `BIB_ENGINE`,
 `BIB_IMAGE`, `BIB_NAME`, `BIB_VOLUME`, `BIB_PASSWORD`, `BIB_LOG_TAIL`, `BIB_FORCE`,
 and for the VM `BIB_VM_NAME`, `BIB_VM_CPUS`, `BIB_VM_MEMORY`, `BIB_VM_DISK`,
 `BIB_VM_DISPLAY`, `BIB_VM_NET`, `BIB_VM_INTERFACE`, `BIB_VM_USER`, `BIB_VM_SHARE`,
-`BIB_BROWSER` (chrome, firefox or chromium),
+`BIB_BROWSER` (chrome, firefox or chromium; `all` too, but only for the VM),
+`BIB_VM_BROWSER` (what the VM installs, when it should differ from the
+container's — the `vm:` section of the settings file writes this one),
 `BIB_VM_PASSWORD` (the guest account password, `admin` by default; `random` asks
 for a generated one instead, and anything else is taken as your own choice —
 letters and digits only, and no y or z, because the packer path types it as
@@ -394,6 +396,13 @@ browser with its own switch.
 
 Everything above can live in `~/.config/browser-in-a-box/bib.yaml` instead of your
 shell profile. `BIB_CONFIG` points somewhere else.
+
+`bib init` writes it by asking. Seven questions, each with the default in brackets
+and return to keep it, and an existing file is left alone unless you say otherwise:
+
+```bash
+bib init
+```
 
 ```yaml
 box:

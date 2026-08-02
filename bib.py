@@ -52,7 +52,7 @@ from xml.parsers.expat import ExpatError
 import bibbrowsers
 import bibicon
 
-__version__ = "3.0.2"
+__version__ = "3.1.0"
 
 
 def chosen_browser() -> bibbrowsers.Browser:
@@ -710,7 +710,10 @@ class VmConfig:
     ipsw: str = field(default_factory=lambda: _env("BIB_VM_IPSW", "latest"))
     # "window" is tart's own, which cannot go full screen or scale. "vnc" hands the
     # display to macOS Screen Sharing, which does both.
-    browser: str = field(default_factory=lambda: chosen_browser().key)
+    # BIB_VM_BROWSER first, so the settings file's `vm:` section can name it. The
+    # `box:` key was the only way in, which made `vm: browser: all` a line that
+    # looked right and did nothing. BIB_BROWSER still answers for both.
+    browser: str = field(default_factory=lambda: _env("BIB_VM_BROWSER", "") or chosen_browser().key)
     viewer: str = field(default_factory=lambda: _env("BIB_VM_VIEWER", "window"))
     # Sends Cmd+Space, Cmd+Tab and the rest to the guest while its window has focus,
     # instead of to whatever on the host has registered them. Off by default: it is
@@ -2501,6 +2504,73 @@ def cmd_vm_delete(tart: str, vm: VmConfig) -> None:
     print("Deleted.")
 
 
+# What `bib init` asks, in the order it asks. One row per question: the section it
+# lands in, the key, what to call it, the default, and the answers that are allowed
+# where the answer is a choice rather than free text.
+INIT_QUESTIONS = (
+    ("box", "browser", "Browser for the container", "chrome", ("chrome", "firefox", "chromium")),
+    (
+        "vm",
+        "browser",
+        "Browser(s) for the macOS VM ('all' installs every one)",
+        "all",
+        ("chrome", "firefox", "chromium", "all"),
+    ),
+    ("vm", "name", "Name of the VM", "browser-vm", ()),
+    ("vm", "user", "Guest account name", "admin", ()),
+    ("vm", "password", "Guest password ('random' generates one)", "admin", ()),
+    ("vm", "display", "Guest window size", "1280x800", ()),
+    ("vm", "share", "Where the guest's downloads land on this host", "~/Downloads/browser-vm", ()),
+)
+
+
+def ask(question: str, default: str, allowed: tuple[str, ...]) -> str:
+    """One question, with the default taken by pressing return.
+
+    Re-asked rather than rejected: someone answering a list of questions should not
+    lose the six they got right to a typo in the seventh.
+    """
+    suffix = f" [{'/'.join(allowed)}]" if allowed else ""
+    while True:
+        try:
+            answer = input(f"{question}{suffix} ({default}): ").strip()
+        except EOFError:
+            return default
+        if not answer:
+            return default
+        if not allowed or answer in allowed:
+            return answer
+        print(f"  {answer!r} is not one of {', '.join(allowed)}")
+
+
+def cmd_init() -> None:
+    """Write the settings file, by asking rather than by pointing at the README."""
+    path = config_path()
+    if path.exists():
+        print(f"{path} already exists.")
+        if ask("Overwrite it", "no", ("yes", "no")) != "yes":
+            print("Left alone.")
+            return
+    print("Return keeps the value in brackets. Nothing here is permanent —")
+    print(f"it is a text file at {path}, and the environment still wins over it.\n")
+    answers: dict[str, dict[str, str]] = {"box": {}, "vm": {}}
+    for section, key, question, default, allowed in INIT_QUESTIONS:
+        answers[section][key] = ask(question, default, allowed)
+
+    body = [
+        "# Written by 'bib init'. Every key here is also an environment variable:",
+        "# one under `box:` is BIB_<KEY>, one under `vm:` is BIB_VM_<KEY>, and the",
+        "# environment wins over this file.",
+    ]
+    for section in ("box", "vm"):
+        body.append(f"\n{section}:")
+        body.extend(f"  {key}: {value}" for key, value in answers[section].items())
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.write_text("\n".join(body) + "\n")
+    print(f"\nWrote {path}")
+    print("Check it with 'bib box status' or 'bib vm status'.")
+
+
 VM_ACTIONS = {
     "create": cmd_vm_create,
     "up": cmd_vm_up,
@@ -2622,6 +2692,15 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     vm.add_argument("action", choices=sorted(VM_ACTIONS), metavar="action")
+
+    sub.add_parser(
+        "init",
+        help="write the settings file, by asking",
+        description=(
+            "Ask for the handful of settings worth choosing and write them to the "
+            "settings file, so they do not have to live in a shell profile."
+        ),
+    )
     return parser
 
 
@@ -2633,6 +2712,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     try:
+        if args.variant == "init":
+            cmd_init()
+            return 0
         if args.variant == "vm":
             # Once, here, rather than in whichever helper happens to read the
             # secrets first: 'bib vm ssh' reads them through ssh_options() without

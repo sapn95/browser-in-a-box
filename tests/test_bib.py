@@ -520,6 +520,39 @@ def _updater():
     return update_formula
 
 
+def test_init_asks_and_writes_a_file_the_rest_of_bib_reads_back(tmp_path, monkeypatch):
+    # The settings file existed for a month and nobody knew, because finding it
+    # meant reading the README. Asking is the discoverable version of that.
+    path = tmp_path / "bib.yaml"
+    monkeypatch.setenv("BIB_CONFIG", str(path))
+    answers = iter(["firefox", "all", "vm-two", "", "random", "", ""])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    bib.cmd_init()
+
+    bib.CONFIG = bib.load_config()
+    assert bib.Config().browser == "firefox"
+    assert bib.VmConfig().browser == bibbrowsers.ALL, "the vm section names its own browser"
+    assert bib.VmConfig().name == "vm-two"
+    assert bib.VmConfig().user == "admin", "return keeps the default"
+
+
+def test_init_re_asks_rather_than_rejecting_a_typo(monkeypatch):
+    # Seven questions, and losing the six right ones to a typo in the last is not
+    # an acceptable way to answer a questionnaire.
+    answers = iter(["chrom", "chrome"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    assert bib.ask("Browser", "chrome", ("chrome", "firefox")) == "chrome"
+
+
+def test_init_leaves_an_existing_file_alone_unless_told(tmp_path, monkeypatch):
+    path = tmp_path / "bib.yaml"
+    path.write_text("box:\n  port: 7000\n")
+    monkeypatch.setenv("BIB_CONFIG", str(path))
+    monkeypatch.setattr("builtins.input", lambda prompt="": "no")
+    bib.cmd_init()
+    assert path.read_text() == "box:\n  port: 7000\n"
+
+
 def test_the_readme_documents_exactly_the_settings_and_commands_that_exist():
     """The README is the only documentation there is, so a setting it forgets is a
     setting nobody finds, and one it invents is worse.
