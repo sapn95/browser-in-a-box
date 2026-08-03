@@ -166,6 +166,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -183,7 +184,12 @@ jobs:
             "linux-arm64=$(sha linux-arm64)" \
             "linux-x86_64=$(sha linux-x86_64)"
           git diff --stat
-      - name: commit
+      - name: commit, through a pull request like everything else
+        # main takes no direct pushes, this job included. Six releases went out
+        # unreviewed because they did not go through one, so the rule holds for the
+        # workflow too — it opens a PR and merges it rather than being an exception.
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           # The repository owner, not github-actions[bot]. GitHub builds the
           # contributor list out of the commit authors on the default branch, so
@@ -191,9 +197,15 @@ jobs:
           # one-person project, once per release and forever.
           git config user.name "Sebastian Winterberger"
           git config user.email "sapn95@users.noreply.github.com"
+          branch="formula/${GITHUB_REF_NAME}"
+          git checkout -b "$branch"
           git add Formula/bib.rb
           git commit -m "chore: point the Homebrew formula at ${GITHUB_REF_NAME}" || exit 0
-          git push origin main
+          git push origin "$branch"
+          gh pr create --base main --head "$branch" \
+            --title "chore: point the Homebrew formula at ${GITHUB_REF_NAME}" \
+            --body "Checksums of the assets published for ${GITHUB_REF_NAME}, written by scripts/update_formula.py."
+          gh pr merge "$branch" --rebase --delete-branch
       - name: send the same formula to the tap
         # The README says `brew install sapn95/tap/bib`, and that tap is a separate
         # repository. Rewriting the copy here and stopping left sapn95/homebrew-tap
