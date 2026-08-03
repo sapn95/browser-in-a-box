@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "browser-in-a-box"
-version = "3.2.1"
+version = "3.2.2"
 description = "A real, unmanaged browser in a box — a Linux container or a macOS VM."
 readme = "README.md"
 license = "MIT"
