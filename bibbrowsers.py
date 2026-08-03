@@ -157,10 +157,14 @@ BROWSERS = {
         image="docker.io/kasmweb/vivaldi:1.19.0",
         settings="chromium",
         profile="Library/Application Support/Vivaldi/Default",
-        # Both plain `vivaldi`, taken from Kasm's own custom_startup.sh rather than
-        # guessed: the image starts it as vivaldi and pgreps for the same.
+        # Started as `vivaldi`, seen as `vivaldi-bin`. Kasm replaces
+        # /opt/vivaldi/vivaldi with a bash wrapper that calls vivaldi-orig, which is
+        # the package's own launcher script and execs vivaldi-bin — so the only
+        # thing in the process table under its own name is the last of the three.
+        # Kasm's custom_startup.sh pgreps for "vivaldi" without -x and so matches it
+        # by substring; this one is exact, and `vivaldi` matched nothing.
         container_bin="vivaldi",
-        container_process="vivaldi",
+        container_process="vivaldi-bin",
         container_profile=".config/vivaldi",
         palette=(VIVALDI_RED, VIVALDI_DARK, VIVALDI_DARK, VIVALDI_RED),
         mark="shield",
