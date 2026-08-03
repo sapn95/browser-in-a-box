@@ -59,7 +59,7 @@ import bibicon
 # build exists to avoid.
 import bibpatch
 
-__version__ = "3.2.0"
+__version__ = "3.2.1"
 
 
 def chosen_browser() -> bibbrowsers.Browser:
@@ -1216,11 +1216,17 @@ def _create_offline(tart: str, vm: VmConfig) -> None:
     never shown. Deterministic, unlike typing into it."""
     password = guest_password(create=True)
     firstboot = _env_int("BIB_VM_FIRSTBOOT_SECS", "180", 0)  # before anything is built
-    # All three checked before the multi-gigabyte download rather than after it: the
-    # patch step is the only part that needs any of them, and finding that out at
-    # the end costs the entire build.
-    find_patcher()
-    find_guest_python()
+    # Checked before the multi-gigabyte download rather than after it: the patch step
+    # is the only part that needs any of this, and finding out at the end costs the
+    # whole build.
+    #
+    # Only when there is something to check. A compiled build re-executes itself, so
+    # there is no script beside it and no interpreter to look for — and this
+    # pre-flight went on demanding both after the patch step had stopped using them,
+    # which broke `vm create` on every installed build with "the patcher is missing".
+    if not COMPILED:
+        find_patcher()
+        find_guest_python()
     if not sudo_is_cached():
         raise Failure(f"{SUDO_MESSAGE}\nNothing has been downloaded yet.")
     # The credential is held open across the build: sudo forgets it after about
