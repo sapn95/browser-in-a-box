@@ -205,7 +205,10 @@ jobs:
           gh pr create --base main --head "$branch" \
             --title "chore: point the Homebrew formula at ${GITHUB_REF_NAME}" \
             --body "Checksums of the assets published for ${GITHUB_REF_NAME}, written by scripts/update_formula.py."
-          gh pr merge "$branch" --rebase --delete-branch
+          # --auto, not a plain merge: main requires its checks to be green, and
+          # they have not started when the pull request is a second old. GitHub
+          # merges it when they pass, or leaves it open if they do not.
+          gh pr merge "$branch" --auto --rebase --delete-branch
       - name: send the same formula to the tap
         # The README says `brew install sapn95/tap/bib`, and that tap is a separate
         # repository. Rewriting the copy here and stopping left sapn95/homebrew-tap
