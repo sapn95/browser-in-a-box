@@ -44,7 +44,7 @@ that happens to live in a box.
 - A **second browser** that your machine's policy does not manage: password
   manager on, autofill on, settings not greyed out.
 - **Chrome, Firefox, Vivaldi or Chromium** — `BIB_BROWSER` picks it. The VM can also take
-  `all` and install the three side by side.
+  `all` and install all four side by side.
 - Its **profile survives** restarts, and the box surviving is the point: this is
   a browser you keep, not a throwaway one.
 - **Downloads land on your Mac**, in `~/Downloads/<vm name>`.
@@ -91,7 +91,7 @@ flowchart LR
         B[your browser<br/>localhost:6901]
     end
     subgraph ctr [Linux container]
-        K[KasmVNC] --> C[Chrome, Firefox<br/>or Chromium]
+        K[KasmVNC] --> C[Chrome, Firefox,<br/>Vivaldi or Chromium]
     end
     B -- "HTTPS + websocket" --> K
     C -.-> G[(the browser's account:<br/>sync, passwords, passkeys)]
@@ -111,7 +111,7 @@ flowchart LR
         S[[Secure Enclave]]
     end
     subgraph vm [macOS guest, not MDM-enrolled]
-        C[Chrome, Firefox, Chromium<br/>or all three] --> KC[iCloud Keychain]
+        C[Chrome, Firefox, Vivaldi,<br/>Chromium or all four] --> KC[iCloud Keychain]
     end
     V --> vm
     S -- "identity only,<br/>no Touch ID" --> vm
@@ -372,9 +372,10 @@ to pin the guest to one version).
 
 ### Which browser
 
-`BIB_BROWSER` picks it: `chrome` (the default), `firefox`, `chromium` — or `all`,
-which is a **VM-only** mode that installs all three side by side. The container
-cannot do `all`: one image serves one browser, and there is no image with three.
+`BIB_BROWSER` picks it: `chrome` (the default), `firefox`, `vivaldi`, `chromium` —
+or `all`, which is a **VM-only** mode that installs all four side by side. The
+container cannot do `all`: one image serves one browser, and there is no image with
+four.
 Its launcher wears a globe under a net rather than any one browser's mark.
 
 For a single browser it
@@ -563,7 +564,7 @@ into Google Password Manager (Chrome ships no importer).
   that boots the real container and asserts the UI answers 200 (not 401, which would
   mean the login prompt is back), the browser is running, and the desktop really is
   at 1920x1200. On every push that is Chrome; the weekly run and `workflow_dispatch`
-  do all three, because a smoke test that only ever started Chrome is how the box
+  do all of them, because a smoke test that only ever started Chrome is how the box
   came to run Chrome whatever browser was asked for. Every job has a timeout.
 
 ## Licence
