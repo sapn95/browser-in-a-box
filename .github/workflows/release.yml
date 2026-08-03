@@ -167,6 +167,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      actions: write # release the held check runs on the bot's own PR
     steps:
       - uses: actions/checkout@v7
         with:
@@ -208,6 +209,17 @@ jobs:
           # --auto, not a plain merge: main requires its checks to be green, and
           # they have not started when the pull request is a second old. GitHub
           # merges it when they pass, or leaves it open if they do not.
+          # A pull request opened by the bot counts as a first-time contributor,
+          # so the runs it triggers wait in `action_required` for a human to
+          # press a button — and auto-merge queues behind them forever, leaving
+          # the formula on the previous version with nothing red to show for it.
+          # A held run reports status=completed with CONCLUSION=action_required,
+          # so both fields have to be looked at.
+          for run in $(gh run list --branch "$branch" --json databaseId,status,conclusion \
+            -q '.[] | select(.status == "action_required" or .conclusion == "action_required") | .databaseId'); do
+            gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$run/approve" >/dev/null || true
+          done
+
           gh pr merge "$branch" --auto --rebase --delete-branch
       - name: send the same formula to the tap
         # The README says `brew install sapn95/tap/bib`, and that tap is a separate
