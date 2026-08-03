@@ -9,7 +9,7 @@
 class Bib < Formula
   desc "A real, unmanaged browser in a box — a Linux container or a macOS VM"
   homepage "https://github.com/sapn95/browser-in-a-box"
-  version "3.2.0"
+  version "3.2.1"
   license "MIT"
 
   on_macos do
@@ -20,19 +20,19 @@ class Bib < Formula
     end
 
     on_arm do
-      url "https://github.com/sapn95/browser-in-a-box/releases/download/v3.2.0/bib-macos-arm64.tar.gz"
-      sha256 "f874f7bfc36ebdab4c04c1ad51c4ed40c5f17d7c49ec11a0a7d77da04fce016d"
+      url "https://github.com/sapn95/browser-in-a-box/releases/download/v3.2.1/bib-macos-arm64.tar.gz"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/sapn95/browser-in-a-box/releases/download/v3.2.0/bib-linux-arm64.tar.gz"
-      sha256 "02760d4df499080961dbee024bb323cd540a41ca156ae3a980db4b152614ccaa"
+      url "https://github.com/sapn95/browser-in-a-box/releases/download/v3.2.1/bib-linux-arm64.tar.gz"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
     on_intel do
-      url "https://github.com/sapn95/browser-in-a-box/releases/download/v3.2.0/bib-linux-x86_64.tar.gz"
-      sha256 "650a77dc875062d61e25abe51e41d0593aac49bbc2bed51291345af7b1d51aab"
+      url "https://github.com/sapn95/browser-in-a-box/releases/download/v3.2.1/bib-linux-x86_64.tar.gz"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
   end
 

@@ -4075,6 +4075,35 @@ def test_the_launcher_believes_the_guest_over_anything_written_down(credentials,
     assert bib.installed_browser(bib.VmConfig()).key == "firefox"
 
 
+def test_a_compiled_build_looks_for_neither_a_script_nor_an_interpreter(
+    credentials, monkeypatch, tmp_path
+):
+    # The pre-flight runs before the multi-gigabyte download, and it went on
+    # demanding both after the patch step had stopped using either. Every installed
+    # 3.2.0 failed at the first step with "the patcher is missing", which is a
+    # sentence a compiled build should never be able to say.
+    monkeypatch.setattr(bib, "COMPILED", True)
+    monkeypatch.setattr(
+        bib, "find_patcher", lambda: pytest.fail("no script is looked for when compiled")
+    )
+    monkeypatch.setattr(
+        bib, "find_guest_python", lambda: pytest.fail("no interpreter is looked for either")
+    )
+    monkeypatch.setattr(bib, "sudo_is_cached", lambda: False)
+    # Stops at the sudo check, which is the step straight after the pre-flight.
+    with pytest.raises(bib.Failure, match="Nothing has been downloaded yet"):
+        bib._create_offline("tart", bib.VmConfig())
+
+
+def test_a_checkout_still_checks_both_before_downloading(credentials, monkeypatch):
+    # And from a checkout it must still say so early: finding out at the end costs
+    # the whole build.
+    monkeypatch.setattr(bib, "COMPILED", False)
+    monkeypatch.setattr(bib, "find_patcher", lambda: (_ for _ in ()).throw(bib.Failure("missing")))
+    with pytest.raises(bib.Failure, match="missing"):
+        bib._create_offline("tart", bib.VmConfig())
+
+
 def test_a_compiled_build_re_executes_itself_instead_of_spawning_an_interpreter(
     credentials, monkeypatch, tmp_path
 ):
