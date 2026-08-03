@@ -21,18 +21,18 @@ class Bib < Formula
 
     on_arm do
       url "https://github.com/sapn95/browser-in-a-box/releases/download/v3.3.0/bib-macos-arm64.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+      sha256 "f40ba8d52edd7460b2ce12c9aee12ab56cc42e70768ecbe995f2f2fd62e457c9"
     end
   end
 
   on_linux do
     on_arm do
       url "https://github.com/sapn95/browser-in-a-box/releases/download/v3.3.0/bib-linux-arm64.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+      sha256 "6853ec619014196148d1da62f643719c95cb4a2d73d27b8f03e0ff0528d11a63"
     end
     on_intel do
       url "https://github.com/sapn95/browser-in-a-box/releases/download/v3.3.0/bib-linux-x86_64.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+      sha256 "0699477899097a997d82678f976ae3fdd66f1c68bc268c97fe62b13485de1467"
     end
   end
 
