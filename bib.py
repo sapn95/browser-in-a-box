@@ -59,7 +59,7 @@ import bibicon
 # build exists to avoid.
 import bibpatch
 
-__version__ = "3.2.2"
+__version__ = "3.3.0"
 
 
 def chosen_browser() -> bibbrowsers.Browser:
@@ -1669,23 +1669,37 @@ def _fetch_browser(browser: bibbrowsers.Browser) -> str:
     leave half a browser at the path everything else looks at.
     """
     work = '"$BIB_WORK'
-    if browser.archive == "dmg":
-        lines = [
-            f'  curl -fsSL -o {work}/browser.dmg" {shlex.quote(browser.url)}',
-            f'  hdiutil attach -nobrowse -quiet {work}/browser.dmg" -mountpoint {work}/mount"',
-            f'  mkdir -p {work}/staging"',
-            f'  cp -R {work}/mount/{browser.inside}" {work}/staging/"',
-            f'  hdiutil detach -quiet {work}/mount"',
+    # Looked up before there is a URL to fetch at all. Chromium publishes only
+    # per-commit snapshots and Vivaldi only versioned files, so neither has an
+    # address that stays valid. The filter is per browser because the answers are
+    # not alike: a bare build number from one, a Sparkle feed from the other.
+    lookup: list[str] = []
+    url = browser.url
+    if browser.revision_url:
+        fetch = f"curl -fsSL {shlex.quote(browser.revision_url)}"
+        if browser.revision_filter:
+            fetch += f" | {browser.revision_filter}"
+        lookup = [
+            f'  BIB_REVISION="$({fetch})"',
+            f'  [ -n "$BIB_REVISION" ] || {{ echo "no {browser.label} build found" >&2; exit 1; }}',
         ]
-        return "\n".join(lines)
-    # Chromium publishes no release for macOS, only per-commit snapshots, so the
-    # newest build number has to be read before there is a URL to fetch at all.
-    url = browser.url.replace("{revision}", "$BIB_REVISION")
+        url = url.replace("{revision}", "$BIB_REVISION")
+    quoted = f'"{url}"' if browser.revision_url else shlex.quote(url)
+    if browser.archive == "dmg":
+        return "\n".join(
+            [
+                *lookup,
+                f'  curl -fsSL -o {work}/browser.dmg" {quoted}',
+                f'  hdiutil attach -nobrowse -quiet {work}/browser.dmg" -mountpoint {work}/mount"',
+                f'  mkdir -p {work}/staging"',
+                f'  cp -R {work}/mount/{browser.inside}" {work}/staging/"',
+                f'  hdiutil detach -quiet {work}/mount"',
+            ]
+        )
     return "\n".join(
         [
-            f'  BIB_REVISION="$(curl -fsSL {shlex.quote(browser.revision_url)})"',
-            f'  [ -n "$BIB_REVISION" ] || {{ echo "no {browser.label} build found" >&2; exit 1; }}',
-            f'  curl -fsSL -o {work}/browser.zip" "{url}"',
+            *lookup,
+            f'  curl -fsSL -o {work}/browser.zip" {quoted}',
             f'  mkdir -p {work}/staging"',
             f'  ditto -x -k {work}/browser.zip" {work}/unpacked"',
             f'  mv {work}/unpacked/{browser.inside}" {work}/staging/"',
