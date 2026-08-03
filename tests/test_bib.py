@@ -1055,7 +1055,12 @@ exec "$@"
 # install that creates its destination, so `test -x` at the end of the script
 # observes whether the agent was really installed.
 _FAKE_INSTALL = """#!/bin/sh
+# -d means "create this directory", not "write a file here". Without it the shim
+# tried to write over a directory and reported "Is a directory", which reads like
+# the script's fault rather than the fake's.
+for a in "$@"; do case "$a" in -d) MKDIR=1 ;; esac; done
 for dst in "$@"; do :; done
+if [ -n "$MKDIR" ]; then mkdir -p "$dst"; exit 0; fi
 # A destination outside this sandbox is a real system path — /etc/ssh/sshd_config.d
 # and /usr/local/bin. The script is being run to prove it runs, not to be given the
 # machine, so those are recorded as done and nothing is written.
@@ -4217,6 +4222,37 @@ def test_ssh_into_the_guest_is_key_only(tmp_path):
     assert "PasswordAuthentication no" in script
 
 
+def test_a_browser_added_later_lands_on_a_guest_that_already_exists():
+    # The point of `bib vm setup` on an existing VM. A version that adds a browser —
+    # Vivaldi in 3.3.0 — reaches a guest built before it without a rebuild, because
+    # `all` covers the new one and each script decides for itself whether there is
+    # anything to do.
+    assert [b.key for b in bibbrowsers.expand(bibbrowsers.ALL)] == [
+        "chrome",
+        "firefox",
+        "vivaldi",
+        "chromium",
+    ]
+    for browser in bibbrowsers.expand(bibbrowsers.ALL):
+        script = bib.guest_install_script("pw", browser=browser)
+        # On the binary, not the bundle, and per browser: that test is what makes
+        # re-running cheap for the three already there and real for the new one.
+        assert f"if [ -x {shlex.quote(browser.binary)} ]" in script
+        assert f"echo '{browser.label} is already installed'" in script
+
+
+def test_vivaldi_is_downloaded_by_looking_its_version_up_first():
+    # Vivaldi publishes no unversioned download, so the URL cannot be written down.
+    # The version comes out of the Sparkle feed its own updater reads.
+    script = bib.guest_install_script("pw", browser=bibbrowsers.BROWSERS["vivaldi"])
+    assert "appcast.xml" in script
+    assert "sparkle:version" in script
+    assert "$BIB_REVISION" in script
+    assert "Vivaldi.$BIB_REVISION.universal.dmg" in script
+    # A dmg, unlike Chromium, which is the only other one needing a lookup.
+    assert "hdiutil attach" in script
+
+
 def test_the_clipboard_agent_is_installed_before_the_browser():
     # Paste is what carries the generated password and the Apple Account details
     # into the guest, and the browser downloads are hundreds of megabytes — three
@@ -4872,11 +4908,16 @@ def test_every_browser_installs_from_a_script_that_actually_runs(key, tmp_path):
         tmp_path,
         share_exists=True,
         browser=browser,
-        # Chromium looks its build number up first, and ditto unpacks the zip.
+        # Chromium and Vivaldi look a version up first, and each reads a different
+        # kind of answer: a bare build number, and a Sparkle feed. The fake gives
+        # whichever the URL asks for, so the real filter has something to parse.
         override_bin={
             "curl": '#!/bin/sh\nfor a in "$@"; do prev="$last"; last="$a"; done\n'
-            'case "$prev" in -o) : ;; esac\n'
-            "echo 1234567\n",
+            'case "$last" in\n'
+            "  *appcast.xml) printf '%s\\n' "
+            "'<item><sparkle:version>9.9.9.9</sparkle:version></item>' ;;\n"
+            "  *) echo 1234567 ;;\n"
+            "esac\n",
             # Real enough that the move after it is a real move: a ditto that only
             # exits 0 would let a broken unpack-and-install sequence pass.
             "ditto": '#!/bin/sh\nfor a in "$@"; do dest="$a"; done\n'
@@ -5000,7 +5041,12 @@ def test_every_browser_names_a_mark_that_exists():
 
 def test_the_all_mode_installs_every_browser_and_the_container_refuses_it():
     """One image serves one browser, so 'all' can only mean the VM."""
-    assert [b.key for b in bibbrowsers.expand(bibbrowsers.ALL)] == ["chrome", "firefox", "chromium"]
+    assert [b.key for b in bibbrowsers.expand(bibbrowsers.ALL)] == [
+        "chrome",
+        "firefox",
+        "vivaldi",
+        "chromium",
+    ]
     assert bibbrowsers.BROWSERS[bibbrowsers.ALL].mark == "globe"
 
 
@@ -5021,7 +5067,9 @@ def test_the_vm_installs_one_browser_per_pass(monkeypatch, tmp_path):
     monkeypatch.setattr(bib, "guest_ssh", lambda vm, ip, script=None: seen.append(script) or 0)
     monkeypatch.setattr(bib, "host_time_zone", lambda: ("Europe/Zurich", "Zurich"))
     assert bib.install_browsers(bib.VmConfig(), "10.0.0.5", "pw") == 0
-    assert len(seen) == 3
+    # One per browser, counted from the table rather than written down, so adding a
+    # fourth is a row and not an edit here.
+    assert len(seen) == len(bibbrowsers.expand(bibbrowsers.ALL))
     for browser in bibbrowsers.expand(bibbrowsers.ALL):
         assert any(browser.app in script for script in seen), browser.key
 

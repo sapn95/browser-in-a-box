@@ -181,7 +181,45 @@ def _globe(cx: float, cy: float, r: float, palette: tuple) -> list[str]:
     return ops
 
 
-MARKS = {"wheel": _wheel, "flame": _flame, "globe": _globe}
+def _shield(cx: float, cy: float, r: float, palette: tuple) -> list[str]:
+    """Vivaldi's: a filled circle with a white V cut across it.
+
+    Not a wheel and not a flame. The V is drawn as a stroke of two straight
+    segments given width by drawing it as a polygon, because there is no stroke
+    helper here and a hairline would vanish at Dock size.
+    """
+    body, *_ = palette or ((0.937, 0.204, 0.239),)
+    white = (1.0, 1.0, 1.0)
+    arm = r * 0.52
+    top = cy + arm * 0.72
+    bottom = cy - arm * 0.86
+    thick = r * 0.20
+    return [
+        *_circle(cx, cy, r, body),
+        # Left arm of the V, from the top left down to the point.
+        *_polygon(
+            [
+                (cx - arm, top),
+                (cx - arm + thick, top),
+                (cx + thick * 0.5, bottom),
+                (cx - thick * 0.5, bottom),
+            ],
+            white,
+        ),
+        # Right arm, mirrored, meeting it at the point.
+        *_polygon(
+            [
+                (cx + arm, top),
+                (cx + arm - thick, top),
+                (cx - thick * 0.5, bottom),
+                (cx + thick * 0.5, bottom),
+            ],
+            white,
+        ),
+    ]
+
+
+MARKS = {"wheel": _wheel, "flame": _flame, "globe": _globe, "shield": _shield}
 
 
 def _artwork(palette: tuple = (), mark: str = "wheel") -> list[str]:

@@ -1,7 +1,8 @@
 # browser-in-a-box
 
 A real, unmanaged browser in a box, so the one you use for your own things is not
-the one your machine's policy manages. Chrome, Firefox or Chromium. One command up,
+the one your machine's policy manages. Chrome, Firefox, Vivaldi or Chromium. One
+command up,
 one command down, and the profile survives restarts.
 
 ```bash
@@ -42,7 +43,7 @@ that happens to live in a box.
 
 - A **second browser** that your machine's policy does not manage: password
   manager on, autofill on, settings not greyed out.
-- **Chrome, Firefox or Chromium** — `BIB_BROWSER` picks it. The VM can also take
+- **Chrome, Firefox, Vivaldi or Chromium** — `BIB_BROWSER` picks it. The VM can also take
   `all` and install the three side by side.
 - Its **profile survives** restarts, and the box surviving is the point: this is
   a browser you keep, not a throwaway one.
@@ -253,7 +254,7 @@ The macOS VM variant (Apple silicon):
 | `bib vm create`   | build it, start it, install the browser — one command |
 | `bib vm prepare`  | redo just the offline preparation of a built VM       |
 | `bib vm up`       | start it again — a window opens, shell blocks         |
-| `bib vm setup`    | redo just the browser install, over SSH               |
+| `bib vm setup`    | install browsers into a guest that already exists     |
 | `bib vm open`     | start it if stopped, then show its screen             |
 | `bib vm icon`     | write a clickable app into `~/Applications`           |
 | `bib vm password` | print the guest account password                      |
@@ -351,7 +352,7 @@ Overridable: `BIB_PORT`, `BIB_RESOLUTION`, `BIB_WAIT_SECS`, `BIB_ENGINE`,
 `BIB_IMAGE`, `BIB_NAME`, `BIB_VOLUME`, `BIB_PASSWORD`, `BIB_LOG_TAIL`, `BIB_FORCE`,
 and for the VM `BIB_VM_NAME`, `BIB_VM_CPUS`, `BIB_VM_MEMORY`, `BIB_VM_DISK`,
 `BIB_VM_DISPLAY`, `BIB_VM_NET`, `BIB_VM_INTERFACE`, `BIB_VM_USER`, `BIB_VM_SHARE`,
-`BIB_BROWSER` (chrome, firefox or chromium; `all` too, but only for the VM),
+`BIB_BROWSER` (chrome, firefox, vivaldi or chromium; `all` too, but only for the VM),
 `BIB_VM_BROWSER` (what the VM installs, when it should differ from the
 container's — the `vm:` section of the settings file writes this one),
 `BIB_VM_PASSWORD` (the guest account password, `admin` by default; `random` asks
@@ -391,6 +392,19 @@ Chromium is the odd one: it has no release for macOS, only per-commit snapshots,
 so the build number is looked up before the download. Firefox keeps its settings
 in a `user.js` and a `profiles.ini` rather than JSON, and is made the default
 browser with its own switch.
+
+### A browser added after the guest was built
+
+`bib vm setup` installs into a guest that already exists, and it is idempotent per
+browser: anything already there is left alone and says so. So when a version adds a
+browser — Vivaldi in 3.3.0 — an existing VM gets it without being rebuilt:
+
+```bash
+BIB_VM_BROWSER=all bib vm setup
+```
+
+Only the new one is downloaded. The Dock row, the first-run settings and the
+launcher's name all follow from what the guest holds afterwards.
 
 ### The settings file
 

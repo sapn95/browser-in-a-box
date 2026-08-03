@@ -30,8 +30,12 @@ class Browser:
     # "dmg" mounts and copies; "zip" unpacks. Chromium ships no installer at all.
     archive: str
     url: str
-    # Chromium's download URL carries a build number that has to be looked up first.
+    # Some downloads carry a version in the URL that has to be looked up first:
+    # Chromium publishes only per-commit snapshots, Vivaldi only versioned files.
     revision_url: str = ""
+    # A shell pipeline that turns what revision_url returns into that version.
+    # Empty when the response is already the bare value, as Chromium's is.
+    revision_filter: str = ""
     # Where the .app sits inside the mounted image or the unpacked archive.
     inside: str = ""
     # The container variant serves a different Kasm image per browser.
@@ -86,6 +90,8 @@ FIREFOX_RED = (1.000, 0.286, 0.208)
 FIREFOX_PURPLE = (0.608, 0.180, 0.788)
 # The globe at the centre of Mozilla's mark, which is what stops it reading as Chrome.
 FIREFOX_GLOBE = (0.121, 0.157, 0.400)
+VIVALDI_RED = (0.937, 0.204, 0.239)
+VIVALDI_DARK = (0.694, 0.106, 0.137)
 CHROMIUM_BLUE = (0.318, 0.510, 0.855)
 CHROMIUM_GREY = (0.545, 0.588, 0.635)
 CHROMIUM_DARK = (0.353, 0.404, 0.463)
@@ -131,6 +137,33 @@ BROWSERS = {
         container_profile=".mozilla/firefox",
         palette=(FIREFOX_ORANGE, FIREFOX_PURPLE, FIREFOX_RED, FIREFOX_GLOBE),
         mark="flame",
+    ),
+    "vivaldi": Browser(
+        key="vivaldi",
+        label="Vivaldi",
+        sign_in="sign Vivaldi into a Vivaldi account, which also gives you its sync",
+        app_name="Vivaldi.app",
+        executable="Vivaldi",
+        archive="dmg",
+        # Vivaldi publishes no unversioned download, so the current version has to
+        # be read out of the Sparkle feed its own updater uses before there is a URL.
+        url="https://downloads.vivaldi.com/stable/Vivaldi.{revision}.universal.dmg",
+        revision_url="https://update.vivaldi.com/update/1.0/public/mac/appcast.xml",
+        revision_filter=(
+            r"sed -n 's|.*<sparkle:version>\([^<]*\)</sparkle:version>.*|\1|p' | head -1"
+        ),
+        inside="Vivaldi.app",
+        # renovate: datasource=docker depName=kasmweb/vivaldi
+        image="docker.io/kasmweb/vivaldi:1.19.0",
+        settings="chromium",
+        profile="Library/Application Support/Vivaldi/Default",
+        # Both plain `vivaldi`, taken from Kasm's own custom_startup.sh rather than
+        # guessed: the image starts it as vivaldi and pgreps for the same.
+        container_bin="vivaldi",
+        container_process="vivaldi",
+        container_profile=".config/vivaldi",
+        palette=(VIVALDI_RED, VIVALDI_DARK, VIVALDI_DARK, VIVALDI_RED),
+        mark="shield",
     ),
     "chromium": Browser(
         key="chromium",
