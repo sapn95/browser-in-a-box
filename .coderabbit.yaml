@@ -1,7 +1,12 @@
-# CodeRabbit reviews pull requests, and only those whose base branch is listed
-# here. Everything pushed straight to main was therefore never reviewed by
-# anything — which is the reason work goes through a branch and a pull request in
-# this repository, including version bumps and release commits.
+# CodeRabbit reviews pull requests and nothing else, so anything pushed straight to
+# main was never reviewed by anything. Six releases went out that way in one night.
+# What stops that happening again is branch protection on main, which requires a
+# pull request; this file only decides what CodeRabbit does with the ones it sees.
+#
+# base_branches ADDS to the default branch rather than replacing it, so main is
+# covered whether or not it is named. It is named anyway, because the list read as
+# a restriction until CodeRabbit itself said otherwise on the pull request that
+# introduced this file.
 language: en
 reviews:
   profile: chill
