@@ -4241,6 +4241,23 @@ def test_a_browser_added_later_lands_on_a_guest_that_already_exists():
         assert f"echo '{browser.label} is already installed'" in script
 
 
+def test_the_smoke_matrix_covers_every_browser_there_is():
+    """A row added to the table must reach CI, or nothing ever starts it.
+
+    Written out in YAML rather than derived, because a workflow cannot import the
+    table — so this is what keeps the two in step. Vivaldi was added and the matrix
+    was not, and the full run went green without ever starting it.
+    """
+    import json
+
+    workflow = (Path(bib.__file__).resolve().parent / ".github/workflows/ci.yml").read_text()
+    listed = re.search(r"(\[\"chrome\"[^\]]*\])", workflow)
+    assert listed, "the smoke matrix's full browser list is not where this expects it"
+    assert set(json.loads(listed.group(1))) == {
+        browser.key for browser in bibbrowsers.expand(bibbrowsers.ALL)
+    }
+
+
 def test_vivaldi_is_downloaded_by_looking_its_version_up_first():
     # Vivaldi publishes no unversioned download, so the URL cannot be written down.
     # The version comes out of the Sparkle feed its own updater reads.

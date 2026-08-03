@@ -132,16 +132,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Chrome on every push; all three on the weekly run and on demand. Each one
-        # pulls ~3GB and boots an emulated desktop, so running the set every time
-        # would triple the slowest job in this workflow for a regression that is
+        # Chrome on every push; every browser on the weekly run and on demand. Each
+        # one pulls ~3GB and boots an emulated desktop, so running the set every time
+        # would multiply the slowest job in this workflow for a regression that is
         # nearly always shared between them.
-        # Firefox and Chromium being here at all is the point: the box ran Chrome's
-        # binary, Chrome's profile and Chrome's process name whatever browser was
-        # asked for, and a smoke test that only ever started Chrome could not see it.
+        # The others being here at all is the point: the box ran Chrome's binary,
+        # Chrome's profile and Chrome's process name whatever browser was asked for,
+        # and a smoke test that only ever started Chrome could not see it.
+        # A workflow cannot import the browser table, so this list is written out —
+        # and a test asserts the two match, because Vivaldi was added to the table
+        # and not to here, and the full run went green without ever starting it.
         browser: >-
           ${{ fromJSON((github.event_name == 'schedule' || github.event_name ==
-          'workflow_dispatch') && '["chrome","firefox","chromium"]' ||
+          'workflow_dispatch') && '["chrome","firefox","vivaldi","chromium"]' ||
           '["chrome"]') }}
     env:
       BIB_BROWSER: ${{ matrix.browser }}
