@@ -59,7 +59,7 @@ import bibicon
 # build exists to avoid.
 import bibpatch
 
-__version__ = "3.2.1"
+__version__ = "3.2.2"
 
 
 def chosen_browser() -> bibbrowsers.Browser:
@@ -804,6 +804,30 @@ def find_guest_python() -> str:
     )
 
 
+def own_binary() -> Path:
+    """This program's own executable, for re-running it under sudo.
+
+    argv[0] and not sys.executable. Nuitka sets sys.executable to `python` beside
+    the binary, a file that is not there: invoked through Homebrew's
+    /opt/homebrew/bin/bib that came out as /opt/homebrew/bin/python, which went
+    straight to sudo and cost two twenty-minute builds before anyone measured it
+    instead of assuming.
+
+    Resolved, so a symlinked launcher points at the real binary, and checked, so a
+    path that cannot be executed is said here rather than by sudo after the build.
+    """
+    argv0 = sys.argv[0]
+    found = Path(argv0) if os.sep in argv0 else Path(shutil.which(argv0) or argv0)
+    binary = found.resolve()
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        raise Failure(
+            f"cannot re-run this program to patch the guest: {binary} is not "
+            "executable. This is a compiled build, which patches the disk by "
+            "calling itself under sudo."
+        )
+    return binary
+
+
 def find_patcher() -> Path:
     """The offline path spawns bibpatch.py rather than importing it, so nothing
     but this check knows whether it is there."""
@@ -1347,7 +1371,7 @@ def _prepare_guest(vm: VmConfig, password: str) -> None:
     # interpreter that has been proven to run — it is handed to sudo, so a name that
     # merely looks like one is not good enough.
     if COMPILED:
-        patch_argv = [sys.executable, PATCH_ENTRY]
+        patch_argv = [str(own_binary()), PATCH_ENTRY]
     else:
         patch_argv = [find_guest_python(), str(find_patcher())]
     # Only this step needs root — writing the guest's user database and setting

@@ -4113,7 +4113,15 @@ def test_a_compiled_build_re_executes_itself_instead_of_spawning_an_interpreter(
     # failing costs the entire build. Compiled, it calls itself back instead.
     _fake_guest_disk(monkeypatch, tmp_path)
     monkeypatch.setattr(bib, "COMPILED", True)
-    monkeypatch.setattr(bib.sys, "executable", "/opt/homebrew/bin/bib")
+    # argv[0], because sys.executable is not the binary: Nuitka sets it to `python`
+    # beside the binary, so invoking /opt/homebrew/bin/bib produced
+    # /opt/homebrew/bin/python — a file that does not exist, handed to sudo, twice,
+    # after twenty-minute builds.
+    binary = tmp_path / "bib"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    monkeypatch.setattr(bib.sys, "executable", str(tmp_path / "python"))
+    monkeypatch.setattr(bib.sys, "argv", [str(binary), "vm", "prepare"])
     monkeypatch.setattr(bib, "sudo_is_cached", lambda: True)
     monkeypatch.setattr(bib, "host_keyboard_layout", lambda: (5, "Swiss German"))
     monkeypatch.setattr(
@@ -4128,8 +4136,34 @@ def test_a_compiled_build_re_executes_itself_instead_of_spawning_an_interpreter(
     bib._prepare_guest(bib.VmConfig(), "pw")
     argv = seen["argv"]
     assert argv[:2] == ["/usr/bin/sudo", "-n"]
-    assert argv[2:4] == ["/opt/homebrew/bin/bib", bib.PATCH_ENTRY]
+    assert argv[2:4] == [str(binary.resolve()), bib.PATCH_ENTRY]
+    assert not any("python" in str(a) for a in argv), "no interpreter may appear"
     assert not any(str(a).endswith("bibpatch.py") for a in argv)
+
+
+def test_the_binary_is_found_through_a_symlink_and_checked(monkeypatch, tmp_path):
+    # Homebrew installs bin/bib as a symlink into the Cellar, which is how it is
+    # invoked; the target is what must be re-run. And a path that cannot be
+    # executed is said here rather than by sudo at the end of a long build.
+    real = tmp_path / "cellar" / "bib"
+    real.parent.mkdir()
+    real.write_text("#!/bin/sh\nexit 0\n")
+    real.chmod(0o755)
+    link = tmp_path / "bin" / "bib"
+    link.parent.mkdir()
+    link.symlink_to(real)
+    monkeypatch.setattr(bib.sys, "argv", [str(link)])
+    assert bib.own_binary() == real.resolve()
+
+    # Bare name on PATH, the way a shell hands it over.
+    monkeypatch.setattr(bib.sys, "argv", ["bib"])
+    monkeypatch.setattr(bib.shutil, "which", lambda name: str(link))
+    assert bib.own_binary() == real.resolve()
+
+    monkeypatch.setattr(bib.sys, "argv", [str(tmp_path / "gone")])
+    monkeypatch.setattr(bib.shutil, "which", lambda name: None)
+    with pytest.raises(bib.Failure, match="is not executable"):
+        bib.own_binary()
 
 
 def test_the_hidden_entry_runs_the_patcher_and_nothing_else(monkeypatch):
