@@ -612,9 +612,16 @@ def test_the_formula_description_passes_the_rules_brew_style_enforces():
     assert not description.lower().startswith("bib"), (
         f"desc repeats the formula name: {description}"
     )
-    assert not description.endswith("."), f"desc ends with a full stop: {description}"
-    # Homebrew's limit is on `desc "..."` with its indentation, not on the text.
-    assert len(line) <= 80, f"desc line is {len(line)} characters: {line}"
+    # "etc." is the one ending Homebrew lets through, and it is the only way to
+    # write that word.
+    assert not description.endswith(".") or description.endswith("etc."), (
+        f"desc ends with a full stop: {description}"
+    )
+    # The limit is on "name: desc", not on the source line: measuring the line
+    # counts the indentation, the keyword and two quotes, and would report a
+    # length nobody can act on.
+    labelled = f"bib: {description}"
+    assert len(labelled) <= 80, f"'{labelled}' is {len(labelled)} characters"
 
 
 ZERO = "0" * 64
