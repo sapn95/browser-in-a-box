@@ -595,6 +595,35 @@ def test_the_formula_points_at_the_version_this_code_is(monkeypatch):
         assert expected in formula, f"{arch} url does not match the version"
 
 
+def test_the_formula_description_passes_the_rules_brew_style_enforces():
+    # The description is the tap's now, not just this repository's. The tap used
+    # to rewrite only the version and the checksums, so a formula body here
+    # reached nobody; once it started taking the whole file, `brew style` on the
+    # tap began reporting this repository's description. It said "A real,
+    # unmanaged browser in a box", and Homebrew does not allow an article there.
+    #
+    # Checked here rather than by running `brew style`, which would mean putting
+    # Homebrew on a Linux runner to lint one string.
+    line = next(row for row in _formula().splitlines() if row.strip().startswith("desc "))
+    description = line.split('"', 1)[1].rsplit('"', 1)[0]
+
+    first = description.split(" ", 1)[0].lower()
+    assert first not in {"a", "an", "the"}, f"desc starts with an article: {description}"
+    assert not description.lower().startswith("bib"), (
+        f"desc repeats the formula name: {description}"
+    )
+    # "etc." is the one ending Homebrew lets through, and it is the only way to
+    # write that word.
+    assert not description.endswith(".") or description.endswith("etc."), (
+        f"desc ends with a full stop: {description}"
+    )
+    # The limit is on "name: desc", not on the source line: measuring the line
+    # counts the indentation, the keyword and two quotes, and would report a
+    # length nobody can act on.
+    labelled = f"bib: {description}"
+    assert len(labelled) <= 80, f"'{labelled}' is {len(labelled)} characters"
+
+
 ZERO = "0" * 64
 ONE = "1" * 64
 
