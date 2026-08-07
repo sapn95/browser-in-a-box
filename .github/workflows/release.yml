@@ -221,31 +221,10 @@ jobs:
           done
 
           gh pr merge "$branch" --auto --rebase --delete-branch
-      - name: send the same formula to the tap
-        # The README says `brew install sapn95/tap/bib`, and that tap is a separate
-        # repository. Rewriting the copy here and stopping left sapn95/homebrew-tap
-        # on 1.4.0 while two major releases went out, still pointing at a repository
-        # name that no longer exists — so `brew upgrade` never moved anyone.
-        #
-        # Needs a token with contents:write on the tap. Without one this is a no-op
-        # that says so, rather than a red release for a formula copy.
-        env:
-          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
-        run: |
-          if [ -z "${TAP_TOKEN}" ]; then
-            echo "::warning::TAP_TOKEN is not set, so sapn95/homebrew-tap still" \
-                 "points at whatever it pointed at before this release."
-            exit 0
-          fi
-          git clone --depth 1 \
-            "https://x-access-token:${TAP_TOKEN}@github.com/sapn95/homebrew-tap.git" tap
-          cp Formula/bib.rb tap/Formula/bib.rb
-          # The old name published from this same repository. Left behind it would
-          # keep serving 1.4.0 to anyone who typed the old command.
-          rm -f tap/Formula/cib.rb
-          cd tap
-          git config user.name "Sebastian Winterberger"
-          git config user.email "sapn95@users.noreply.github.com"
-          git add -A Formula
-          git commit -m "bib ${GITHUB_REF_NAME#v}" || exit 0
-          git push origin HEAD
+
+          # The tap is not pushed to from here any more. sapn95/homebrew-tap
+          # reads Formula/bib.rb out of this release's own source tarball and
+          # rewrites only the url and the checksums, so the copy above is the
+          # one that ships. What was here needed a personal access token with
+          # write on another repository, it was never set, and every release
+          # since has warned about it and done nothing.
