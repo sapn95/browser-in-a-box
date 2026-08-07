@@ -59,7 +59,7 @@ import bibicon
 # build exists to avoid.
 import bibpatch
 
-__version__ = "3.3.0"
+__version__ = "3.3.1"
 
 
 def chosen_browser() -> bibbrowsers.Browser:
