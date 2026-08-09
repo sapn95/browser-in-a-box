@@ -1,0 +1,61 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits"
+  ],
+  "packageRules": [
+    {
+      "description": "Auto-merge low-risk updates (digests, pins, minor, patch)",
+      "matchUpdateTypes": [
+        "digest",
+        "pin",
+        "minor",
+        "patch"
+      ],
+      "automerge": true
+    }
+  ],
+  "customManagers": [
+    {
+      "description": "Keep the pinned kasmweb tags in bibbrowsers.py up to date. One row per browser now: the single DEFAULT_IMAGE this used to match was removed by the per-browser split, and the manager kept matching nothing.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^bibbrowsers\\.py$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\n\\s*image=\"docker\\.io/(?:[^\":]+):(?<currentValue>[^\"]+)\""
+      ]
+    },
+    {
+      "description": "Keep the pinned tart-guest-agent version in bib.py up to date. It is the only pin: the packer template no longer installs the agent.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^bib\\.py$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\nGUEST_AGENT_VERSION = \"(?<currentValue>[^\"]+)\""
+      ],
+      "extractVersionTemplate": "^v?(?<version>.*)$"
+    },
+    {
+      "description": "Keep the pinned packer-plugin-tart version up to date. Packer has no built-in Renovate manager, and an open version bound has no lock file behind it.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^packer/browser-vm\\.pkr\\.hcl$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\n\\s*version\\s*=\\s*\"(?<currentValue>[^\"]+)\""
+      ],
+      "extractVersionTemplate": "^v?(?<version>.*)$"
+    }
+  ],
+  "github-actions": {
+    "enabled": true
+  },
+  "lockFileMaintenance": {
+    "enabled": true,
+    "automerge": true
+  }
+}
