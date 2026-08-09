@@ -1,7 +1,11 @@
 extends: default
 
 rules:
-  line-length: disable
+  # Workflow YAML has long lines by nature, and wrapping a `run:` command to
+  # satisfy a linter is how a working command becomes a broken one.
+  line-length:
+    max: 120
+    level: warning
   document-start: disable
   truthy:
     check-keys: false
