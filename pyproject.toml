@@ -22,7 +22,7 @@ bib = "bib:main"
 [dependency-groups]
 # patchelf is here rather than passed to `uv run --with` in CI: it is a build
 # input like the others, and only the lock file records which one was used.
-dev = ["pytest>=8", "pytest-cov>=6", "ruff>=0.14", "nuitka>=2.5", "patchelf>=0.17"]
+dev = ["pytest>=8", "pytest-cov>=6", "ruff>=0.16.1", "nuitka>=2.5", "patchelf>=0.17"]
 
 [tool.hatch.build.targets.wheel]
 # packer/ too: bib tells the user BIB_VM_PACKER=1 is available, and a wheel that
