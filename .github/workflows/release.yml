@@ -62,7 +62,7 @@ jobs:
           dnf install -y --setopt=install_weak_deps=0
           git tar gzip gcc gcc-c++
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v9.0.0
+      - uses: astral-sh/setup-uv@v10.0.1
       - name: static libatomic
         # uv's standalone CPython carries -l:libatomic.a in its link flags. Install
         # the real package if this arch has it; x86_64 needs it and arm64 links
@@ -114,7 +114,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v9.0.0
+      - uses: astral-sh/setup-uv@v10.0.1
       - name: compile with Nuitka
         run: |
           uv run --locked --python "${PYTHON_VERSION}" --group dev python -m nuitka \
